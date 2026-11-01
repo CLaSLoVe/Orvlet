@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+# Bundled third-party data should not dominate code reviews or language statistics.
+Orvlet/Resources/adblock-rules.json linguist-vendored

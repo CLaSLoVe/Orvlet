@@ -1,0 +1,20 @@
+name: Repository checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source-and-publication:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check source and publication hygiene
+        run: python3 scripts/repository_check.py
+      - name: Test maintenance scripts and integration schema
+        run: python3 -m unittest discover -s Tests -p 'test_*.py'

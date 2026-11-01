@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Orvlet Bridge",
+  "version": "0.1.0",
+  "description": "Connect one browser tab to your Orvlet desktop companion.",
+  "permissions": ["activeTab", "scripting", "storage", "alarms"],
+  "host_permissions": ["http://127.0.0.1:19243/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "action": {"default_popup": "popup.html", "default_title": "Connect Orvlet"},
+  "background": {"service_worker": "worker.js"}
+}

@@ -1,0 +1,49 @@
+# Local builds, packaged apps, and development snapshots
+.build*/
+DerivedData/
+build/
+dist/
+.backups/
+.local/
+*.app/
+*.dSYM/
+*.xcarchive/
+*.xcresult/
+*.log
+
+# User-specific Xcode and editor state
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+.DS_Store
+.idea/
+.vscode/
+
+# Credentials, pairing data, signing material, and local configuration
+.env
+.env.*
+!.env.example
+*.local.xcconfig
+*.p12
+*.p8
+*.pem
+*.key
+*.mobileprovision
+*.provisionprofile
+bridge.json
+credentials*.json
+secrets*.json
+.codex/
+.agents/
+.aws/
+
+# Generated test output: keep fixture source, not captured user/page data
+Tests/*.json
+Tests/*.jsonl
+Tests/reports/
+Tests/screenshots/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
