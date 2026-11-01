@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc">
+ <title id="title">Orvlet generative UI</title><desc id="desc">Three requests become a music player, a calendar confirmation and an editable bill calculator.</desc>
+ <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#f9f8fd"/><stop offset="1" stop-color="#ebe8f5"/></linearGradient><linearGradient id="glass" x2="1" y2="1"><stop stop-color="#fefeff"/><stop offset="1" stop-color="#f1eef9"/></linearGradient></defs>
+ <rect width="1200" height="700" rx="28" fill="url(#bg)"/>
+ <g font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', sans-serif" fill="#302e3f">
+<text x="48" y="56" font-size="22" fill="#786a9d" font-weight="600" text-anchor="start">orvlet</text>
+<text x="1152" y="55" font-size="13" fill="#82798e" font-weight="500" text-anchor="end">GENERATIVE UI</text>
+<text x="48" y="111" font-size="34" fill="#302e3f" font-weight="600" text-anchor="start">A different task. A different interface.</text>
+<text x="48" y="146" font-size="17" fill="#777386" font-weight="400" text-anchor="start">Play some music, save an event, or make a small tool.</text>
+<rect x="40" y="186" width="340" height="56" rx="16" fill="#ffffff" stroke="#ded8eb"/>
+<text x="60" y="221" font-size="16" fill="#302e3f" font-weight="400" text-anchor="start">“Play some quiet music.”</text>
+<path d="M210 253 V277 M205 272 L210 277 L215 272" fill="none" stroke="#aaa0bf" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="430" y="186" width="340" height="56" rx="16" fill="#ffffff" stroke="#ded8eb"/>
+<text x="450" y="221" font-size="16" fill="#302e3f" font-weight="400" text-anchor="start">“Add this lecture to my calendar.”</text>
+<path d="M600 253 V277 M595 272 L600 277 L605 272" fill="none" stroke="#aaa0bf" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="820" y="186" width="340" height="56" rx="16" fill="#ffffff" stroke="#ded8eb"/>
+<text x="840" y="221" font-size="16" fill="#302e3f" font-weight="400" text-anchor="start">“Split 120 between three people.”</text>
+<path d="M990 253 V277 M985 272 L990 277 L995 272" fill="none" stroke="#aaa0bf" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="60" y="297" width="300" height="206" rx="22" fill="url(#glass)" stroke="#e2deed"/>
+<text x="80" y="326" font-size="14" fill="#877ca8" font-weight="600" text-anchor="start">orvlet</text>
+<text x="337" y="326" font-size="21" fill="#877ca8" font-weight="400" text-anchor="middle">+</text>
+<path d="M76 341 H344" fill="none" stroke="#e9e5f1" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="82" y="372" font-size="12" fill="#82798e" font-weight="500" text-anchor="start">NOW PLAYING</text>
+<rect x="82" y="389" width="40" height="40" rx="12" fill="#e9e3f5" stroke="none"/>
+<path d="M98 416 V399 L110 396 V412 M98 401 L110 398" fill="none" stroke="#7b729c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<ellipse cx="94" cy="417" rx="4" ry="3" fill="#7b729c"/><ellipse cx="106" cy="413" rx="4" ry="3" fill="#7b729c"/>
+<text x="135" y="405" font-size="20" fill="#302e3f" font-weight="600" text-anchor="start">Quiet piano</text>
+<text x="135" y="427" font-size="12" fill="#82798e" font-weight="400" text-anchor="start">Background listening</text>
+<rect x="82" y="447" width="256" height="37" rx="11" fill="#ece6f6" stroke="none"/>
+<rect x="202" y="459" width="4" height="13" rx="1" fill="#716488"/><rect x="211" y="459" width="4" height="13" rx="1" fill="#716488"/>
+<rect x="450" y="297" width="300" height="234" rx="22" fill="url(#glass)" stroke="#e2deed"/>
+<text x="470" y="326" font-size="14" fill="#877ca8" font-weight="600" text-anchor="start">orvlet</text>
+<text x="727" y="326" font-size="21" fill="#877ca8" font-weight="400" text-anchor="middle">+</text>
+<path d="M466 341 H734" fill="none" stroke="#e9e5f1" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="472" y="372" font-size="12" fill="#82798e" font-weight="500" text-anchor="start">APPLE CALENDAR</text>
+<rect x="472" y="389" width="44" height="48" rx="10" fill="#eae5f4" stroke="none"/>
+<text x="494" y="407" font-size="10" fill="#82798e" font-weight="600" text-anchor="middle">NOV</text>
+<text x="494" y="428" font-size="20" fill="#716488" font-weight="600" text-anchor="middle">05</text>
+<text x="530" y="408" font-size="18" fill="#302e3f" font-weight="600" text-anchor="start">Research seminar</text>
+<text x="530" y="431" font-size="14" fill="#777386" font-weight="400" text-anchor="start">14:00–15:00</text>
+<path d="M472 455 H728" fill="none" stroke="#e2dceb" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M475 484 L481 490 L492 477" fill="none" stroke="#7a7793" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="503" y="488" font-size="14" fill="#716488" font-weight="500" text-anchor="start">Added to calendar</text>
+<rect x="840" y="297" width="300" height="282" rx="22" fill="url(#glass)" stroke="#e2deed"/>
+<text x="860" y="326" font-size="14" fill="#877ca8" font-weight="600" text-anchor="start">orvlet</text>
+<text x="1117" y="326" font-size="21" fill="#877ca8" font-weight="400" text-anchor="middle">+</text>
+<path d="M856 341 H1124" fill="none" stroke="#e9e5f1" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="862" y="372" font-size="12" fill="#82798e" font-weight="500" text-anchor="start">SPLIT THE BILL</text>
+<text x="862" y="419" font-size="38" fill="#302e3f" font-weight="600" text-anchor="start">40.00</text>
+<text x="977" y="418" font-size="13" fill="#82798e" font-weight="400" text-anchor="start">per person</text>
+<text x="862" y="454" font-size="12" fill="#82798e" font-weight="400" text-anchor="start">Amount</text>
+<text x="1000" y="454" font-size="12" fill="#82798e" font-weight="400" text-anchor="start">People</text>
+<rect x="862" y="465" width="126" height="38" rx="10" fill="#eeebf8" stroke="#dfd9ed"/>
+<rect x="1000" y="465" width="118" height="38" rx="10" fill="#eeebf8" stroke="#dfd9ed"/>
+<text x="876" y="490" font-size="15" fill="#302e3f" font-weight="400" text-anchor="start">120</text>
+<text x="1014" y="490" font-size="15" fill="#302e3f" font-weight="400" text-anchor="start">3</text>
+<rect x="862" y="520" width="256" height="38" rx="10" fill="#e5def3" stroke="none"/>
+<text x="990" y="545" font-size="14" fill="#625478" font-weight="500" text-anchor="middle">Calculate</text>
+<text x="210" y="620" font-size="16" fill="#716488" font-weight="500" text-anchor="middle">Playback controls</text>
+<text x="600" y="620" font-size="16" fill="#716488" font-weight="500" text-anchor="middle">Calendar confirmation</text>
+<text x="990" y="620" font-size="16" fill="#716488" font-weight="500" text-anchor="middle">Editable calculator</text>
+<path d="M48 648 H1152" fill="none" stroke="#dcd5e8" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="48" y="677" font-size="12" fill="#898195" font-weight="400" text-anchor="start">Illustrative layouts · Actual interfaces are generated for the task</text>
+<text x="1152" y="677" font-size="12" fill="#898195" font-weight="400" text-anchor="end">macOS</text>
+</g></svg>
