@@ -1,0 +1,136 @@
+{
+  "version": "1.8.3 (17)",
+  "liveRuns": [
+    {
+      "run": "main-live-final",
+      "report": {
+        "cases": 2,
+        "ok": true
+      },
+      "cases": [
+        {
+          "case": "100美元对多少rmb",
+          "seconds": 8.04,
+          "failed": false,
+          "mainRequests": 1,
+          "tools": [
+            "reuse_saved_ui"
+          ],
+          "mergedStages": [],
+          "reportedTokens": 3434
+        },
+        {
+          "case": "换算金额改成200美元，仍然换人民币",
+          "seconds": 4.73,
+          "failed": false,
+          "mainRequests": 1,
+          "tools": [
+            "reuse_saved_ui"
+          ],
+          "mergedStages": [],
+          "reportedTokens": 3627
+        }
+      ]
+    },
+    {
+      "run": "data-calculator-live-final",
+      "report": {
+        "cases": 3,
+        "ok": true
+      },
+      "cases": [
+        {
+          "case": "100美元对多少rmb",
+          "seconds": 11.31,
+          "failed": false,
+          "mainRequests": 1,
+          "tools": [
+            "reuse_saved_ui"
+          ],
+          "mergedStages": [],
+          "reportedTokens": 3003
+        },
+        {
+          "case": "换算金额改成200美元，仍然换人民币",
+          "seconds": 9.98,
+          "failed": false,
+          "mainRequests": 2,
+          "tools": [
+            "reuse_saved_ui"
+          ],
+          "mergedStages": [],
+          "reportedTokens": 7000
+        },
+        {
+          "case": "Three overlapping calculator inputs",
+          "seconds": 34.05,
+          "failed": false,
+          "mainRequests": 5,
+          "tools": [
+            "control_task",
+            "present_ui"
+          ],
+          "mergedStages": [
+            "understanding",
+            "understanding"
+          ],
+          "reportedTokens": 13105
+        }
+      ]
+    },
+    {
+      "run": "music-execution-live-final",
+      "report": {
+        "cases": 2,
+        "ok": true
+      },
+      "cases": [
+        {
+          "case": "Replace while playback request is running",
+          "seconds": 13.93,
+          "failed": false,
+          "mainRequests": 3,
+          "tools": [
+            "find_music"
+          ],
+          "mergedStages": [
+            "understanding"
+          ],
+          "reportedTokens": 3194
+        },
+        {
+          "case": "Replace during source execution",
+          "seconds": 24.54,
+          "failed": false,
+          "mainRequests": 3,
+          "tools": [
+            "find_music",
+            "find_music"
+          ],
+          "mergedStages": [
+            "executing"
+          ],
+          "reportedTokens": 5884
+        }
+      ]
+    }
+  ],
+  "verification": [
+    "Normal sendCommand entry point, real configured providers and mounted native windows.",
+    "Fresh public API data; stable card and executable method identity when changing inputs.",
+    "Three overlapping calculator inputs produce one calculator, area 126 and perimeter 50.",
+    "Playback changes during understanding and source execution retain one media owner and exactly one observed playing source.",
+    "Model and provider timing varies; fast reuse is conditional, not guaranteed.",
+    "Raw local traces are intentionally excluded from distributable evidence."
+  ],
+  "localChecks": {
+    "passed": 545,
+    "suites": {
+      "self": 339,
+      "consistency": 113,
+      "local-data": 13,
+      "builtin-cards": 80
+    },
+    "evidence": ".local/checks/20261105-162206"
+  }
+}

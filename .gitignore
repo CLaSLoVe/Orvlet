@@ -47,3 +47,19 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
+
+# Local agent notes, demo production, and machine acceptance captures
+AGENTS.md
+demo/
+docs/acceptance/
+
+# Unreferenced captures and screenshot-wrapped illustrations
+docs/assets/bill-splitter.png
+docs/assets/music-timer.png
+docs/assets/generative-ui.svg
+docs/assets/generative-ui.zh-CN.svg
+
+
+# App-owned local credentials, including atomic-write files
+.credentials*
+credentials*

@@ -1,6 +1,7 @@
 """Portable regression coverage for publication guards and MCP capabilities."""
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,9 @@ def load(name, path):
     return module
 
 
+sys.path.insert(0, str(ROOT / 'scripts'))
 repository = load('repository_check', 'scripts/repository_check.py')
+credentials = load('credential_check', 'scripts/credential_check.py')
 runner = load('check_runner', 'scripts/check.py')
 mcp = load('mcp_adapter', 'integrations/mcp/server.py')
 
@@ -29,8 +32,50 @@ class PublicationChecks(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(repository.forbidden_path(path))
 
+    def test_local_store_never_enters_source_or_bundle(self):
+        for name in ['credentials-v1.json', 'Private/.credentials-write.tmp', 'CREDENTIALS-V1.JSON']:
+            self.assertTrue(credentials.inspect(name, b'{}'))
+            self.assertTrue(credentials.inspect(name, b'{}', bundle=True))
+        renamed = json.dumps({'main.profile.synthetic': 'opaque-value'}).encode()
+        self.assertTrue(credentials.inspect('backup.json', renamed))
+
+    def test_bundle_scanner_omits_secret_values(self):
+        key = 'sk-' + 'b' * 30
+        findings = credentials.inspect('Contents/MacOS/Orvlet', key.encode(), bundle=True)
+        self.assertTrue(findings)
+        self.assertNotIn(key, '\n'.join(findings))
+
+    def test_staged_and_old_committed_keys_are_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'scripts').mkdir()
+            for name in ['credential_check.py', 'repository_check.py']:
+                shutil.copy2(ROOT / 'scripts' / name, root / 'scripts' / name)
+            def git(*args):
+                subprocess.run(['git', *args], cwd=root, check=True, capture_output=True)
+            git('init', '-q')
+            git('config', 'user.name', 'Synthetic test')
+            git('config', 'user.email', 'test@example.invalid')
+            git('config', 'commit.gpgsign', 'false')
+            git('config', 'core.hooksPath', str(root / 'no-hooks'))
+            key = 'sk-' + 'c' * 30
+            source = root / 'config.txt'
+            source.write_text(key)
+            git('add', 'config.txt')
+            source.write_text('safe replacement')
+            def blocked(mode):
+                result = subprocess.run([sys.executable, 'scripts/credential_check.py', mode], cwd=root, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('provider key', result.stdout)
+                self.assertNotIn(key, result.stdout + result.stderr)
+            blocked('--staged')
+            git('commit', '-qm', 'Synthetic old revision')
+            git('add', 'config.txt')
+            git('commit', '-qm', 'Clean final revision')
+            blocked('--history')
+
     def test_source_and_reviewed_docs_are_allowed(self):
-        for path in ['Orvlet/MyApp.swift', 'Tests/mock_server.py', 'Tests/AppChecks/SelfCheck.swift', 'Orvlet/Resources/adblock-rules.json', 'README.md', '.env.example']:
+        for path in ['Orvlet/App/OrvletApp.swift', 'Tests/mock_server.py', 'Tests/AppChecks/SelfCheck.swift', 'Orvlet/Resources/adblock-rules.json', 'README.md', '.env.example']:
             self.assertFalse(repository.forbidden_path(path))
 
     def test_secret_detection_never_echoes_the_value(self):
@@ -76,7 +121,7 @@ class CheckRunnerReports(unittest.TestCase):
                 self.assertEqual(runner.verify_report(path, 0), 1)
 
     def test_default_runner_never_selects_live_scenarios(self):
-        self.assertEqual(set(runner.SUITES), {'self', 'side-screen', 'command-window', 'listening', 'protection'})
+        self.assertEqual(set(runner.SUITES), {'model-api', 'local-data', 'builtin-cards', 'setup', 'task-history', 'self', 'consistency', 'side-screen', 'command-window', 'listening', 'music', 'motion', 'protection'})
 
 
 class MCPInterface(unittest.TestCase):

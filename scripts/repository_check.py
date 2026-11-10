@@ -39,7 +39,7 @@ def forbidden_path(name: str) -> bool:
         return True
     if name.startswith('Tests/') and path.suffix == '.json':
         return True
-    if path.name.endswith('.local.xcconfig') or path.name.startswith(('credentials', 'secrets')):
+    if path.name.endswith('.local.xcconfig') or path.name.lower().startswith(('credentials', '.credentials', 'secrets')):
         return True
     return False
 

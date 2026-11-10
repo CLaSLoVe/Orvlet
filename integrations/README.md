@@ -8,6 +8,8 @@ Enable **Settings → Advanced → Allow local connections**. The app listens on
 
 ## Chrome / Edge extension
 
+Temporarily unavailable in Orvlet 1.5.2. The Settings entry is hidden and browser bridge requests are rejected while task-isolated tab control is being developed. The source below is retained for development; these connection steps do not enable it in the current release.
+
 1. In the browser's extension manager, enable developer mode and load `integrations/browser/` as an unpacked extension.
 2. Open the desired HTTP(S) tab and the extension popup.
 3. Copy the pairing code from Orvlet's Advanced settings, paste it into the popup, and connect the selected tab.

@@ -1,0 +1,208 @@
+{
+  "source": "/private/tmp/orvlet-pipa-diagnostics.json",
+  "method": "Group sequential calls between request_triage and matching request_finished; excludes fixed connection checks. API records lack requestID, so this is chronological attribution, not an invoice.",
+  "pricing": "CNY 2/M uncached input, CNY 8/M output; excludes Jev; no cache discount.",
+  "samples": [
+    {
+      "dateUTC": "2026-11-06T09:04:59Z",
+      "calls": 3,
+      "tools": [
+        "find_music"
+      ],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 8733,
+      "outputTokens": 153,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.01869
+    },
+    {
+      "dateUTC": "2026-11-06T09:05:30Z",
+      "calls": 2,
+      "tools": [
+        "find_music"
+      ],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 5935,
+      "outputTokens": 203,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.013494
+    },
+    {
+      "dateUTC": "2026-11-06T11:22:06Z",
+      "calls": 6,
+      "tools": [
+        "control_media",
+        "observe",
+        "control_media",
+        "observe",
+        "control_media"
+      ],
+      "failed": true,
+      "cancelled": false,
+      "inputTokens": 34493,
+      "outputTokens": 314,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.071498
+    },
+    {
+      "dateUTC": "2026-11-06T11:22:51Z",
+      "calls": 2,
+      "tools": [
+        "find_music"
+      ],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 4414,
+      "outputTokens": 175,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.010228
+    },
+    {
+      "dateUTC": "2026-11-06T11:23:18Z",
+      "calls": 2,
+      "tools": [
+        "find_music"
+      ],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 4305,
+      "outputTokens": 153,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.009834
+    },
+    {
+      "dateUTC": "2026-11-06T11:23:51Z",
+      "calls": 2,
+      "tools": [
+        "find_music"
+      ],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 4444,
+      "outputTokens": 193,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.010432
+    },
+    {
+      "dateUTC": "2026-11-06T11:24:19Z",
+      "calls": 2,
+      "tools": [
+        "find_music"
+      ],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 2869,
+      "outputTokens": 152,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.006954
+    },
+    {
+      "dateUTC": "2026-11-06T11:26:55Z",
+      "calls": 1,
+      "tools": [
+        "reuse_saved_ui"
+      ],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 4192,
+      "outputTokens": 180,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.009824
+    },
+    {
+      "dateUTC": "2026-11-06T11:27:07Z",
+      "calls": 4,
+      "tools": [
+        "query_api",
+        "query_api",
+        "query_api"
+      ],
+      "failed": true,
+      "cancelled": false,
+      "inputTokens": 15674,
+      "outputTokens": 2124,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.04834
+    },
+    {
+      "dateUTC": "2026-11-06T11:36:53Z",
+      "calls": 2,
+      "tools": [
+        "find_music"
+      ],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 2723,
+      "outputTokens": 115,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.006366
+    },
+    {
+      "dateUTC": "2026-11-06T12:24:31Z",
+      "calls": 6,
+      "tools": [
+        "control_media",
+        "observe",
+        "control_media",
+        "observe",
+        "control_media"
+      ],
+      "failed": true,
+      "cancelled": false,
+      "inputTokens": 36358,
+      "outputTokens": 383,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.07578
+    },
+    {
+      "dateUTC": "2026-11-06T12:31:15Z",
+      "calls": 2,
+      "tools": [
+        "find_music"
+      ],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 4404,
+      "outputTokens": 147,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.009984
+    },
+    {
+      "dateUTC": "2026-11-06T12:31:44Z",
+      "calls": 1,
+      "tools": [],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 4847,
+      "outputTokens": 135,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.010774
+    },
+    {
+      "dateUTC": "2026-11-06T12:32:04Z",
+      "calls": 1,
+      "tools": [],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 2363,
+      "outputTokens": 144,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.005878
+    },
+    {
+      "dateUTC": "2026-11-06T12:32:18Z",
+      "calls": 3,
+      "tools": [
+        "find_music"
+      ],
+      "failed": false,
+      "cancelled": false,
+      "inputTokens": 11870,
+      "outputTokens": 181,
+      "reasoningTokens": 0,
+      "estimatedCNYNoCache": 0.025188
+    }
+  ]
+}

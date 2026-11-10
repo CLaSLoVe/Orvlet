@@ -1,0 +1,5 @@
+主模型连接检查
+启动检查和设置页测试共用这一句，附 connection_check schema。
+
+=== user prompt ===
+Call connection_check with ok=true.

@@ -1,0 +1,18 @@
+{
+  "checks" : [
+    "Interface size includes both saved layouts and reusable recipes",
+    "Clear removes both in-memory user cache stores",
+    "Cleared user recipes and layouts remain empty after reload",
+    "Compiled built-in defaults remain available after clearing",
+    "Clearing designs preserves open tasks, timer state and unrelated preferences",
+    "In-flight messages cannot be cleared and reappear later",
+    "Task-scoped clear preserves the other conversation",
+    "Task-scoped clear only removes its own draft",
+    "Scoped deletion persists without restoring removed messages",
+    "Global clear removes all messages and drafts with zero saved bytes",
+    "Chat clearing retains task cards",
+    "Recent page size includes history and resume records",
+    "Recent-page clear removes both persistent stores"
+  ],
+  "ok" : true
+}

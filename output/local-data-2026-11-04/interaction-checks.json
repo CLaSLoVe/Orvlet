@@ -1,0 +1,16 @@
+{
+  "environment": "Isolated AppModel and generated fixture data; no live user records cleared",
+  "method": "Actual native UI clicks through computer-use tools",
+  "passed": [
+    "Alt-Space trash opens task-specific confirmation",
+    "Cancel retains both fixture messages",
+    "Confirm removes task messages and disables the now-empty clear button",
+    "Settings clear-and-reset explains that all six built-in tools remain",
+    "Confirmed interface clear displays 0 B and built-in tools remain listed"
+  ],
+  "screenshots": [
+    "light.png",
+    "dark.png",
+    "command.png"
+  ]
+}

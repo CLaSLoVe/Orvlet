@@ -1,0 +1,8 @@
+Jev 连接检查
+两个入口各有一句近似问题；state 都是固定的 audio / playing=true 测试数据。
+
+=== 启动检查 ===
+Is audio playing?
+
+=== 设置页测试 ===
+Is audio currently playing?

@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
+<title id="title">Orvlet system architecture</title>
+<desc id="desc">Natural-language requests enter task orchestration; an optional Jev service provides routing and effort advice. The main model interprets requests, selects tools and designs. On-device adapters execute and verify actions. A reusable card system binds current task values to compact and expanded views. Direct card controls bypass model inference. Task state, conversations and interface recipes persist locally.</desc>
+<text x="28" y="42" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="31" font-weight="700" text-anchor="start">Orvlet</text>
+<text x="28" y="73" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="400" text-anchor="start">System architecture</text>
+<text x="300" y="40" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="700" text-anchor="start">REMOTE MODEL SERVICES</text>
+<rect x="300" y="65" width="570" height="135" rx="9" fill="#F0F5FA" stroke="#365F86" stroke-width="1.6"/>
+<text x="326" y="100" fill="#365F86" font-family="DejaVu Sans, Arial, sans-serif" font-size="27" font-weight="700" text-anchor="start">Main model</text>
+<text x="326" y="136" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="400" text-anchor="start">Intent interpretation · tool planning</text>
+<text x="326" y="171" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="400" text-anchor="start">Saved-design selection · UI generation</text>
+<rect x="930" y="65" width="600" height="135" rx="9" fill="#F7F3F9" stroke="#766084" stroke-width="1.6" stroke-dasharray="7 5"/>
+<text x="956" y="100" fill="#766084" font-family="DejaVu Sans, Arial, sans-serif" font-size="27" font-weight="700" text-anchor="start">Jev  /  optional</text>
+<text x="956" y="136" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="400" text-anchor="start">Task routing · reasoning-effort advice</text>
+<text x="956" y="171" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="400" text-anchor="start">Selected direct controls · task ranking</text>
+<rect x="265" y="310" width="1300" height="700" rx="13" fill="#FCFDFE" stroke="#A6B2BB" stroke-width="1.8"/>
+<text x="285" y="342" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="700" text-anchor="start">ON DEVICE</text>
+<polyline points="465,200 465,365" fill="none" stroke="#365F86" stroke-width="2"/>
+<polygon points="465,365 469.3,355.0 460.7,355.0" fill="#365F86"/>
+<polygon points="465,200 460.7,210.0 469.3,210.0" fill="#365F86"/>
+<text x="450" y="243" fill="#365F86" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="end">Context / intent,</text>
+<text x="450" y="269" fill="#365F86" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="end">tools &amp; design</text>
+<polyline points="1030,200 1030,235 580,235 580,365" fill="none" stroke="#766084" stroke-width="2" stroke-dasharray="7 5"/>
+<polygon points="580,365 584.3,355.0 575.7,355.0" fill="#766084"/>
+<text x="755" y="222" fill="#766084" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="middle">Routing / effort advice</text>
+<polyline points="1370,200 1370,365" fill="none" stroke="#766084" stroke-width="2" stroke-dasharray="7 5"/>
+<polygon points="1370,365 1374.3,355.0 1365.7,355.0" fill="#766084"/>
+<text x="1355" y="258" fill="#766084" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="end">Ordering advice</text>
+<text x="120" y="360" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" font-weight="700" text-anchor="middle">USER</text>
+<rect x="25" y="465" width="190" height="105" rx="10" fill="#233343" stroke="#233343" stroke-width="1.6"/>
+<text x="120" y="499" fill="#FFFFFF" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" font-weight="700" text-anchor="middle">USER INPUT</text>
+<text x="120" y="527" fill="#FFFFFF" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" text-anchor="middle">Natural language</text>
+<text x="120" y="553" fill="#FFFFFF" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="400" text-anchor="middle">Global / task chat</text>
+<polyline points="215,515 300,515" fill="none" stroke="#233343" stroke-width="2.7"/>
+<polygon points="300,515 290.0,510.7 290.0,519.3" fill="#233343"/>
+<rect x="25" y="680" width="190" height="97" rx="10" fill="#F0F7F5" stroke="#286C67" stroke-width="1.6"/>
+<text x="120" y="714" fill="#286C67" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="700" text-anchor="middle">Card controls</text>
+<text x="120" y="746" fill="#286C67" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="middle">Buttons / fields</text>
+<polyline points="120,680 120,570" fill="none" stroke="#233343" stroke-width="1.8"/>
+<polygon points="120,570 115.7,580.0 124.3,580.0" fill="#233343"/>
+<text x="135" y="624" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">AI actions</text>
+<polyline points="215,728 244,728 244,802 1060,802 1060,765" fill="none" stroke="#286C67" stroke-width="2.5"/>
+<polygon points="1060,765 1055.7,775.0 1064.3,775.0" fill="#286C67"/>
+<text x="680" y="830" fill="#286C67" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="400" text-anchor="middle">Bound actions · model-free execution</text>
+<rect x="300" y="365" width="330" height="400" rx="9" fill="#FFFFFF" stroke="#A6B2BB" stroke-width="1.6"/>
+<text x="322" y="402" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" font-weight="700" text-anchor="start">Task orchestration</text>
+<polyline points="322,421 608,421" fill="none" stroke="#A6B2BB" stroke-width="1"/>
+<text x="322" y="459" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" text-anchor="start">Ownership &amp; context</text>
+<text x="322" y="490" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" text-anchor="start">New vs. existing task</text>
+<text x="322" y="520" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" text-anchor="start">Task-scoped conversation</text>
+<text x="322" y="567" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" text-anchor="start">Request control</text>
+<text x="322" y="598" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" text-anchor="start">Clarification · queue · steer</text>
+<text x="322" y="628" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" text-anchor="start">Scoped tool dispatch</text>
+<text x="322" y="680" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" text-anchor="start">Lifecycle &amp; revisions</text>
+<text x="322" y="711" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">Cancel / reject stale results</text>
+<text x="322" y="741" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="400" text-anchor="start">Completion receipts</text>
+<polyline points="630,515 690,515" fill="none" stroke="#233343" stroke-width="2"/>
+<polygon points="690,515 680.0,510.7 680.0,519.3" fill="#233343"/>
+<polygon points="630,515 640.0,519.3 640.0,510.7" fill="#233343"/>
+<text x="660" y="492" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="middle">Calls</text>
+<text x="660" y="546" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="middle">Data</text>
+<rect x="690" y="365" width="420" height="400" rx="9" fill="#FFFFFF" stroke="#A6B2BB" stroke-width="1.6"/>
+<text x="714" y="402" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" font-weight="700" text-anchor="start">Capability execution</text>
+<polyline points="714,421 1086,421" fill="none" stroke="#A6B2BB" stroke-width="1"/>
+<text x="714" y="457" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" text-anchor="start">Browser adapter</text>
+<text x="714" y="483" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">Observe · act · media playback</text>
+<text x="714" y="522" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" text-anchor="start">Public data adapter</text>
+<text x="714" y="548" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">Fetch · validate identity · derive</text>
+<text x="714" y="587" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" text-anchor="start">Local worker &amp; runtime</text>
+<text x="714" y="613" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">JavaScript · clocks · countdowns</text>
+<text x="714" y="652" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" text-anchor="start">Calendar adapter</text>
+<text x="714" y="678" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">Deduplicate · create · read back</text>
+<rect x="710" y="710" width="380" height="36" rx="5" fill="#F7F9FA" stroke="#A6B2BB" stroke-width="1"/>
+<text x="900" y="735" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="700" text-anchor="middle">Outcome / behavior checks</text>
+<polyline points="1110,515 1170,515" fill="none" stroke="#233343" stroke-width="2"/>
+<polygon points="1170,515 1160.0,510.7 1160.0,519.3" fill="#233343"/>
+<text x="1140" y="462" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="middle">Live</text>
+<text x="1140" y="490" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="middle">state</text>
+<rect x="1170" y="365" width="360" height="400" rx="9" fill="#FFFFFF" stroke="#286C67" stroke-width="1.6"/>
+<text x="1192" y="402" fill="#286C67" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" font-weight="700" text-anchor="start">Calm task interface</text>
+<polyline points="1192,421 1508,421" fill="none" stroke="#A6B2BB" stroke-width="1"/>
+<rect x="1190" y="438" width="320" height="37" rx="5" fill="#F0F7F5" stroke="#BACDC9" stroke-width="1"/>
+<text x="1350" y="463" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="19.4" font-weight="400" text-anchor="middle">Validated cache / saved recipe</text>
+<rect x="1190" y="485" width="320" height="37" rx="5" fill="#F0F7F5" stroke="#BACDC9" stroke-width="1"/>
+<text x="1350" y="510" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="19.4" font-weight="400" text-anchor="middle">Built-in card library</text>
+<rect x="1190" y="532" width="320" height="37" rx="5" fill="#F0F7F5" stroke="#BACDC9" stroke-width="1"/>
+<text x="1350" y="557" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="19.4" font-weight="400" text-anchor="middle">New model-generated design</text>
+<text x="1350" y="599" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="700" text-anchor="middle">Validate live bindings</text>
+<polyline points="1350,609 1350,630" fill="none" stroke="#286C67" stroke-width="1.8"/>
+<polygon points="1350,630 1354.3,620.0 1345.7,620.0" fill="#286C67"/>
+<rect x="1190" y="635" width="150" height="59" rx="5" fill="#F7F9FA" stroke="#A6B2BB" stroke-width="1"/>
+<rect x="1360" y="635" width="150" height="59" rx="5" fill="#F7F9FA" stroke="#A6B2BB" stroke-width="1"/>
+<text x="1265" y="660" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="700" text-anchor="middle">Compact</text>
+<text x="1265" y="682" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" font-weight="400" text-anchor="middle">glance</text>
+<text x="1435" y="660" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" font-weight="700" text-anchor="middle">Expanded</text>
+<text x="1435" y="682" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" font-weight="400" text-anchor="middle">task card</text>
+<text x="1350" y="736" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="middle">Source view on demand</text>
+<polyline points="1140,515 1140,870" fill="none" stroke="#5E6D7A" stroke-width="2" stroke-dasharray="7 5"/>
+<polygon points="1140,870 1144.3,860.0 1135.7,860.0" fill="#5E6D7A"/>
+<polygon points="1140,515 1135.7,525.0 1144.3,525.0" fill="#5E6D7A"/>
+<text x="1125" y="847" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" font-weight="400" text-anchor="end">Task state</text>
+<polyline points="1400,765 1400,870" fill="none" stroke="#5E6D7A" stroke-width="2" stroke-dasharray="7 5"/>
+<polygon points="1400,870 1404.3,860.0 1395.7,860.0" fill="#5E6D7A"/>
+<polygon points="1400,765 1395.7,775.0 1404.3,775.0" fill="#5E6D7A"/>
+<text x="1385" y="824" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" font-weight="400" text-anchor="end">Save / restore</text>
+<rect x="300" y="870" width="1230" height="116" rx="8" fill="#F7F9FA" stroke="#A6B2BB" stroke-width="1.6"/>
+<text x="323" y="901" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="700" text-anchor="start">SHARED LOCAL STATE &amp; PERSISTENCE</text>
+<text x="323" y="938" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" text-anchor="start">Task state &amp; lifecycle</text>
+<text x="323" y="968" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">Inputs · sources · execution state</text>
+<text x="739" y="938" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" text-anchor="start">Conversation &amp; sessions</text>
+<text x="739" y="968" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">History · drafts · restoration</text>
+<text x="1160" y="938" fill="#233343" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" font-weight="700" text-anchor="start">Interface memory</text>
+<text x="1160" y="968" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">Recipes · bindings · page cache</text>
+<polyline points="300,1045 345,1045" fill="none" stroke="#233343" stroke-width="2"/>
+<polygon points="345,1045 335.0,1040.7 335.0,1049.3" fill="#233343"/>
+<text x="358" y="1052" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">Task / data flow</text>
+<polyline points="610,1045 655,1045" fill="none" stroke="#286C67" stroke-width="2.5"/>
+<polygon points="655,1045 645.0,1040.7 645.0,1049.3" fill="#286C67"/>
+<text x="668" y="1052" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">Direct interaction</text>
+<polyline points="952,1045 997,1045" fill="none" stroke="#5E6D7A" stroke-width="2" stroke-dasharray="7 5"/>
+<polygon points="997,1045 987.0,1040.7 987.0,1049.3" fill="#5E6D7A"/>
+<text x="1010" y="1052" fill="#5E6D7A" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="400" text-anchor="start">Advice / shared-state access</text>
+</svg>

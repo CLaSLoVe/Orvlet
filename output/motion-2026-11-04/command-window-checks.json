@@ -1,0 +1,22 @@
+{
+  "checks" : [
+    "The independent input becomes the keyboard window when the app is active",
+    "Summoning uses a separate window and leaves the compact shell unchanged",
+    "Dismissing input hides only the input window",
+    "Input keeps its own dragged position and draft when reopened",
+    "Reply resizing holds the input top edge without moving the compact shell",
+    "Summoning input preserves already expanded task details",
+    "Clicking inside input leaves task details alone",
+    "Clicking the task window dismisses input while preserving details",
+    "Submission dismisses the independent input and continues in the compact preparing card",
+    "Completion stays in the background without reopening either window",
+    "History remains readable while a request is running",
+    "A follow-up keeps the conversation visible and immediately acknowledges steering",
+    "Conversation reflects the live execution stage",
+    "Another conversation never borrows the active request status",
+    "Completion replaces the working indicator with the assistant reply",
+    "Chinese requests retain English receipt, drag and progress UI labels"
+  ],
+  "keyboardFocusVerified" : true,
+  "ok" : true
+}

@@ -1,0 +1,5 @@
+Jev 后台排序
+每个候选复用这一问题模板；另附匿名类别、播放状态、计时临近、完成状态、习惯分数、样本数。
+
+=== 问题原文 ===
+Does candidate \(index) need convenient access now, based on repeated user habits and current activity? Prefer repeated deliberate use over passive duration. No evidence means uncertain. Judge this candidate only.

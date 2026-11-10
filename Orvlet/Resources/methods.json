@@ -1,0 +1,95 @@
+[
+  {
+    "id": "0E39F644-7369-4C45-B881-6DBBE3E861C5",
+    "purpose": "Convert an amount between currencies using fresh daily reference rates; editable amount, source currency and target currency.",
+    "source": {
+      "url": "https://api.frankfurter.dev/v2/rate/{fromCurrency}/{toCurrency}",
+      "fields": [
+        {
+          "key": "base",
+          "label": "From",
+          "pointer": "/base"
+        },
+        {
+          "key": "quote",
+          "label": "To",
+          "pointer": "/quote"
+        },
+        {
+          "key": "rate",
+          "label": "Reference rate",
+          "pointer": "/rate"
+        }
+      ],
+      "updatedAtPointer": "/date",
+      "inputs": {
+        "amount": "1",
+        "fromCurrency": "USD",
+        "toCurrency": "CNY"
+      },
+      "controls": [
+        {
+          "key": "amount",
+          "label": "Amount",
+          "kind": "number"
+        },
+        {
+          "key": "fromCurrency",
+          "label": "From currency",
+          "kind": "select",
+          "options": [
+            "USD",
+            "EUR",
+            "CNY",
+            "HKD",
+            "JPY",
+            "GBP",
+            "AUD",
+            "CAD",
+            "CHF",
+            "SGD",
+            "KRW",
+            "INR"
+          ]
+        },
+        {
+          "key": "toCurrency",
+          "label": "To currency",
+          "kind": "select",
+          "options": [
+            "USD",
+            "EUR",
+            "CNY",
+            "HKD",
+            "JPY",
+            "GBP",
+            "AUD",
+            "CAD",
+            "CHF",
+            "SGD",
+            "KRW",
+            "INR"
+          ]
+        }
+      ],
+      "calculation": "const amount=Number(input.amount); const rate=Number(state.rate); if(!Number.isFinite(amount)||!Number.isFinite(rate))throw Error('Invalid inputs'); return {state:{converted:(amount*rate).toFixed(2)}};",
+      "outputs": [
+        {
+          "key": "converted",
+          "label": "Converted amount",
+          "unitKey": "quote"
+        }
+      ],
+      "expectations": {
+        "base": "{fromCurrency}",
+        "quote": "{toCurrency}"
+      },
+      "maxAgeSeconds": 432000,
+      "card": {
+        "kind": "currency",
+        "primaryKey": "converted",
+        "unitKey": "quote"
+      }
+    }
+  }
+]

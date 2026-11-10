@@ -1,0 +1,86 @@
+{
+  "version": "1.8.4 (18)",
+  "scope": "Orvlet-owned browser players only; no operating-system media session or other application control.",
+  "live": {
+    "ok": true,
+    "cases": [
+      {
+        "request": "想听lofi",
+        "seconds": 19.74,
+        "failed": false,
+        "tools": [
+          "find_music"
+        ],
+        "focusTransfers": 1,
+        "pausedBeforeTransfer": 0,
+        "reportedTokens": 3063
+      },
+      {
+        "request": "想听爵士",
+        "seconds": 13.61,
+        "failed": false,
+        "tools": [
+          "find_music"
+        ],
+        "focusTransfers": 0,
+        "pausedBeforeTransfer": 0,
+        "reportedTokens": 3386
+      },
+      {
+        "request": "另外开一个独立播放器听lofi",
+        "seconds": 18.95,
+        "failed": false,
+        "tools": [
+          "find_music"
+        ],
+        "focusTransfers": 1,
+        "pausedBeforeTransfer": 1,
+        "reportedTokens": 8510
+      }
+    ],
+    "assertions": [
+      "Natural desire requests trigger real YouTube search and playback.",
+      "Changing style keeps the same media task.",
+      "Explicitly additional player creates two distinct tasks with exactly one playing source.",
+      "Resuming the previous player pauses the new player before playing."
+    ]
+  },
+  "knownLimit": "An earlier longer additional-player request timed out waiting for the configured model service. This does not establish universal latency or semantic routing accuracy.",
+  "implementation": [
+    "Audio ownership is enforced separately from Jev/main-model routing.",
+    "Other players are held and their pauses awaited before releasing the next player.",
+    "A webpage design cannot adopt an unrelated task source.",
+    "Source-bound tools and design schemas are deferred until a page is owned."
+  ],
+  "rawTraces": "Local-only; excluded from distributable evidence.",
+  "localChecks": {
+    "passed": 542,
+    "suites": [
+      {
+        "suite": "orvlet-listening-checks.json",
+        "passed": 51,
+        "evidence": ".local/checks/20261105-170048/orvlet-listening-checks.json"
+      },
+      {
+        "suite": "orvlet-checks.json",
+        "passed": 345,
+        "evidence": ".local/checks/20261105-172928/orvlet-checks.json"
+      },
+      {
+        "suite": "orvlet-consistency-checks.json",
+        "passed": 113,
+        "evidence": ".local/checks/20261105-172928/orvlet-consistency-checks.json"
+      },
+      {
+        "suite": "orvlet-music-check.json",
+        "passed": 15,
+        "evidence": ".local/checks/20261105-170048/orvlet-music-check.json"
+      },
+      {
+        "suite": "orvlet-protection-checks.json",
+        "passed": 18,
+        "evidence": ".local/checks/20261105-170402/orvlet-protection-checks.json"
+      }
+    ]
+  }
+}
