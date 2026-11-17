@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#faf9ff">
-  <title>Orvlet — Films</title>
-  <meta name="description" content="Watch Calm Agent and the Calm Workday films. Your work. Still in focus.">
-  <meta property="og:title" content="Orvlet — A Calm Agent">
-  <meta property="og:description" content="Your work. Still in focus. Two short films about Orvlet.">
+  <title>orvlet: a calm agent</title>
+  <meta name="description" content="Watch Calm Agent and the Calm Workday films. orvlet: a calm agent">
+  <meta property="og:title" content="orvlet: a calm agent">
+  <meta property="og:description" content="orvlet: a calm agent Two short films about Orvlet.">
   <meta property="og:image" content="https://claslove.github.io/Orvlet/media/poster.jpg">
   <style>
     :root{color-scheme:light;--ink:#302e3f;--muted:#6c687a;--line:#e3dfea;--paper:#faf9ff}
@@ -18,7 +18,7 @@
     :focus-visible{outline:2px solid #786293;outline-offset:5px}
     header{display:flex;justify-content:space-between;align-items:center;padding:25px 0}
     .brand{font-size:22px;font-weight:650;letter-spacing:-.8px;text-decoration:none}
-    header a:last-child{font-size:13px;color:var(--muted);text-decoration:none}
+    .github-link{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--muted);text-decoration:none}.github-link svg{flex:none}
     h1{font-size:clamp(28px,4vw,42px);font-weight:600;line-height:1.2;letter-spacing:-1.5px;margin:16px 0 28px}
     .films{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px}
     button{font:inherit;font-size:13px;color:var(--muted);padding:8px 15px;background:transparent;border:1px solid transparent;border-radius:24px;cursor:pointer}
@@ -32,16 +32,17 @@
 </head>
 <body>
   <div class="wrap">
-    <header><a class="brand" href="./">orvlet</a><a href="https://github.com/CLaSLoVe/Orvlet#calm-agent">About Calm Agent ↗</a></header>
+    <!-- GitHub mark: primer/octicons (MIT); see media/github-mark-LICENSE.txt. -->
+    <header><a class="brand" href="./">orvlet</a><a class="github-link" href="https://github.com/CLaSLoVe/Orvlet"><svg aria-hidden="true" focusable="false" fill="currentColor" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656"/></svg><span>GitHub</span></a></header>
     <main>
-      <h1>Your work. Still in focus.</h1>
+      <h1>orvlet: a calm agent</h1>
       <div class="films" role="group" aria-label="Choose a film">
         <button type="button" data-film="calm-agent" aria-pressed="true" aria-controls="film">Calm Agent</button>
         <button type="button" data-film="workday" aria-pressed="false" aria-controls="film">Calm Workday</button>
       </div>
       <figure>
         <video id="film" controls playsinline preload="metadata" poster="media/poster.jpg" src="media/orvlet-calm-agent.mp4" aria-label="Calm Agent film" aria-describedby="film-caption">Your browser does not support embedded video. <a href="media/orvlet-calm-agent.mp4">Open the MP4.</a></video>
-        <figcaption id="film-caption"><span id="film-title" aria-live="polite">Calm Agent · 1:18</span><a id="direct" href="media/orvlet-calm-agent.mp4">Open video ↗</a></figcaption>
+        <figcaption id="film-caption"><span id="film-title" aria-live="polite">Calm Agent · 1:18</span></figcaption>
       </figure>
       <noscript><p><a href="media/calm-workday.mp4">Watch Calm Workday</a></p></noscript>
     </main>
@@ -58,7 +59,6 @@
           </ul>
           <p>All four recordings are listed as <a href="https://creativecommons.org/publicdomain/zero/1.0/">CC0 1.0</a> in the production credits. Audio is trimmed, mixed, and faded for the film; the lofi track is looped.</p>
         </details>
-      <a href="https://github.com/CLaSLoVe/Orvlet/blob/main/README.zh-CN.md" lang="zh-CN">中文介绍 ↗</a>
     </footer>
   </div>
   <script>
@@ -76,7 +76,6 @@
       player.setAttribute('aria-label',film.title + ' film');
       player.load();
       document.getElementById('film-title').textContent = film.title + ' · ' + film.duration;
-      document.getElementById('direct').href = 'media/' + film.file;
       document.querySelectorAll('[data-film]').forEach(button => button.setAttribute('aria-pressed',String(button.dataset.film === id)));
     }
     document.querySelectorAll('[data-film]').forEach(button => button.addEventListener('click',() => {
