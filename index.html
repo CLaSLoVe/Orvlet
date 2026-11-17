@@ -7,7 +7,7 @@
   <title>Orvlet — Films</title>
   <meta name="description" content="Watch Calm Agent and the Calm Workday films. Your work. Still in focus.">
   <meta property="og:title" content="Orvlet — A Calm Agent">
-  <meta property="og:description" content="Your work. Still in focus. Four short films about Orvlet.">
+  <meta property="og:description" content="Your work. Still in focus. Two short films about Orvlet.">
   <meta property="og:image" content="https://claslove.github.io/Orvlet/media/poster.jpg">
   <style>
     :root{color-scheme:light;--ink:#302e3f;--muted:#6c687a;--line:#e3dfea;--paper:#faf9ff}
@@ -37,15 +37,13 @@
       <h1>Your work. Still in focus.</h1>
       <div class="films" role="group" aria-label="Choose a film">
         <button type="button" data-film="calm-agent" aria-pressed="true" aria-controls="film">Calm Agent</button>
-        <button type="button" data-film="opening" aria-pressed="false" aria-controls="film">Workday · Opening</button>
-        <button type="button" data-film="continuity" aria-pressed="false" aria-controls="film">Workday · Continuity</button>
-        <button type="button" data-film="rhythm" aria-pressed="false" aria-controls="film">Workday · Rhythm</button>
+        <button type="button" data-film="workday" aria-pressed="false" aria-controls="film">Calm Workday</button>
       </div>
       <figure>
         <video id="film" controls playsinline preload="metadata" poster="media/poster.jpg" src="media/orvlet-calm-agent.mp4" aria-label="Calm Agent film" aria-describedby="film-caption">Your browser does not support embedded video. <a href="media/orvlet-calm-agent.mp4">Open the MP4.</a></video>
         <figcaption id="film-caption"><span id="film-title" aria-live="polite">Calm Agent · 1:18</span><a id="direct" href="media/orvlet-calm-agent.mp4">Open video ↗</a></figcaption>
       </figure>
-      <noscript><p>More films: <a href="media/workday-opening.mp4">Opening</a> · <a href="media/workday-continuity.mp4">Continuity</a> · <a href="media/workday-rhythm.mp4">Rhythm</a></p></noscript>
+      <noscript><p><a href="media/calm-workday.mp4">Watch Calm Workday</a></p></noscript>
     </main>
     <footer>
         <details>
@@ -66,13 +64,11 @@
   <script>
     const films = {
       'calm-agent': {title:'Calm Agent',duration:'1:18',file:'orvlet-calm-agent.mp4',poster:'poster.jpg'},
-      opening: {title:'Calm Workday · Opening',duration:'1:21',file:'workday-opening.mp4',poster:'workday-opening.jpg'},
-      continuity: {title:'Calm Workday · Continuity',duration:'1:26',file:'workday-continuity.mp4',poster:'workday-continuity.jpg'},
-      rhythm: {title:'Calm Workday · Rhythm',duration:'1:21',file:'workday-rhythm.mp4',poster:'workday-rhythm.jpg'}
+      workday: {title:'Calm Workday',duration:'1:21',file:'calm-workday.mp4',poster:'calm-workday.jpg'},
     };
     const player = document.getElementById('film');
     function selectFilm(id) {
-      if (!Object.hasOwn(films,id)) return;
+      if (!Object.hasOwn(films,id)) id = 'calm-agent';
       const film = films[id];
       player.pause();
       player.poster = 'media/' + film.poster;
