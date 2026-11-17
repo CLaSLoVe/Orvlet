@@ -1,10 +1,30 @@
 # Orvlet
 
-A side-screen agent for music, schedules, and small everyday tasks. The interface is generated for what you ask it to do.
+A calm desktop agent for ongoing everyday tasks. Delegate a goal, return to your work, and come back to a small interface when you need to check or adjust it.
 
-[简体中文](README.zh-CN.md) · macOS · Generative UI
+[简体中文](README.zh-CN.md) · macOS · Generative UI · [Watch the film ↗](https://claslove.github.io/Orvlet/)
 
 ![Music and timer tasks alongside an editable bill-splitting interface](docs/assets/generative-ui.png)
+
+## Calm Agent
+
+Calm Agent is a design framework for **intermittent human attention**. An auxiliary task may run for minutes or hours while its user attends to it for only a few seconds at a time. The task should continue within its delegated scope, preserve its context, and make its current state and controls easy to find when the user returns.
+
+Three on-demand interaction modes provide access to the same ongoing task:
+
+| Mode | Purpose | Example |
+| --- | --- | --- |
+| **Delegate** | Express or revise a goal in language. | “Play some quiet music.” Later: “Switch to instrumental jazz.” |
+| **Adjust** | Use an available control directly. | Pause playback or change a timer value. |
+| **Check** | Inspect the current state without issuing a new instruction. | See what is playing, how much time remains, or whether input is needed. |
+
+These modes connect through a persistent task representation: its goal, constraints, observable state, available actions, and execution history. Generative UI provides controls and feedback suited to an open-ended goal; familiar controls remain available for routine actions. Background execution updates the task between visits. When progress requires a decision or missing information, the request stays attached to that task.
+
+Orvlet is the desktop prototype illustrating this approach. Background execution, compact task pills, expandable interfaces, and stored context let users move between primary work and brief moments of task control. Idle pills fade into the workspace periphery and regain prominence when interaction resumes. The aim is to keep ongoing tasks understandable and controllable while protecting attention for primary work.
+
+[Watch the 78-second demo](https://claslove.github.io/Orvlet/) · [Open the video directly](https://claslove.github.io/Orvlet/media/orvlet-calm-agent.mp4)
+
+The film follows a writing session with background music, a calendar request and clarification, and a change of music. It combines real prototype captures with a staged work scenario and shortened waiting periods. The framework is described in *Calm Agent: Designing for Intermittent Human Attention* by Dian Jin and Yancheng Yuan.
 
 ## Getting started
 
