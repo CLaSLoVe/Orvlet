@@ -33,7 +33,7 @@
                         "fields": [["key": "value", "label": "Value", "pointer": "/value"]],
                     ],
                     "calculation": "return {}",
-                ], "query_api", path: "$")
+                ], "query_api", path: "$.calculation")
             try rejects(
                 [
                     "title": "Snapshot",
@@ -42,7 +42,7 @@
                         "fields": [["key": "value", "label": "Value", "pointer": "/value"]], "invented": true,
                     ],
                 ],
-                "query_api", path: "$.source")
+                "query_api", path: "$.source.invented")
             try rejects(
                 [
                     "title": "Snapshot",
@@ -201,11 +201,16 @@
                     })
             }
             try check(
-                offeredNames().contains("find_music") && !offeredNames().contains("observe")
+                offeredNames().contains("load_tools") && !offeredNames().contains("observe")
                     && !offeredNames().contains("compose_ui") && !offeredNames().contains("reuse_saved_ui"),
                 "Source discovery omits page operations and construction schemas until a page is owned")
             model.beginAmbientRequest("Inspect an existing source")
-            model.adoptRequestTask(.web(UUID()))
+            let page = SideTask(kind: .web, title: "Source")
+            model.sideTasks = [page]
+            model.adoptRequestTask(.web(page.id))
+            model.agent.activeTaskID = page.id
+            try check(offeredNames().contains("observe") && !offeredNames().contains("compose_ui"), "An owned source can be observed before loading design tools")
+            _ = try await model.agent.execute("load_tools", ["family": "web"])
             try check(
                 offeredNames().contains("observe") && offeredNames().contains("compose_ui"),
                 "Owned sources expose their page operations at execution time")
@@ -258,11 +263,16 @@
                 intent.answer = "Estimate prepared"
                 return intent
             }
+            model.agent.completionOverride = { _ in
+                // Keep the owner alive while the separate router handles the second follow-up.
+                try await Task.sleep(for: .milliseconds(300))
+                return ["tool_calls": [RequestStep(tool: "finish", arguments: JSONText.encode(["outcome": "answer", "reply": "Estimate prepared"])).call]]
+            }
             model.selectChat(true)
             model.command = "Prepare a project estimate"
             model.sendCommand()
             for _ in 0..<100 where !firstStarted { try await Task.sleep(for: .milliseconds(5)) }
-            let initial = model.requestCardID!
+            guard let initial = model.requestCardID else { throw AppError.message("The running request lost its task") }
             routingOwner = initial
             model.command = "Include materials"
             model.sendCommand()
@@ -342,10 +352,11 @@
             var repairs = 0
             model.agent.completionOverride = { turns in
                 repairs += 1
+                if repairs == 1 { return ["tool_calls": [RequestStep(tool: "load_tools", arguments: JSONText.encode(["family": "data"])).call]] }
                 let arguments: [String: Any] =
-                    repairs == 1
+                    repairs == 3
                     ? ["title": "Measurement", "source": ["url": "https://example.org/data"], "fields": []] : good
-                if repairs == 2 {
+                if repairs == 4 {
                     try check(
                         JSONText.encode(turns).contains("$.source.fields"),
                         "The model receives the missing field path rather than a generic decoder message")
@@ -354,7 +365,7 @@
             }
             _ = try await model.agent.run("Read a fresh measurement")
             try check(
-                fetches == 2 && repairs == 2 && model.sideTasks.contains { $0.state["value"] == "42" },
+                fetches == 2 && repairs == 4 && model.sideTasks.contains { $0.state["value"] == "42" },
                 "Source failure then malformed repair still permits a valid bounded repair without opening a page")
             return checks
         }

@@ -1,5 +1,47 @@
 import Foundation
 
+/// Preserve unrecognized records in their original collection on the next write. A card
+/// from another version must not prevent independent tasks from being restored.
+struct SavedTaskList {
+    private var unreadable: [Any] = []
+
+    mutating func read(_ data: Data) -> [SideTask] {
+        unreadable = []
+        let decoder = JSONDecoder()
+        var seen: Set<UUID> = []
+        if let tasks = try? decoder.decode([SideTask].self, from: data) {
+            return tasks.filter { seen.insert($0.id).inserted }
+        }
+        guard let records = (try? JSONSerialization.jsonObject(with: data)) as? [Any] else {
+            // Retain the original bytes even if an older installation left a broken envelope.
+            unreadable = [data.base64EncodedString()]
+            return []
+        }
+        return records.compactMap { record in
+            guard let bytes = try? JSONSerialization.data(withJSONObject: record, options: .fragmentsAllowed),
+                let task = try? decoder.decode(SideTask.self, from: bytes) else {
+                unreadable.append(record)
+                return nil
+            }
+            return seen.insert(task.id).inserted ? task : nil
+        }
+    }
+
+    func encoded(_ tasks: [SideTask]) throws -> Data {
+        let data = try JSONEncoder().encode(tasks)
+        guard !unreadable.isEmpty else { return data }
+        let records = try JSONSerialization.jsonObject(with: data) as! [Any]
+        return try JSONSerialization.data(withJSONObject: records + unreadable)
+    }
+
+    mutating func remove(_ id: UUID) {
+        unreadable.removeAll { record in
+            guard let key = (record as? [String: Any])?["id"] as? String else { return false }
+            return UUID(uuidString: key) == id
+        }
+    }
+}
+
 struct TaskHistoryItem: Identifiable {
     let id: UUID
     let title: String
@@ -16,7 +58,7 @@ extension AppModel {
     }
     var conversationActivity: TaskActivity? {
         guard let id = conversationTaskID else { return nil }
-        if busy && ownsRequest(id) { return .working(progressText(activity.isEmpty ? "On it…" : activity)) }
+        if let run = runOwning(id) { return .working(progressText(run.activity.isEmpty ? "Starting…" : run.activity)) }
         if queuedTaskRequests.contains(where: { $0.taskID == id }) { return .queued }
         if let task = sideTasks.first(where: { $0.id == id }),
             let state = taskActivity(task), state.isWorking || state == .stopped
@@ -84,7 +126,7 @@ extension AppModel {
     }
     func persistTaskHistory() {
         guard persistHistory, !isLiveTest else { return }
-        if let data = try? JSONEncoder().encode(archivedTaskHistory) { preferences.set(data, forKey: "taskHistory.v1") }
+        if let data = try? historyArchive.encoded(archivedTaskHistory) { preferences.set(data, forKey: "taskHistory.v1") }
     }
     @discardableResult
     func restoreHistoryTask(_ id: UUID, showCard: Bool = true) -> Bool {
@@ -119,7 +161,10 @@ extension AppModel {
         return true
     }
     func deleteTaskHistory(_ id: UUID) {
+        shelfArchive.remove(id)
+        historyArchive.remove(id)
         closeTask(id)
+        persistSideTasks()
         conversationDrafts[id] = nil
         archivedTaskHistory.removeAll { $0.id == id }
         messages.removeAll { $0.taskID == id }
@@ -200,28 +245,21 @@ extension AppModel {
             deliverReply(PipelineFailure.targetUnavailable.localizedDescription, kind: .needsInput, taskID: taskID)
             return
         }
-        if busy {
-            if ownsRequest(taskID), !requestIsStopping, let request = activeRequest {
-                associateMessages(requestID: request.id, messageID: messageID, taskID: taskID)
-                activeRequest?.submittedTaskID = taskID
-                Diagnostics.record(
-                    "request_merged",
-                    ["requestID": request.id.uuidString, "taskID": taskID.uuidString, "stage": request.stage.rawValue])
-                agent.steer(text, prepared: prepared)
-                return
+        if let owner = runOwning(taskID) {
+            if owner.stopping {
+                queuedTaskRequests.append(TaskUserRequest(taskID: taskID, text: text, messageID: messageID, prepared: prepared))
+            } else {
+                RequestRun.$current.withValue(owner) {
+                    if let request = activeRequest {
+                        associateMessages(requestID: request.id, messageID: messageID, taskID: taskID)
+                        activeRequest?.submittedTaskID = taskID
+                        agent.steer(text, prepared: prepared)
+                    }
+                }
             }
-            // Explicit card messages queue with their identity; they never steer a
-            // different task just because its model happens to be running.
-            guard queuedTaskRequests.count < 8 else {
-                deliverReply(
-                    "Several requests are waiting. Please try again shortly.", kind: .information, taskID: taskID)
-                return
-            }
-            queuedTaskRequests.append(
-                TaskUserRequest(taskID: taskID, text: text, messageID: messageID, prepared: prepared))
-        } else {
-            startCommand(text, taskID: taskID, receivedAt: Date(), messageID: messageID, prepared: prepared)
+            return
         }
+        startCommand(text, taskID: taskID, receivedAt: Date(), messageID: messageID, prepared: prepared)
     }
     /// Exact local controls use the conversation's owner, never the selected card.
     func localTaskControl(_ text: String, taskID: UUID) -> Bool {
@@ -234,7 +272,7 @@ extension AppModel {
             let task = sideTasks.first(where: { $0.id == taskID })
         else { return false }
         if task.taskSurface?.runtime != nil {
-            if busy && ownsRequest(taskID) { cancel() }
+            if busy && ownsRequest(taskID) { stopCommand(for: taskID) }
             taskRuntime.control(taskID, operation: operation)
             return true
         }
@@ -269,8 +307,6 @@ extension AppModel {
             $0.id != excluding && known.contains($0.id) && (explicit == nil || $0.id == explicit)
         }
         let preferred = continuationPreference(in: sideTasks.filter { $0.id != excluding && $0.terminalLabel == nil })
-        let defaults = JevRequestTriage.continuationDefaults(
-            JevRequestTriage.candidates(self, explicit: nil, excluding: excluding), preferred: preferred)
         // Current activities must not disappear behind a longer list of closed conversations.
         let available = Set(sideTasks.filter { $0.terminalLabel == nil }.map(\.id))
         let items =
@@ -290,8 +326,6 @@ extension AppModel {
                 "availability": available.contains(item.id) ? "available" : "archived",
                 "media": task?.isMediaTask ?? false, "playing": task?.playing ?? false,
                 "preferred": item.id == preferred, "selected": item.id == selectedTaskID,
-                "continuationDefault": defaults[item.id] == item.id,
-                "continuationTargetID": defaults[item.id]?.uuidString ?? item.id.uuidString,
                 "activity": task?.isMediaTask == true
                     ? "media playback" : task?.taskSurface?.apiData?.card?.kind.rawValue ?? "see intent",
                 "lastConversationAt": ISO8601DateFormatter().string(from: item.updated), "recent": recent,
@@ -328,19 +362,8 @@ extension AppModel {
                 #endif
                 let fast = await prepareFastRequest(text, explicit: nil)
                 router.preparedRequest = fast
-                var intent: RequestIntent
-                var transfer: PreparedRequest
-                if let advice = fast.triage,
-                    advice.resolvesRouting(hasCandidates: !JevRequestTriage.candidates(self, explicit: nil).isEmpty)
-                {
-                    var routing = advice.directIntent() ?? RequestIntent(kind: .general)
-                    routing.targetTaskID = advice.target?.uuidString
-                    intent = routing
-                    transfer = fast
-                } else {
-                    intent = try await router.understand(text, clarification: nil, key: nil, globalRouting: true)
-                    transfer = PreparedRequest(text: text, intent: intent, triage: fast.triage, model: self)
-                }
+                var intent = try await router.understand(text, clarification: nil, key: nil, globalRouting: true)
+                var transfer = PreparedRequest(text: text, intent: intent, triage: fast.triage, model: self)
                 try Task.checkCancellation()
                 if let original = intent.targetTaskID.flatMap(UUID.init(uuidString:)) {
                     let current = resolvedTaskID(original)
@@ -355,39 +378,8 @@ extension AppModel {
                 }
                 if let id = intent.targetTaskID.flatMap(UUID.init(uuidString:)), restoreHistoryTask(id, showCard: false)
                 {
-                    if intent.taskAction != .perform && !ownsRequest(id) {
-                        let reply = try await endTask(id, action: intent.taskAction)
-                        deliverReply(reply, taskID: id)
-                        return
-                    }
-                    if intent.playbackIntent == "pause", intent.requirements.isEmpty, intent.initialURL == nil,
-                        sideTasks.first(where: { $0.id == id })?.isMediaTask == true,
-                        let source = liveBrowsers.first(where: { $0.id == id })
-                    {
-                        controlMedia(id, operation: "pause")
-                        await source.applyPlaybackPolicy()
-                        let state = try await source.observe()
-                        guard state["playing"] as? Bool != true else {
-                            throw AppError.message("Playback hasn't paused yet. Try the pause control.")
-                        }
-                        deliverReply(userText("已暂停。", "Paused."), taskID: id)
-                        return
-                    }
-                    if busy && ownsRequest(id) {
-                        if intent.taskAction != .perform {
-                            // Queue the terminal command before stopping; the current writer must finish first.
-                            queuedTaskRequests.insert(
-                                TaskUserRequest(taskID: id, text: text, messageID: messageID, prepared: transfer), at: 0
-                            )
-                            cancel()
-                        } else {
-                            submitTaskRequest(text, taskID: id, messageID: messageID, prepared: transfer)
-                        }
-                    } else {
-                        submitTaskRequest(text, taskID: id, messageID: messageID, prepared: transfer)
-                    }
-                } else if busy {
-                    queueGlobalMessage(text, messageID: messageID, draftID: draftID, prepared: transfer)
+                    submitTaskRequest(text, taskID: id, messageID: messageID, prepared: transfer)
+
                 } else {
                     startCommand(text, messageID: messageID, prepared: transfer)
                 }
@@ -399,7 +391,7 @@ extension AppModel {
         let display = progressText(text)
         var entries = requestProgress[request.id] ?? []
         if entries.last != display { entries.append(display) }
-        requestProgress[request.id] = Array(entries.suffix(6))
+        requestProgress[request.id] = Array(entries.suffix(12))
         if requestProgress.count > 40, let old = requestProgress.keys.first(where: { $0 != request.id }) {
             requestProgress[old] = nil
         }
@@ -415,15 +407,23 @@ extension AppModel {
     var conversationProgress: [String] {
         guard let id = conversationTaskID else { return [] }
         let request =
-            ownsRequest(id)
-            ? activeRequest?.id : messages.last(where: { $0.taskID == id && $0.requestID != nil })?.requestID
+            runOwning(id)?.context?.id ?? messages.last(where: { $0.taskID == id && $0.requestID != nil })?.requestID
         return request.flatMap { requestProgress[$0] } ?? []
     }
     func friendlyFailure(_ error: Error) -> String {
-        if let error = error as? ToolArgumentError {
-            return userText(
-                "工具参数格式有误（" + error.path + "），未执行这一步。",
-                "The tool arguments were invalid at " + error.path + ". This step was not executed.")
+        if let service = error as? ModelServiceFailure {
+            switch service.status {
+            case 401, 403: return userText("模型服务拒绝了连接，请在「模型」设置中核对访问权限。", "The model service denied access. Check its credentials in Models.")
+            case 429: return userText("模型服务暂时限制了请求，可以稍后再试，或在「模型」设置中检查额度。", "The model service is limiting requests. Try again later or check your quota in Models.")
+            default: return userText("这次模型服务没有完成响应，可以稍后再试。", "The model service couldn't complete the request. Please try again later.")
+            }
+        }
+        if error is ToolArgumentError || error is RecoveryLimit {
+            let tool = (error as? RecoveryLimit)?.tool
+            if ["read_value", "query_api", "inspect_api"].contains(tool) || (error as? ToolArgumentError)?.path.hasPrefix("$.source") == true {
+                return userText("暂时没能从来源核实你要的读数，可以稍后再试。", "I couldn't verify the requested reading from its source. Please try again later.")
+            }
+            return userText("这次没能核实任务结果。你可以在这里继续。", "I couldn't verify the result this time. You can continue in this task.")
         }
         if error.localizedDescription.contains("Looping is unavailable") {
             return userText(
@@ -437,7 +437,7 @@ extension AppModel {
         if error as? PipelineFailure == .presentation {
             return "The source is still available. I couldn’t prepare its compact view."
         }
-        if error is PipelineFailure { return "I couldn’t verify the result. Your source and work are saved." }
+        if let failure = error as? PipelineFailure { return failure.localizedDescription }
         if error is URLError {
             return userText(
                 "连接暂时中断了，你的内容已保留。稍后可以重试。", "The connection dropped. Your work is saved, so you can try again shortly.")

@@ -11,7 +11,8 @@
             model.settings.autoAdapt = false
             model.settings.allowAgents = false
             if CommandLine.arguments.contains("--force-main") { model.fastTriageRetryAfter = .distantFuture }
-            let traceURL = FileManager.default.temporaryDirectory.appendingPathComponent("orvlet-pipeline-live.jsonl")
+            let traceName = CommandLine.arguments.contains("--short-followups") ? suite + ".jsonl" : "orvlet-pipeline-live.jsonl"
+            let traceURL = FileManager.default.temporaryDirectory.appendingPathComponent(traceName)
             Diagnostics.begin(traceURL.path)
             var rows: [[String: Any]] = []
             func events() -> [[String: Any]] {
@@ -65,6 +66,30 @@
                 ])
                 if CommandLine.arguments.contains("--catalogue-only") {
                     emit(["catalogue": model.interfaceMemory.planningCatalogue()])
+                    store.removePersistentDomain(forName: suite)
+                    exit(0)
+                }
+                if CommandLine.arguments.contains("--short-followups") {
+                    _ = try await submit("来个倒记时")
+                    try check(model.agent.replyKind == .needsInput && !model.sideTasks.contains { $0.kind == .timer },
+                              "A missing duration must elicit a question before starting a timer")
+                    guard let thread = model.messages.last?.taskID else { throw AppError.message("Missing clarification thread") }
+                    _ = try await submit("7分中", owner: thread)
+                    guard let first = model.sideTasks.first(where: { $0.kind == .timer && $0.duration == 420 }) else {
+                        throw AppError.message("The short clarification did not produce a seven-minute timer")
+                    }
+                    _ = try await submit("再来个11分的")
+                    let timers = model.sideTasks.filter { $0.kind == .timer }
+                    try check(timers.count == 2 && timers.contains { $0.id == first.id && $0.duration == 420 }
+                              && timers.contains { $0.id != first.id && $0.duration == 660 }, "The elliptical follow-up lost or replaced a timer")
+                    emit(["verifiedDurations": timers.compactMap(\.duration)])
+                    _ = try await submit("96快 4人aa")
+                    let bill = model.messages.last?.text ?? ""
+                    let visible = model.sideTasks.first(where: { $0.id == model.agent.activeTaskID })?.state.values ?? [:].values
+                    let share = #"(?<![0-9.])24(?:\.0+)?(?![0-9.])"#
+                    try check(model.agent.replyKind != .needsInput && ([bill] + Array(visible)).contains { $0.range(of: share, options: .regularExpression) != nil },
+                              "The unrelated short bill request did not produce a per-person share")
+                    try check(Set(model.sideTasks.filter { $0.kind == .timer }.map(\.id)) == Set(timers.map(\.id)), "An unrelated request modified the timers")
                     store.removePersistentDomain(forName: suite)
                     exit(0)
                 }
@@ -145,8 +170,12 @@
                         text: restoreText, triage: RequestTriage(capability: .data), model: model)
                     let restored = try await model.agent.understand(
                         restoreText, clarification: nil, key: nil, globalRouting: true)
-                    emit(["routingCase": ["request": restoreText, "expectedTarget": archive.id.uuidString,
-                        "actualTarget": restored.targetTaskID as Any? ?? NSNull()]])
+                    emit([
+                        "routingCase": [
+                            "request": restoreText, "expectedTarget": archive.id.uuidString,
+                            "actualTarget": restored.targetTaskID as Any? ?? NSNull(),
+                        ]
+                    ])
                     try check(restored.targetTaskID == archive.id.uuidString, "Explicit archive restoration was lost")
                 } else if CommandLine.arguments.contains("--routing-multiple") {
                     var older = SideTask(kind: .web, title: "Earlier player")
@@ -201,6 +230,47 @@
                         if try await browser.observe()["playing"] as? Bool == true { audible += 1 }
                     }
                     try check(audible == 1, "Content switching left overlapping players")
+                } else if CommandLine.arguments.contains("--generation-smoke") {
+                    for text
+                        in (CommandLine.arguments.contains("--clarification-only") ? [] : ["做个摄氏华氏转换器", "做个字数统计器"])
+                    {
+                        let trace = try await submit(text)
+                        try check(
+                            trace.first(where: { $0["event"] as? String == "tool" })?["name"] as? String != "run_code",
+                            "Construction planning eagerly chose exploration before receiving a construction schema")
+                        try check(
+                            model.agent.replyKind != .needsInput,
+                            "A self-contained tool purpose should be executable")
+                        guard let task = model.sideTasks.first(where: { $0.id == model.agent.activeTaskID }),
+                            let surface = task.taskSurface, !surface.actions.isEmpty
+                        else { throw AppError.message("Generated tool has no executable surface") }
+                        emit([
+                            "generated": [
+                                "request": text, "taskID": task.id.uuidString,
+                                "fields": surface.fields, "state": task.state,
+                            ]
+                        ])
+                    }
+                    _ = try await submit("按公司的计费规则做个报价工具")
+                    try check(model.agent.replyKind == .needsInput, "Unknown business rules were guessed")
+                    try check(
+                        (model.messages.last?.text.count ?? 0) <= RequestIntent.clarificationLimit,
+                        "Clarification became a long optional-feature questionnaire")
+                    guard let owner = model.messages.last?.taskID else {
+                        throw AppError.message("Clarification has no conversation owner")
+                    }
+                    _ = try await submit("按工时乘单价，先用3小时、每小时80元", owner: owner)
+                    guard let task = model.sideTasks.first(where: { $0.id == owner }), task.taskSurface != nil else {
+                        throw AppError.message("Clarification did not resume its original task")
+                    }
+                    try check(
+                        task.state.values.contains { Double($0) == 240 }, "Clarified rule produced the wrong result")
+                    emit(["clarified": ["taskID": owner.uuidString, "state": task.state]])
+                    if CommandLine.arguments.contains("--hold-preview") {
+                        model.selectTask(owner, expanded: true, preferSource: false)
+                        emit(["previewReady": true])
+                        while true { try await Task.sleep(for: .seconds(1)) }
+                    }
                 } else if CommandLine.arguments.contains("--weather-clarification") {
                     let requestedAt = Date()
                     _ = try await submit("后天天气咋样")

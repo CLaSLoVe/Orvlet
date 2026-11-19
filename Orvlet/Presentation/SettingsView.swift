@@ -92,6 +92,7 @@ struct SettingsView: View {
             .onChange(of: draft.reduceMotion) { _, _ in persistPreferences() }
             .onChange(of: draft.inactiveStackOpacity) { _, _ in persistPreferences() }
             .onChange(of: draft.blockAds) { _, _ in persistPreferences() }
+            .onChange(of: draft.interfaceLanguage) { _, _ in persistPreferences() }
             .onChange(of: draft.shortcut) { _, _ in persistPreferences() }
             .onChange(of: draft.taskStartPolicy) { _, _ in persistPreferences() }
             .onChange(of: draft.restoreLastSession) { _, _ in persistPreferences() }
@@ -164,6 +165,12 @@ struct SettingsView: View {
                         ForEach(TaskStartPolicy.allCases, id: \.self) { Text($0.title).tag($0) }
                     }.labelsHidden().frame(width: 150)
                 }.help("Task first starts work immediately. Interface first prepares controls before playback.")
+                HStack {
+                    Text("Generated interface language")
+                    Spacer()
+                    TextField("English", text: $draft.interfaceLanguage)
+                        .accessibilityLabel("Generated interface language").frame(width: 150)
+                }
                 preferenceToggle("Adapt controls automatically", value: $draft.autoAdapt)
                 preferenceToggle("Block ads in built-in browser", value: $draft.blockAds)
                     .help("Reload a page after changing this setting. Some video ads may remain.")

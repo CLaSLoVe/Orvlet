@@ -8,7 +8,7 @@ extension AppModel {
         var request = TaskRequestContext(
             input: text, receivedAt: requestReceivedAt, startPolicy: settings.taskStartPolicy)
         request.submittedTaskID = taskID
-        request.sourceCandidateID = taskID ?? (messageID == nil ? selectedSideTask?.id : nil)
+        request.sourceCandidateID = taskID ?? (messageID == nil && RequestRun.current?.forceNewTask != true ? selectedSideTask?.id : nil)
         request.messageID = messageID
         if let messageID, let index = messages.firstIndex(where: { $0.id == messageID }) {
             messages[index].requestID = request.id
@@ -66,10 +66,15 @@ extension AppModel {
                     ? "Waiting for model" : outcome == .succeeded ? "Ready" : outcome.label
             }
         }
+        if !taskFailed, agent.replyKind == .information, activeRequest?.owner == nil, let id = requestCardID {
+            // The conversation and its receipt already carry this answer.
+            sideTasks.removeAll { $0.id == id && $0.kind == .result }
+            if ambientRequestID == id { ambientRequestID = nil }
+        }
         if let id = requestCardID, let i = sideTasks.firstIndex(where: { $0.id == id }) {
             sideTasks[i].status =
                 agent.replyKind == .needsInput ? "Waiting for reply" : taskFailed ? "Needs attention" : "Done"
-            if !taskFailed && agent.replyKind == .success && sideTasks[i].terminalLabel == nil {
+            if !taskFailed && (agent.replyKind == .success || agent.replyKind == .information) && sideTasks[i].terminalLabel == nil {
                 sideTasks[i].terminalLabel = sideTasks[i].title + " · Done"
                 sideTasks[i].expires = Date().addingTimeInterval(10)
             }
@@ -118,10 +123,8 @@ extension AppModel {
     var selectedSideTask: SideTask? { visibleTasks.first { $0.id == selectedTaskID } ?? visibleTasks.first }
     func loadSideTasks() {
         taskOrder = (preferences.stringArray(forKey: "taskOrder.v1") ?? []).compactMap(UUID.init(uuidString:))
-        if let data = preferences.data(forKey: "sideTasks.v1"),
-            let saved = try? JSONDecoder().decode([SideTask].self, from: data)
-        {
-            sideTasks = saved.map { original in
+        if let data = preferences.data(forKey: "sideTasks.v1") {
+            sideTasks = shelfArchive.read(data).map { original in
                 var task = original
                 if task.kind == .web {
                     task.hidden = true
@@ -136,16 +139,20 @@ extension AppModel {
                 return task
             }
         }
+        for task in sideTasks where task.taskSurface?.apiData != nil { upgradeStandardCard(task.id) }
+        scheduleDataRefresh()
         for task in sideTasks where task.taskSurface?.runtime != nil { taskRuntime.attach(task.id) }
         reconcileTasks()
         refreshTaskClock()
     }
     func persistSideTasks() {
+        scheduleDataRefresh()
         guard persistHistory, !isLiveTest else { return }
+        let preparing = Set(commandRuns.compactMap { $0.context?.placeholderID } + [requestCardID].compactMap { $0 })
         preferences.set(
-            taskOrder.filter { id in sideTasks.contains { $0.id == id && $0.id != requestCardID } }.map(\.uuidString),
+            taskOrder.filter { id in !preparing.contains(id) && sideTasks.contains { $0.id == id } }.map(\.uuidString),
             forKey: "taskOrder.v1")
-        if let data = try? JSONEncoder().encode(sideTasks.filter { $0.id != requestCardID }) {
+        if let data = try? shelfArchive.encoded(sideTasks.filter { !preparing.contains($0.id) }) {
             preferences.set(data, forKey: "sideTasks.v1")
         }
     }
@@ -160,11 +167,19 @@ extension AppModel {
     }
     func toggleTaskPresentation(_ id: UUID) {
         taskRanking.record(id, .open)
-        if !collapsed && !taskShelfVisible && !commandPanelVisible && selectedTaskID == id {
+        if taskClickWillCollapse(id) {
             collapse()
         } else {
             selectTask(id, expanded: true)
         }
+    }
+    func taskClickWillCollapse(_ id: UUID) -> Bool {
+        !collapsed && !taskShelfVisible && !commandPanelVisible && selectedTaskID == id
+    }
+    func openTaskFromDoubleClick(_ id: UUID) {
+        guard let task = sideTasks.first(where: { $0.id == id }) else { return }
+        taskRanking.record(id, .open)
+        selectTask(id, expanded: true, preferSource: task.kind == .web)
     }
     @discardableResult
     func selectTask(_ id: UUID, expanded: Bool = false, preferSource: Bool? = nil) -> Bool {
@@ -309,7 +324,7 @@ extension AppModel {
             let readings = sideTasks[i].plan?.readings, !readings.isEmpty,
             let values = data["readings"] as? [String: String]
         else { return }
-        let bound = Dictionary(uniqueKeysWithValues: readings.map { ($0.key, values[$0.key] ?? "—") })
+        let bound = Dictionary(readings.map { ($0.key, values[$0.key] ?? "—") }, uniquingKeysWith: { first, _ in first })
         let missing = bound.values.contains { $0 == "—" || $0.isEmpty }
         sideTasks[i].dataIssue = missing ? "The source is unavailable. Open the page to reconnect." : nil
         if !missing { sideTasks[i].dataUpdatedAt = Date() }
@@ -318,7 +333,7 @@ extension AppModel {
     func closeTask(_ id: UUID) {
         adaptive.blockedSources.remove(id)
         stopTaskActions(id)
-        if ownsRequest(id) && busy { cancel() }
+        if ownsRequest(id) && busy { stopCommand(for: id) }
         if id == requestCardID {
             activeRequest?.placeholderID = nil
             if ambientRequestID == id { ambientRequestID = nil }
@@ -336,7 +351,10 @@ extension AppModel {
         reconcileTasks()
     }
     func prepareBrowserForNewTask(destination: String? = nil) throws {
-        if let destination, let target = SurfaceCache.pageKey(destination) {
+        // An unresolved new owner is an independent activity, even at the same URL.
+        // Existing-task navigation is prepared by the dispatcher before reaching here.
+        let independent = activeRequest != nil && activeRequest?.owner == nil
+        if !independent, let destination, let target = SurfaceCache.pageKey(destination) {
             if target == SurfaceCache.pageKey(webURL) { return }
             if let existing = sideTasks.first(where: {
                 $0.kind == .web && SurfaceCache.pageKey($0.sourceURL ?? "") == target && parkedBrowsers[$0.id] != nil
@@ -345,7 +363,7 @@ extension AppModel {
                 return
             }
         }
-        guard !externalBrowser, !webURL.isEmpty, hasCustomSurface || hasMedia else { return }
+        guard !externalBrowser, !webURL.isEmpty, independent || hasCustomSurface || hasMedia else { return }
         upsertWebTask(surface, activate: true)
         guard parkedBrowsers.count < 2 else {
             throw AppError.message(

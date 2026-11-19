@@ -21,7 +21,10 @@ extension TaskSurface {
         result.fields = clocks.indices.map { "clockZone\($0)" } + ["clockHourStyle"]
         result.state.merge(clockControlState) { _, fresh in fresh }
         result.actions = [TaskSurfaceAction(id: "configureClock", kind: .runtime, operation: "configureClock")]
-        if let markup = try? BuiltinCards.clock(runtime, interactive: true) { result.markup = markup }
+        if var markup = try? BuiltinCards.clock(runtime, interactive: true) {
+            markup.interfaceLanguage = self.markup.interfaceLanguage
+            result.markup = markup
+        }
         return result
     }
 }

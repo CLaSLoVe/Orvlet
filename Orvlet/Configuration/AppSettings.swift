@@ -45,6 +45,15 @@ enum TaskStartPolicy: String, Codable, CaseIterable {
     var title: String { self == .taskFirst ? "Task first" : "Interface first" }
 }
 struct AppSettings: Codable {
+    static let defaultInterfaceLanguage = "English"
+    var interfaceLanguage = defaultInterfaceLanguage
+    var preferredInterfaceLanguage: String {
+        let name = interfaceLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? Self.defaultInterfaceLanguage : name
+    }
+    var interfaceLanguageInstruction: String {
+        "Generated interface language (user preference): " + JSONText.encode(["language": preferredInterfaceLanguage])
+    }
     var taskStartPolicy = TaskStartPolicy.taskFirst
     var compactLayout = CompactLayout.vertical
     var compactTaskLimit = 3
@@ -69,12 +78,13 @@ struct AppSettings: Codable {
     var resumePlaybackOnLaunch = false
     init() {}
     enum CodingKeys: String, CodingKey {
-        case profiles, activeProfileID, fastCredentialID, taskStartPolicy, compactLayout, compactTaskLimit,
+        case interfaceLanguage, profiles, activeProfileID, fastCredentialID, taskStartPolicy, compactLayout, compactTaskLimit,
             inactiveStackOpacity, blockAds, shortcut, main, fast, fastProtocol, useFast, autoAdapt, allowAgents, theme,
             appearance, reduceMotion, expandOnHover, restoreLastSession, resumePlaybackOnLaunch
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        interfaceLanguage = try c.decodeIfPresent(String.self, forKey: .interfaceLanguage) ?? Self.defaultInterfaceLanguage
         taskStartPolicy = try c.decodeIfPresent(TaskStartPolicy.self, forKey: .taskStartPolicy) ?? .taskFirst
         compactLayout = try c.decodeIfPresent(CompactLayout.self, forKey: .compactLayout) ?? .vertical
         compactTaskLimit = min(6, max(1, try c.decodeIfPresent(Int.self, forKey: .compactTaskLimit) ?? 3))
@@ -115,6 +125,7 @@ extension AppSettings {
     // Each settings page owns its fields; an older draft must never undo an
     // access choice or save unfinished model credentials from another page.
     mutating func applyPreferences(from draft: AppSettings) {
+        interfaceLanguage = draft.preferredInterfaceLanguage
         shortcut = draft.shortcut
         compactLayout = draft.compactLayout
         compactTaskLimit = draft.compactTaskLimit

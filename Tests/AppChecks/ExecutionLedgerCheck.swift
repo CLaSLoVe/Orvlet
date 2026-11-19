@@ -18,62 +18,40 @@
             model.settings.autoAdapt = false
             defer { model.browser.dispose() }
             var decisions = 0
-            model.agent.interpretationOverride = { _ in
-                var intent = RequestIntent(kind: .timer)
-                intent.timerSeconds = 60
-                intent.timerEvidence = "one minute"
-                intent.goals = ["Start a one minute timer"]
-                intent.steps = [.init(tool: "timer_start", arguments: "{\"seconds\":60}", goal: 0)]
-                intent.stepsComplete = false  // Reproduce the original partial-plan trigger with a different capability.
-                return intent
-            }
+            model.agent.interpretationOverride = { _ in RequestIntent(kind: .general) }
+            let timerInput: [String: Any] = ["seconds": 60, "title": "Timer", "request_evidence": "one minute"]
             model.agent.completionOverride = { _ in
                 decisions += 1
-                return ["tool_calls": [RequestStep(tool: "timer_start", arguments: "{\"seconds\":60}").call]]
+                if decisions == 1 {
+                    return ["tool_calls": [RequestStep(tool: "load_tools", arguments: JSONText.encode(["family": "timer"])).call]]
+                }
+                return ["tool_calls": [RequestStep(tool: "timer_start", arguments: JSONText.encode(timerInput)).call]]
             }
             _ = try await model.agent.run("Start a one minute timer")
-            try check(
-                decisions == 0 && model.sideTasks.filter { $0.kind == .timer }.count == 1,
-                "Verified goal ends a partial plan without another model decision or repeated effect")
+            try check(decisions == 2 && model.sideTasks.filter { $0.kind == .timer }.count == 1,
+                "A verified timer completes without a further model round")
             let ledger = model.agent.executionLedger
             model.agent.nativeRequestActive = true
-            _ = try await model.agent.execute("timer_start", ["seconds": 60, "title": "Another generated label"])
-            try check(
-                model.sideTasks.filter { $0.kind == .timer }.count == 1,
-                "A completed goal cannot be replayed with changed arguments")
+            _ = try await model.agent.execute("timer_start", timerInput)
+            try check(model.sideTasks.filter { $0.kind == .timer }.count == 1, "An identical request cannot replay its verified effect")
             model.agent.nativeRequestActive = false
+            decisions = 0
             _ = try await model.agent.run("Start another one minute timer")
-            try check(
-                model.sideTasks.filter { $0.kind == .timer }.count == 2 && model.agent.executionLedger !== ledger,
+            try check(model.sideTasks.filter { $0.kind == .timer }.count == 2 && model.agent.executionLedger !== ledger,
                 "A new human request may intentionally repeat the same effect")
 
             let timer = model.sideTasks.first { $0.kind == .timer }!
-            model.agent.interpretationOverride = { _ in
-                var intent = RequestIntent(kind: .general)
-                intent.targetTaskID = timer.id.uuidString
-                intent.route = .local
-                intent.goals = ["Pause this timer", "Resume this timer"]
-                intent.steps = [.init(tool: "control_task", arguments: "{\"operation\":\"pause\"}", goal: 0)]
-                return intent
-            }
-            model.agent.completionOverride = { _ in
-                decisions += 1
-                return [
-                    "tool_calls": [
-                        [
-                            "id": UUID().uuidString, "type": "function",
-                            "function": [
-                                "name": "control_task", "arguments": "{\"operation\":\"resume\",\"goal\":1}",
-                            ],
-                        ]
-                    ]
-                ]
-            }
-            _ = try await model.agent.run("Pause then resume this timer", taskID: timer.id)
-            try check(
-                decisions == 1 && model.agent.executionLedger.complete
-                    && model.sideTasks.first(where: { $0.id == timer.id })?.deadline != nil,
-                "An intermediate verified goal retains its receipt while a later goal still executes")
+            model.beginAmbientRequest("Pause then resume this timer", taskID: timer.id)
+            model.agent.nativeRequestActive = true
+            model.agent.activeTaskID = timer.id
+            model.agent.executionLedger = RequestExecutionLedger()
+            model.agent.executionLedger.configure(goals: ["Pause", "Resume"])
+            _ = try await model.agent.execute("control_task", ["operation": "pause"], goal: 0)
+            _ = try await model.agent.execute("control_task", ["operation": "resume"], goal: 1)
+            _ = try await model.agent.execute("control_task", ["operation": "pause"], goal: 1)
+            try check(model.agent.executionLedger.complete && model.sideTasks.first(where: { $0.id == timer.id })?.deadline != nil,
+                "Each goal retains its own receipt and rejects replay even under changed arguments")
+            model.finishAmbientRequest()
 
             model.agent.executionLedger = RequestExecutionLedger()
             model.agent.nativeRequestActive = true

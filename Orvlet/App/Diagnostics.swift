@@ -10,6 +10,7 @@ enum Diagnostics {
     #endif
     static func record(_ event: String, _ fields: [String: Any] = [:]) {
         #if DEBUG
+            ContinuationStudy.record(event, fields)
             if benchmarkEvents != nil,
                 ["api", "round", "tool", "tool_error", "intent_invalid", "decision_context", "ui_spec"].contains(event)
             {
@@ -33,11 +34,13 @@ enum Diagnostics {
                 "waitingForInterface", "restoringPlayback", "revision", "playing", "currentTime", "promptBytes",
                 "toolBytes", "toolCount", "route",
                 "routeKnown", "methodCount", "candidateCount", "reused", "reasonCode", "budget", "capability",
+                "question", "threshold", "choice", "accepted", "confidence", "selectedProbability",
                 "directControl", "cardReuse", "messageBytes", "inputBytes", "responseBytes",
                 "inputTokens", "outputTokens", "totalTokens", "model", "host", "modelCallID",
                 "reasoningRequested", "reasoningPolicy", "reasoningCharacters", "reasoningTokens",
+                "timeoutSeconds",
                 "goal", "verified", "complete",
-                "visible", "imageLoaded", "frame", "screenFrame",
+                "layout", "requested", "retained", "visible", "imageLoaded", "frame", "screenFrame",
             ]
             var entry = fields.filter { allowed.contains($0.key) }
             entry["event"] = event
@@ -61,6 +64,7 @@ enum Diagnostics {
     static func category(_ error: Error) -> String {
         if error is ToolArgumentError || error is DecodingError { return "schema" }
         if error is ModelAccessError { return "credentials" }
+        if error is TaskCodeError { return "calculation" }
         if error is URLError { return "network" }
         let text = error.localizedDescription.lowercased()
         if text.contains("runtime") || text.contains("scheduled") || text.contains("continuing") { return "runtime" }

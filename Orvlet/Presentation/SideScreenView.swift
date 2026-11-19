@@ -180,7 +180,12 @@ struct DetailContentView: View {
                     .accessibilityLabel(model.pinned ? "Unpin card" : "Keep open")
                     .accessibilityIdentifier("keep-card-open")
                 }
-            }.padding(.horizontal, 10).frame(height: 30).background { WindowDragArea() }
+            }.padding(.horizontal, 10).frame(height: 30).background {
+                WindowDragArea(
+                    onDoubleClick: model.selectedSideTask.map { task in
+                        { model.openTaskFromDoubleClick(task.id) }
+                    })
+            }
             if model.showingWeb {
                 HStack {
                     if let selected = model.selectedSideTask,
@@ -340,7 +345,7 @@ struct CommandPanelView: View {
                         text: $model.command
                     )
                     .textFieldStyle(.plain).font(.system(size: 17)).focused($focused).onSubmit(send)
-                    if model.busy {
+                    if model.busy && (model.conversationTaskID == nil || model.conversationTaskID.flatMap(model.runOwning) != nil) {
                         Button {
                             model.cancel()
                         } label: {
@@ -353,7 +358,7 @@ struct CommandPanelView: View {
                     .disabled(
                         model.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             || model.mainServiceState == "checking"
-                    ).help("Send")
+                    ).help("Send · ⌥↩ starts a new task")
                 }.buttonStyle(.plain).padding(20)
             }
             Divider().opacity(0.3)

@@ -2,29 +2,105 @@ import Foundation
 
 /// Semantic slots chosen with the source recipe, never guessed from a title or URL.
 struct DataCardPreset: Codable {
-    enum Kind: String, Codable { case weather, currency }
+    enum Kind: String, Codable { case weather, currency, reading }
     var kind: Kind
     var primaryKey: String
     var unitKey: String? = nil
     var contextKey: String? = nil
 
-    func validate(keys: Set<String>, rows: [APIDataOutput]) throws {
-        guard rows.contains(where: { $0.key == primaryKey }),
-            Set([primaryKey, unitKey, contextKey].compactMap { $0 }).isSubset(of: keys)
-        else {
-            throw AppError.message(
-                "Card slots must refer to available live fields; the primary value must be a displayed output.")
+    var subject: String? = nil
+    var detailKeys: [String]? = nil
+    var displayNameKey: String? = nil
+
+    func bound(keys: Set<String>, rows: [APIDataOutput]) throws -> Self {
+        func resolve(_ name: String, in available: Set<String>) -> String? {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if available.contains(trimmed) { return trimmed }
+            let matches = available.filter { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+            return matches.count == 1 ? matches.first : nil
+        }
+        let displayed = Set(rows.map(\.key))
+        guard let primary = resolve(primaryKey, in: displayed) else {
+            throw ToolArgumentError(path: "$.source.card.primaryKey", issue: "choose the requested reading from " + displayed.sorted().joined(separator: ", "))
+        }
+        var result = self
+        result.primaryKey = primary
+        result.subject = subject.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40)) }
+        for (path, slot) in [("unitKey", \Self.unitKey), ("contextKey", \Self.contextKey), ("displayNameKey", \Self.displayNameKey)] {
+            if let raw = self[keyPath: slot] {
+                guard let key = resolve(raw, in: keys) else {
+                    throw ToolArgumentError(path: "$.source.card." + path, issue: "bind the appropriate available key or omit this optional slot")
+                }
+                result[keyPath: slot] = key
+            }
+        }
+        if let detailKeys {
+            var seen: Set<String> = [primary]
+            result.detailKeys = Array(detailKeys.compactMap { resolve($0, in: displayed) }.filter { seen.insert($0).inserted }.prefix(8))
+        }
+        return result
+    }
+    /// Older recipes put an acquisition key in any of the three name slots.
+    /// Use its role in the recipe and title, independent of its spelling or the data provider.
+    mutating func resolveReadingSubject(title: String, request: String, state: [String: String], source: APIDataSpec) {
+        let trim = CharacterSet.whitespacesAndNewlines
+        let fixedName = subject?.trimmingCharacters(in: trim) ?? ""
+        let key = displayNameKey ?? (fixedName.isEmpty ? contextKey : nil)
+        let candidate = key.flatMap { state[$0] }?.trimmingCharacters(in: trim) ?? fixedName
+        let heading = title.trimmingCharacters(in: trim)
+        // Preserve punctuation inside names. The title can be just the name or continue
+        // with an identifier, a reading or other detail in any format.
+        var lead = ""
+        heading.enumerateSubstrings(in: heading.startIndex..<heading.endIndex, options: .byWords) { _, word, _, stop in
+            let prefix = String(heading[..<word.upperBound])
+            if request.localizedCaseInsensitiveContains(prefix) { lead = prefix } else { stop = true }
+        }
+        let labels = source.displayRows.map(\.label)
+        let requestedName = !lead.isEmpty && !labels.contains { $0.caseInsensitiveCompare(lead) == .orderedSame }
+        let isLookup = (source.expectations ?? [:]).values.contains {
+            !$0.hasPrefix("{") && $0.caseInsensitiveCompare(candidate) == .orderedSame
+        }
+        let unit = unitKey.flatMap { state[$0] } ?? source.fields.first { $0.key == primaryKey }?.unit
+        let isMetric = key == primaryKey || (key != nil && key == unitKey)
+            || unit.map { !$0.isEmpty && $0.caseInsensitiveCompare(candidate) == .orderedSame } == true
+            || (!candidate.isEmpty && candidate == state[primaryKey])
+            || labels.contains { $0.caseInsensitiveCompare(candidate) == .orderedSame }
+
+        // A request can mention the display name, the lookup identifier, or both.
+        // Keep a human qualifier such as “West” in “Temperature (West)” when the user named it.
+        let namedByUser = !candidate.isEmpty && request.localizedCaseInsensitiveContains(candidate)
+        let inQualifier = !candidate.isEmpty && heading.dropFirst(lead.count).localizedCaseInsensitiveContains(candidate)
+        let useLead = requestedName && !lead.localizedCaseInsensitiveContains(candidate)
+            && (isLookup || isMetric || inQualifier || candidate.isEmpty) && (!namedByUser || isLookup)
+        let editable = (source.inputs ?? [:]).keys.contains { source.url.contains("{" + $0 + "}") }
+            || (source.expectations ?? [:]).values.contains { $0.hasPrefix("{") }
+        let preferHeading = isLookup && !namedByUser && !heading.isEmpty
+            && heading.caseInsensitiveCompare(candidate) != .orderedSame
+        if let key, !isMetric, editable || (!useLead && !preferHeading) {
+            displayNameKey = key
+            return
+        }
+        displayNameKey = nil
+        if useLead {
+            subject = String(lead.prefix(40))
+        } else if candidate.isEmpty || isMetric || preferHeading {
+            subject = String(heading.prefix(40))
+        } else {
+            subject = String(candidate.prefix(40))
         }
     }
     static let schema: [String: Any] = [
         "type": "object",
         "description":
-            "Use a built-in Pearl & Ink card for ordinary weather or currency requests. Supply live state keys, not literal values. Omit for other tasks or bespoke compositions.",
+            "Choose reading for a general data card, weather or currency for their specialized controls. Select the exact requested reading and a concise subject for the capsule.",
         "properties": [
-            "kind": ["type": "string", "enum": ["weather", "currency"]],
+            "kind": ["type": "string", "enum": ["reading", "weather", "currency"]],
+            "subject": ["type": "string", "maxLength": 40, "description": "Use the name the person used for this object, even when the API returns only a lookup code. Put the same name first in the task title. For changing objects bind displayNameKey to the current human-readable name."],
+            "displayNameKey": ["type": "string", "description": "Actual source field containing the recognizable display name, especially when the subject can change. Keep the acquisition identifier separate."],
+            "detailKeys": ["type": "array", "items": ["type": "string"], "description": "Only useful supporting readings, in display order. Omit identity proof, duplicate metadata and unformatted timestamps."],
             "primaryKey": [
                 "type": "string",
-                "description": "Main displayed field/output: temperature for weather, converted amount for currency.",
+                "description": "Source field or calculated output answering the request. Shared by the capsule and expanded hero.",
             ],
             "unitKey": [
                 "type": "string", "description": "Optional source field containing the unit or quote currency.",
@@ -32,7 +108,7 @@ struct DataCardPreset: Codable {
             "contextKey": [
                 "type": "string",
                 "description":
-                    "Optional actual source/input field identifying the place or currency pair. Never invent a location label.",
+                    "Optional supporting context. For the visible object name use subject or displayNameKey.",
             ],
         ], "required": ["kind", "primaryKey"],
     ]
@@ -136,7 +212,7 @@ enum BuiltinCards {
                     ? ""
                     : "<button class='calm-secondary' data-action='addMinute'>+1 min</button><button class='calm-secondary' data-action='restart'>Restart</button>")
                 + "</div></section>",
-            compactHTML: "<div class='calm-glance'><strong class='calm-value' data-bind='remaining'></strong></div>",
+            compactHTML: "<div class='calm-glance'><small class='calm-label' data-bind='timerSubject'></small><strong class='calm-value' data-bind='remaining'></strong></div>",
             css:
                 ".calm-surface.timer-preset{gap:20px}.timer-heading{display:grid;gap:8px}.timer-digits{font-size:48px;line-height:1.1;letter-spacing:-1.5px;font-weight:600;font-variant-numeric:tabular-nums}.timer-heading>.calm-description:empty{display:none}.timer-preset .calm-primary{min-width:100px}",
             height: 185)
@@ -160,7 +236,7 @@ enum BuiltinCards {
     }
     static func data(
         _ preset: DataCardPreset, rows: [APIDataOutput], inputs: [String], footer: String, swap: Bool,
-        dateKey: String? = nil, conditionKey: String? = nil, lowKey: String? = nil
+        visuals: String = "", englishPresetCopy: Bool = true, dateKey: String? = nil, conditionKey: String? = nil, lowKey: String? = nil
     )
         -> CardMarkup
     {
@@ -172,21 +248,22 @@ enum BuiltinCards {
                 "<span class='preset-unit'>" + escape($0) + "</span>"
             } ?? ""
         let context = preset.contextKey.map { "<strong class='preset-place' data-bind='" + $0 + "'></strong>" } ?? ""
-        let details = rows.filter {
+        let orderedDetails = preset.detailKeys?.compactMap { key in rows.first { $0.key == key } } ?? rows
+        let details = orderedDetails.filter {
             $0.key != primary.key && $0.key != unit && $0.key != preset.contextKey && $0.key != dateKey
                 && $0.key != conditionKey && $0.key != lowKey
         }.map {
             row in
             "<div class='preset-detail'><span class='calm-label'>" + escape(row.label) + "</span><strong data-bind='"
                 + row.key + "'></strong>"
-                + (row.unitKey.map { "<span data-bind='" + $0 + "'></span>" } ?? row.unit.map {
-                    "<span>" + escape($0) + "</span>"
+                + (row.unitKey.map { "<span class='preset-unit-suffix' data-bind='" + $0 + "'></span>" } ?? row.unit.map {
+                    "<span class='preset-unit-suffix'>" + escape($0) + "</span>"
                 } ?? "") + "</div>"
         }.joined()
         let low =
             rows.first { $0.key == lowKey }.map { row in
-                "<span class='weather-low calm-description'>Low <span data-bind='" + row.key + "'></span> "
-                    + (row.unitKey.map { "<span data-bind='" + $0 + "'></span>" } ?? escape(row.unit ?? "")) + "</span>"
+                "<span class='weather-low calm-description'>" + escape(englishPresetCopy ? "Low" : row.label) + " <span data-bind='" + row.key + "'></span> "
+                    + (row.unitKey.map { "<span class='preset-unit-suffix' data-bind='" + $0 + "'></span>" } ?? escape(row.unit ?? "")) + "</span>"
             } ?? ""
         let number = "<div class='preset-number'>" + value + unitHTML + "</div>"
         let hero: String
@@ -202,29 +279,35 @@ enum BuiltinCards {
                 } ?? "")
                 + "</div></div>"
         } else {
-            hero = "<div class='preset-result'><small class='calm-label'>Converted amount</small>" + number + "</div>"
+            let label = englishPresetCopy && preset.kind == .currency ? "Converted amount" : primary.label
+            hero = "<div class='preset-result'><small class='calm-label'>" + escape(label) + "</small>" + number + "</div>"
         }
         let controls: String
         if preset.kind == .currency, inputs.count == 3, swap {
+            let swapLabel = englishPresetCopy ? "Swap currencies" : "⇄"
             controls =
                 "<div class='preset-inputs currency-inputs'>" + inputs[0] + inputs[1]
-                + "<button class='calm-secondary currency-swap' data-action='swapCurrencies' aria-label='Swap currencies' title='Swap currencies'>⇄</button>"
+                + "<button class='calm-secondary currency-swap' data-action='swapCurrencies' aria-label='\(swapLabel)' title='\(swapLabel)'>⇄</button>"
                 + inputs[2] + "</div>"
         } else {
             controls = inputs.isEmpty ? "" : "<div class='preset-inputs'>" + inputs.joined() + "</div>"
         }
+        let boundName = preset.displayNameKey.map { "<span data-bind='" + $0 + "'></span>" }
+        let subject = boundName ?? preset.subject.map { escape($0) } ?? preset.contextKey.map { "<span data-bind='" + $0 + "'></span>" } ?? escape(primary.label)
+        let compact = "<div class='calm-glance'><small class='calm-label'>" + subject
+            + "</small><strong class='calm-value'>" + value + " " + unitHTML + "</strong></div>"
         return CardMarkup(
             html: "<section class='calm-surface data-preset " + preset.kind.rawValue + "-preset'>"
-                + controls + hero
+                + controls + hero + visuals
                 + "<div class='preset-details'>" + details + "</div>" + footer + "</section>",
-            compactHTML: "<div class='calm-glance'><strong class='calm-value'>" + value + " " + unitHTML
+            compactHTML: preset.kind == .reading ? compact : "<div class='calm-glance'><strong class='calm-value'>" + value + " " + unitHTML
                 + "</strong><small class='calm-label'>"
                 + (preset.kind == .weather
                     ? escape(primary.label)
                         + (preset.contextKey.map { " · <span data-bind='" + $0 + "'></span>" } ?? "")
                     : "<span data-bind='currencyPair'></span>") + "</small></div>",
             css: """
-                .calm-surface.data-preset{gap:14px}.data-preset.currency-preset{gap:12px}.preset-result{display:grid;gap:6px}.preset-place{font-size:16px;font-weight:500;line-height:1.3}.preset-number{display:flex;flex-wrap:wrap;align-items:baseline;gap:7px;font-size:32px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-1px;line-height:1.15;overflow-wrap:anywhere}.preset-unit{font-size:14px;font-weight:500;letter-spacing:0;color:var(--muted)}.data-preset.weather-preset{gap:8px}.weather-low{display:block;margin-top:3px}.weather-heading,.weather-reading{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.weather-condition{display:grid;gap:4px;max-width:125px;text-align:right}.weather-condition small:empty{display:none}.weather-heading small{white-space:nowrap}.weather-preset .preset-number{font-size:36px;letter-spacing:-1px}.weather-preset .preset-result{gap:4px}.weather-preset .preset-details{gap:8px 16px}.weather-preset .preset-place{font-size:13px}.weather-preset .preset-inputs{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:10px}.weather-preset .data-input input,.weather-preset .data-input select{font-size:12px}.weather-preset .preset-unit{font-size:22px}.preset-inputs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.data-input{display:grid;gap:6px;align-content:start;min-width:0}.data-input>span{font-size:11px;font-weight:500;color:var(--muted)}.data-input input,.data-input select{min-width:0;width:100%;font-size:14px}.currency-preset .data-input:first-child{grid-column:1/-1}.currency-preset .data-input:first-child input{font-size:22px;font-weight:500;letter-spacing:-.5px;font-variant-numeric:tabular-nums;padding:7px 12px;min-height:44px;background:transparent}.currency-preset input::-webkit-inner-spin-button,.currency-preset input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}.currency-inputs{grid-template-columns:minmax(0,1fr) 32px minmax(0,1fr);column-gap:10px;row-gap:10px}.currency-swap{align-self:start;margin-top:22px;padding:0;font-size:20px;min-width:32px;min-height:36px}.currency-name{font-size:10px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--muted)}.data-input select{appearance:none;-webkit-appearance:none;min-height:36px;padding:7px 26px 7px 10px}.data-input:has(select){grid-template-columns:minmax(0,1fr) 22px;column-gap:0}.data-input:has(select)>span,.data-input:has(select)>small{grid-column:1/-1}.data-input select{grid-area:2/1/3/3}.data-input:has(select)::after{content:'⌄';grid-area:2/2/3/3;align-self:center;justify-self:center;font-size:14px;color:var(--muted);pointer-events:none}.preset-details{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px}.preset-detail{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px;font-size:13px}.preset-detail>.calm-label{flex-basis:100%}.preset-detail strong{font-size:14px;font-weight:500;overflow-wrap:anywhere}.preset-detail:only-child{grid-column:1/-1}.data-preset>small:empty,.preset-details:empty{display:none}.data-preset>small{font-size:11px;color:var(--muted)}.data-preset footer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 12px;align-items:center;border-top:1px solid var(--line);padding-top:10px;font-size:10px;color:var(--muted)}.data-preset footer>span:empty{display:none}.data-preset footer>span{overflow-wrap:anywhere;line-height:1.4}.data-preset footer>span:nth-child(2){grid-column:1}.data-preset footer button{grid-column:2;grid-row:1/3;min-height:32px}
+                .calm-surface.data-preset{gap:14px}.data-preset.currency-preset{gap:12px}.preset-result{display:grid;gap:6px}.preset-place{font-size:16px;font-weight:500;line-height:1.3}.preset-number{display:flex;flex-wrap:wrap;align-items:baseline;gap:7px;font-size:32px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-1px;line-height:1.15;overflow-wrap:anywhere}.preset-unit{font-size:14px;font-weight:500;letter-spacing:0;color:var(--muted)}.data-preset.weather-preset{gap:8px}.weather-low{display:block;margin-top:3px}.weather-heading,.weather-reading{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.weather-condition{display:grid;gap:4px;max-width:125px;text-align:right}.weather-condition small:empty{display:none}.weather-heading small{white-space:nowrap}.weather-preset .preset-number{font-size:36px;letter-spacing:-1px}.weather-preset .preset-result{gap:4px}.weather-preset .preset-details{gap:8px 16px}.weather-preset .preset-place{font-size:13px}.weather-preset .preset-inputs{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:10px}.weather-preset .data-input input,.weather-preset .data-input select{font-size:12px}.weather-preset .preset-unit{font-size:22px}.preset-inputs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.data-input{display:grid;gap:6px;align-content:start;min-width:0}.data-input>span{font-size:11px;font-weight:500;color:var(--muted)}.data-input input,.data-input select{min-width:0;width:100%;font-size:14px}.currency-preset .data-input:first-child{grid-column:1/-1}.currency-preset .data-input:first-child input{font-size:22px;font-weight:500;letter-spacing:-.5px;font-variant-numeric:tabular-nums;padding:7px 12px;min-height:44px;background:transparent}.currency-preset input::-webkit-inner-spin-button,.currency-preset input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}.currency-inputs{grid-template-columns:minmax(0,1fr) 32px minmax(0,1fr);column-gap:10px;row-gap:10px}.currency-swap{align-self:start;margin-top:22px;padding:0;font-size:20px;min-width:32px;min-height:36px}.currency-name{font-size:10px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--muted)}.data-input select{appearance:none;-webkit-appearance:none;min-height:36px;padding:7px 26px 7px 10px}.data-input:has(select){grid-template-columns:minmax(0,1fr) 22px;column-gap:0}.data-input:has(select)>span,.data-input:has(select)>small{grid-column:1/-1}.data-input select{grid-area:2/1/3/3}.data-input:has(select)::after{content:'⌄';grid-area:2/2/3/3;align-self:center;justify-self:center;font-size:14px;color:var(--muted);pointer-events:none}.preset-details{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px}.preset-detail{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px;font-size:13px}.preset-detail>.calm-label{flex-basis:100%}.preset-detail strong{font-size:14px;font-weight:500;overflow-wrap:anywhere}.preset-detail:only-child,.reading-preset .preset-detail:last-child:nth-child(odd){grid-column:1/-1}.data-preset>small:empty,.preset-details:empty{display:none}.data-preset>small{font-size:11px;color:var(--muted)}.data-preset footer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 12px;align-items:center;border-top:1px solid var(--line);padding-top:10px;font-size:10px;color:var(--muted)}.data-preset footer>span:empty{display:none}.data-preset footer>span{overflow-wrap:anywhere;line-height:1.4}.data-preset footer>span:nth-child(2){grid-column:1}.data-preset footer button{grid-column:2;grid-row:1/3;min-height:32px}
                 """, height: preset.kind == .currency ? 310 : 305)
     }
 }

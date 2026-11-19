@@ -30,11 +30,22 @@ enum AgentContext {
         return result
     }
 
+    static func displayState(_ state: [String: String], source: APIDataSpec?) -> [String: String] {
+        var summary = state
+        for field in source?.fields ?? [] where field.itemPointer != nil {
+            if let text = state[field.key], let values = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [Any] {
+                summary[field.key] = "[column of " + String(values.count) + " items]"
+            }
+        }
+        return summary
+    }
+
     static func task(_ task: SideTask, definition: Bool = false) -> [String: Any] {
         if definition, let surface = task.taskSurface,
             let data = try? JSONEncoder().encode(surface),
-            let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            var value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         {
+            value["state"] = displayState(task.state, source: surface.apiData)
             return value
         }
         var result: [String: Any] = [
@@ -44,9 +55,17 @@ enum AgentContext {
         ]
         if let surface = task.taskSurface {
             result["inputs"] = surface.fields
-            result["state"] = task.liveValues ?? surface.state
-            result["actions"] = surface.actions.map { ["id": $0.id, "kind": $0.kind.rawValue] }
+            result["state"] = displayState(task.liveValues ?? surface.state, source: surface.apiData)
+            result["actions"] = surface.actions.map { action in
+                var description = ["id": action.id, "kind": action.kind.rawValue]
+                description["operation"] = action.operation
+                return description
+            }
             result["hasDefinition"] = true
+            if let spec = surface.apiData {
+                result["dataSource"] = ["kind": "publicAPI", "refreshSeconds": spec.refreshSeconds as Any? ?? NSNull()]
+                result["methodChanges"] = "To change the reading or background cadence, inspect the existing API definition, then load_tools(data) and query_api with its revised source. The host schedules source.refreshSeconds."
+            }
         }
         if let queue = task.musicQueue {
             result["music_queue"] = [

@@ -14,6 +14,7 @@
                 try await part("service boundaries") { try await ServiceBoundaryCheck.run() }
                 try await part("conversation lifecycle") { try await conversationLifecycle() }
                 try await part("runtime lifecycle") { try await RuntimeLifecycleCheck.run() }
+                try await part("generation recovery") { try await GenerationRecoveryCheck.run() }
                 try await part("execution receipts") { try await ExecutionLedgerCheck.run() }
                 try await part("pipeline") { try await PipelineCheck.run() }
                 try await part("consistency") { try run() }
@@ -73,6 +74,10 @@
                 html: "<strong data-bind='value'></strong>", compactHTML: "<span data-bind='value'></span>", css: "",
                 height: 120)
             model.agent.completionOverride = { turns in
+                if !model.agent.loadedToolFamilies.contains("web") || !model.agent.loadedToolFamilies.contains("workspace") {
+                    let family = model.agent.loadedToolFamilies.contains("web") ? "workspace" : "web"
+                    return ["tool_calls": [RequestStep(tool: "load_tools", arguments: JSONText.encode(["family": family])).call]]
+                }
                 round += 1
                 let errors = turns.filter {
                     $0["role"] as? String == "tool"
@@ -414,11 +419,11 @@
             }
             model.agent.completionOverride = { _ in
                 calls += 1
-                throw AppError.message("Cancellation must not enter execution")
+                return ["tool_calls": [RequestStep(tool: "manage_task", arguments: JSONText.encode(["operation": "end", "action": "cancel", "complete": true])).call]]
             }
             let reply = try await model.agent.run("oh, it's cancelled")
             try check(
-                calls == 0 && reply.contains("cancelled")
+                calls == 1 && reply.contains("cancelled")
                     && model.sideTasks.first?.terminalLabel?.contains("Calendar draft") == true,
                 "Natural cancellation exits without asking missing fields or executing a calendar write")
             try check(
@@ -472,23 +477,19 @@
                 intent.route = .web
                 return intent
             }
+            var rounds = 0
             model.agent.completionOverride = { _ in
-                [
-                    "role": "assistant",
-                    "tool_calls": [
-                        [
-                            "id": "fresh", "type": "function",
-                            "function": [
-                                "name": "finish", "arguments": "{\"outcome\":\"page_ready\",\"reply\":\"Refreshed\"}",
-                            ],
-                        ]
-                    ],
-                ]
+                rounds += 1
+                let steps = [RequestStep(tool: "load_tools", arguments: JSONText.encode(["family": "web"])),
+                             RequestStep(tool: "act", arguments: JSONText.encode(["action": "reload"])),
+                             RequestStep(tool: "finish", arguments: JSONText.encode(["outcome": "page_ready", "reply": "Refreshed"]))]
+                guard rounds <= steps.count else { throw AppError.message("Source refresh did not receive a receipt") }
+                return ["tool_calls": [steps[rounds - 1].call]]
             }
             _ = try await model.agent.run("Refresh the current reading", taskID: model.browser.id)
             try check(
                 model.webTitle != previousTitle,
-                "A new request for current external data refreshes the source instead of reusing the old observation")
+                "Current external data refreshes the page title (before: " + previousTitle + ", after: " + model.webTitle + ", rounds: " + String(rounds) + ")")
             model.taskRuntime.stopAll()
             model.browser.dispose()
             return checks

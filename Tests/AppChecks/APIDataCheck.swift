@@ -128,8 +128,9 @@
             model.refreshAPIData(owner)
             await model.taskActionJobs[owner]?.value
             try check(
-                model.sideTasks.first?.liveValues?["converted"] == "392.00" && model.sideTasks.first?.dataIssue != nil,
-                "An incorrect source identity preserves the last value and marks it unavailable instead of claiming success"
+                model.sideTasks.first?.liveValues?["converted"] == "—" && model.sideTasks.first?.dataIssue != nil
+                    && model.sideTasks.first?.taskSurface?.state["converted"] == "392.00",
+                "A changed source identity cannot label the previous verified reading as the new result"
             )
             payload["base"] = "HKD"
             payload["date"] = "2000-01-01"
@@ -294,14 +295,17 @@
             var receivedBindingHint = false
             model.agent.completionOverride = { turns in
                 rounds += 1
-                if rounds == 2 {
+                if rounds == 1 {
+                    return ["tool_calls": [RequestStep(tool: "load_tools", arguments: JSONText.encode(["family": "data"])).call]]
+                }
+                if rounds == 3 {
                     let feedback = turns.last(where: { $0["role"] as? String == "tool" })?["content"] as? String ?? ""
                     receivedBindingHint =
                         feedback.contains("$.source.fields")
                         && feedback.replacingOccurrences(of: "\\/", with: "/").contains("/quote")
                 }
                 var echoed = spec
-                if rounds == 1 {
+                if rounds == 2 {
                     echoed.fields[1].pointer = "/base"
                     echoed.expectations?.removeValue(forKey: "quote")
                 }
@@ -309,6 +313,7 @@
                 let input: [String: Any] = [
                     "title": "Currency conversion",
                     "source": try JSONSerialization.jsonObject(with: JSONEncoder().encode(echoed)),
+                    "requirements": [["label": "base currency", "anyOf": ["HKD"]], ["label": "quote currency", "anyOf": ["CNY"]]],
                     "outcomeEvidence": [["requirement": 1, "fieldKey": "quote"]],
                 ]
                 return [
@@ -324,7 +329,7 @@
             let browser = model.browser
             let reply = try await model.agent.run("Convert 56 HKD to CNY")
             try check(
-                rounds == 2 && receivedBindingHint && reply.contains("47.60") && model.browser === browser
+                rounds == 3 && receivedBindingHint && reply.contains("47.60") && model.browser === browser
                     && model.webURL.isEmpty,
                 "API execution repairs a source binding using same-response hints, accepts duplicate echoes and never opens a webpage"
             )
@@ -362,23 +367,19 @@
                         OutcomeRequirement(label: "quote currency", anyOf: ["CNY"]),
                     ], route: .web)
             }
+            var webRounds = 0
             web.agent.completionOverride = { _ in
+                webRounds += 1
                 @MainActor func call(_ name: String, _ args: [String: Any]) -> [String: Any] {
                     [
                         "id": UUID().uuidString, "type": "function",
                         "function": ["name": name, "arguments": JSONText.encode(args)],
                     ]
                 }
-                return [
-                    "role": "assistant",
-                    "tool_calls": [
-                        call(
-                            "compose_ui",
-                            [
-                                "markup": ["html": "<script>invalid()</script>", "compactHTML": "", "css": ""],
-                                "readings": [], "actions": [],
-                            ]),
-                        call(
+                if webRounds == 1 { return ["tool_calls": [call("load_tools", ["family": "web"])]] }
+                if webRounds == 2 { return ["tool_calls": [call("observe", [:])]] }
+                if webRounds == 3 { return ["tool_calls": [call("compose_ui", ["markup": ["html": "<script>invalid()</script>", "compactHTML": "", "css": ""], "readings": [], "actions": []])]] }
+                return ["role": "assistant", "tool_calls": [call(
                             "finish",
                             [
                                 "outcome": "page_ready", "source_only": true, "reply": "56 HKD = 47.60 CNY",
@@ -390,9 +391,7 @@
                                     ["requirement": 0, "readingKey": "base", "valueKey": "converted"],
                                     ["requirement": 1, "readingKey": "quote", "valueKey": "converted"],
                                 ],
-                            ]),
-                    ],
-                ]
+                            ])]]
             }
             let fallbackReply = try await web.agent.run("Convert 56 HKD to CNY", taskID: webID)
             try check(
@@ -405,6 +404,185 @@
                     "document.getElementById('converted').value='50.40';window.__orvlet.state().readings.converted")
                 as? String
             try check(changed == "50.40", "Web fallback input readings update in place without freezing copied text")
+            checks += try await backgroundReading()
+            return checks
+        }
+        static func backgroundReading() async throws -> [String] {
+            let suite = "orvlet.background." + UUID().uuidString
+            let store = UserDefaults(suiteName: suite)!
+            let model = AppModel(defaults: store)
+            defer { store.removePersistentDomain(forName: suite) }
+            model.isLiveTest = true
+            model.persistHistory = false
+            defer {
+                model.dataRefreshTimer?.invalidate()
+                model.adaptive.invalidate()
+                model.browser.dispose()
+            }
+            let today = "2026-01-01"
+            var checks: [String] = []
+            func check(_ ok: Bool, _ message: String) throws {
+                guard ok else { throw AppError.message(message) }
+                checks.append(message)
+            }
+            // A retained reading must update while the user is away, including after restoring its recipe.
+            var reading = APIDataSpec(url: "https://example.org/reading", fields: [
+                APIDataField(key: "rate", label: "Reading", pointer: "/rate"),
+                APIDataField(key: "date", label: "Published", pointer: "/date")
+            ])
+            reading.refreshSeconds = 60
+            reading.card = DataCardPreset(kind: .reading, primaryKey: "rate", subject: "Gauge")
+            var projection = reading
+            projection.outputs = [.init(key: "rate", label: "Current")]
+            let sample = ["rate": "16", "date": today]
+            let direct = try await model.apiData.calculate(projection, state: sample)
+            try check(direct["rate"] == "16", "A fetched reading can be listed as an output without generated code")
+            projection.outputs?.append(.init(key: "doubleRate", label: "Double"))
+            projection.calculation = "return {state:{...state, doubleRate:Number(state.rate)*2, scratch:5}};"
+            let calculated = try await model.apiData.calculate(projection, state: sample)
+            try check(calculated["doubleRate"] == "32" && calculated["rate"] == "16" && calculated["scratch"] == nil,
+                "Project the declared derived result and preserve the verified source field")
+            projection.calculation = "return {state:{wrong:32}};"
+            do {
+                _ = try await model.apiData.calculate(projection, state: sample)
+                throw AppError.message("Published a missing calculation result")
+            } catch let error as ToolArgumentError {
+                try check(error.path == "$.source.calculation" && error.issue.contains("doubleRate") && error.issue.contains("wrong"),
+                    "Repair identifies the missing output and the actual returned key")
+            }
+            projection.calculation = "return {rate:0, doubleRate:32};"
+            do {
+                _ = try await model.apiData.calculate(projection, state: sample)
+                throw AppError.message("Published a modified source reading")
+            } catch let error as ToolArgumentError {
+                try check(error.issue.contains("changes fetched field"), "Calculations cannot replace a verified source output")
+            }
+            let saved = try JSONDecoder().decode(APIDataSpec.self, from: JSONEncoder().encode(reading))
+            var reads = 0
+            model.apiData = APIDataService(code: model.taskCode, fetch: { _ in
+                reads += 1
+                return ["rate": reads, "date": today] as [String: Any]
+            })
+            let first = try await model.apiData.read(saved)
+            let readingSurface = try saved.surface(title: "Gauge readings", state: first)
+            let readingID = UUID()
+            model.publishTaskSurface(readingSurface, id: readingID)
+            let readingIndex = model.sideTasks.firstIndex { $0.id == readingID }!
+            model.sideTasks[readingIndex].dataUpdatedAt = Date().addingTimeInterval(-61)
+            model.collapsed = true
+            model.selectedTaskID = nil
+            model.scheduleDataRefresh()
+            for _ in 0..<40 {
+                if model.sideTasks[readingIndex].state["rate"] == "2" { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            try check(model.sideTasks[readingIndex].state["rate"] == "2" && reads == 2
+                && readingSurface.markup.compactHTML.contains("Gauge")
+                && CardMarkup.bindingKeys(in: readingSurface.markup.compactHTML).contains("rate")
+                && CardMarkup.bindingKeys(in: readingSurface.markup.html).contains("rate"),
+                "An unselected collapsed reading refreshes its shared primary value once")
+            model.beginAmbientRequest("Check the current reading", taskID: readingID)
+            model.busy = true
+            model.agent.nativeRequestActive = true
+            model.agent.activeTaskID = readingID
+            let result = try await model.agent.execute("control_task", ["operation": "invoke", "action": "refreshData"])
+            try check(result["verified"] as? Bool == true && reads == 3 && model.sideTasks[readingIndex].state["rate"] == "3",
+                "Chat invokes the registered remote action and verifies its new value")
+            _ = try await model.agent.execute("control_task", ["operation": "refresh"])
+            try check(reads == 4 && model.sideTasks[readingIndex].state["rate"] == "4", "Direct refresh uses the same source")
+            _ = try await model.agent.execute("control_task", ["operation": "refresh"])
+            try check(reads == 4, "A duplicate action reuses its verified receipt")
+            model.apiData = APIDataService(code: model.taskCode, fetch: { _ in throw URLError(.notConnectedToInternet) })
+            do {
+                _ = try await model.agent.execute("control_task", ["operation": "invoke", "action": "refreshData", "fields": [:]], requestScoped: false)
+                throw AppError.message("Offline read reported success")
+            } catch {
+                try check(model.sideTasks[readingIndex].status == "Update unavailable" && model.sideTasks[readingIndex].state["rate"] == "4" && model.sideTasks[readingIndex].dataIssue != nil, "An unavailable source preserves the last verified value")
+            }
+            model.agent.nativeRequestActive = false
+            model.busy = false
+            model.finishAmbientRequest()
+            var legacy = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+            try check(legacy.preferredInterfaceLanguage == "English", "Legacy settings default to English")
+            var draft = legacy
+            draft.interfaceLanguage = "  Português do Brasil  "
+            legacy.applyPreferences(from: draft)
+            let restored = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(legacy))
+            try check(restored.preferredInterfaceLanguage == "Português do Brasil" && restored.interfaceLanguageInstruction.contains("Português do Brasil"), "A freely entered interface language survives a settings round trip")
+            draft.interfaceLanguage = "  "
+            legacy.applyPreferences(from: draft)
+            try check(legacy.preferredInterfaceLanguage == "English", "Clearing the preference restores English")
+            var attempts = 0
+            let recovered = try await PublicDataClient.readWithRetry {
+                attempts += 1
+                if attempts == 1 { throw URLError(.networkConnectionLost) }
+                return 9
+            }
+            try check(attempts == 2 && recovered == 9, "A dropped public read recovers with one retry")
+            attempts = 0
+            do {
+                _ = try await PublicDataClient.readWithRetry { () -> Int in
+                    attempts += 1
+                    throw URLError(.notConnectedToInternet)
+                }
+            } catch let failure as URLError where failure.code == .notConnectedToInternet {}
+            try check(attempts == 1, "A known offline state does not spin on retries")
+
+            var editable = reading
+            editable.inputs = ["station": "North"]
+            editable.expectations = ["stationID": "{station}"]
+            editable.fields.append(.init(key: "stationID", label: "Station", pointer: "/station"))
+            editable.fields.append(.init(key: "place", label: "Location", pointer: "/place"))
+            editable.card?.displayNameKey = "place"
+            editable.card?.primaryKey = " RATE "
+            editable.card?.detailKeys = ["missing", "DATE", "date"]
+            var station = "North"
+            var stationReads = 0
+            model.apiData = APIDataService(code: model.taskCode, fetch: { _ in
+                stationReads += 1
+                return ["rate": station == "North" ? "12" : "17", "station": station, "place": station + " Pier", "date": today]
+            })
+            editable = try editable.validated()
+            try check(editable.card?.primaryKey == "rate" && editable.card?.detailKeys == ["date"], "Unambiguous card slots are repaired without changing the primary meaning")
+            let snapshot = try await model.apiData.read(editable)
+            let stationID = UUID()
+            model.publishTaskSurface(try editable.surface(title: "Station", state: snapshot), id: stationID)
+            let initialStation = model.sideTasks.first { $0.id == stationID }
+            try check(initialStation?.state["place"] == "North Pier"
+                && initialStation.map { CardMarkup.bindingKeys(in: $0.presentation.compactHTML).contains("place") } == true,
+                "A station capsule binds the fetched display name independently of its lookup key")
+            await model.refreshAPIData(stationID, fields: ["station": "South"], force: false)?.value
+            let wrong = model.sideTasks.first { $0.id == stationID }
+            try check(stationReads == 2 && wrong?.state["rate"] == "—" && wrong?.taskSurface?.state["rate"] == "12",
+                "An identity edit on the same URL refetches and keeps the previous station out of the new view")
+            station = "South"
+            await model.refreshAPIData(stationID)?.value
+            let newStation = model.sideTasks.first { $0.id == stationID }
+            try check(newStation?.state["rate"] == "17" && newStation?.state["place"] == "South Pier"
+                && newStation?.presentation.compactHTML == initialStation?.presentation.compactHTML,
+                "The same capsule follows the changed station name and reading without regenerating its layout")
+            model.closeTask(stationID)
+
+            var archive = SavedTaskList()
+            let active = SideTask(kind: .workspace, title: "Notes")
+            let record = try JSONSerialization.jsonObject(with: JSONEncoder().encode(active))
+            let unknownID = UUID()
+            let bad = ["id": unknownID.uuidString, "kind": "future"]
+            let mixed = try JSONSerialization.data(withJSONObject: [record, bad, record])
+            let good = archive.read(mixed)
+            let preserved = try JSONSerialization.jsonObject(with: archive.encoded(good)) as! [[String: Any]]
+            try check(good.map(\.id) == [active.id] && preserved.count == 2 && preserved[1]["kind"] as? String == "future", "A malformed saved task and duplicate ID leave other tasks restorable without losing the unknown record")
+            archive.remove(unknownID)
+            try check(try JSONDecoder().decode([SideTask].self, from: archive.encoded(good)).count == 1, "Explicit deletion removes retained unreadable records")
+            let empty = APIDataSpec(url: reading.url, fields: [])
+            do {
+                _ = try empty.surface(title: "Saved reading", state: [:])
+                throw AppError.message("Empty saved recipe unexpectedly rendered")
+            } catch let error as ToolArgumentError { try check(error.path == "$.source.fields", "An empty saved data recipe cannot crash restoration") }
+            try await CardVisualCheck.run()
+            checks.append("A non-financial card renders and refreshes a real WebKit chart and table")
+            model.closeTask(readingID)
+            try check(model.dataRefreshTimer == nil, "Closing the last scheduled reading releases the timer")
             return checks
         }
         static func live(_ model: AppModel, delegate: AppDelegate) async {

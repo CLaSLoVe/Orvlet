@@ -6,7 +6,7 @@ extension APIDataSpec {
         card?.kind == .weather && URLComponents(string: url)?.host?.lowercased() == "wttr.in"
     }
     var withWeatherControls: APIDataSpec {
-        guard isWttrWeather, customLayout != true else { return self }
+        guard isWttrWeather, usesEnglishPresetCopy, customLayout != true else { return self }
         var result = self
         let units = [
             "maxtempC": "°C", "mintempC": "°C", "avgtempC": "°C", "temp_C": "°C", "tempC": "°C", "FeelsLikeC": "°C",
@@ -72,7 +72,7 @@ extension APIDataSpec {
         return result
     }
     func optionLabel(_ value: String, for key: String) -> String {
-        isWttrWeather && key == "weatherDay"
+        usesEnglishPresetCopy && isWttrWeather && key == "weatherDay"
             ? (["0": "Today", "1": "Tomorrow", "2": "In 2 days"][value] ?? value) : value
     }
     var weatherLowKey: String? {

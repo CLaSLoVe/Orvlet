@@ -55,6 +55,9 @@ private struct TaskDragPreview: View {
 /// Delay activation until release. Card drags preview closing; background drags move the window.
 struct WindowDragArea: NSViewRepresentable {
     var onClick: (() -> Void)? = nil
+    var onDoubleClick: (() -> Void)? = nil
+    var delaySingleClick = false
+    var allowsWindowDrag = true
     var onOutsideDrop: (() -> Void)? = nil
     var taskID: UUID? = nil
     var taskPreview: TaskDragAppearance? = nil
@@ -64,6 +67,9 @@ struct WindowDragArea: NSViewRepresentable {
     func makeNSView(context: Context) -> DragView { DragView() }
     func updateNSView(_ view: DragView, context: Context) {
         view.onClick = onClick
+        view.onDoubleClick = onDoubleClick
+        view.delaySingleClick = delaySingleClick
+        view.allowsWindowDrag = allowsWindowDrag
         view.enabled = enabled
         view.pressed = pressed
         view.onOutsideDrop = onOutsideDrop
@@ -72,8 +78,18 @@ struct WindowDragArea: NSViewRepresentable {
         view.identifier = taskID.map { NSUserInterfaceItemIdentifier($0.uuidString) }
     }
     class DragView: NSView {
+        private static weak var pendingClickOwner: DragView?
+        static func cancelPendingClicks() {
+            pendingClickOwner?.pendingClick?.cancel()
+            pendingClickOwner?.pendingClick = nil
+            pendingClickOwner = nil
+        }
         var onOutsideDrop: (() -> Void)?
         var onClick: (() -> Void)?
+        var onDoubleClick: (() -> Void)?
+        var delaySingleClick = false
+        var allowsWindowDrag = true
+        private var pendingClick: Task<Void, Never>?
         var enabled = true
         var pressed: (Bool) -> Void = { _ in }
         var taskPreview: TaskDragAppearance?
@@ -91,6 +107,7 @@ struct WindowDragArea: NSViewRepresentable {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
         override func mouseDown(with event: NSEvent) {
             guard enabled, !committedDrop, let window else { return }
+            Self.cancelPendingClicks()
             clearPreview()
             if onOutsideDrop != nil { window.makeFirstResponder(self) }
             startPoint = window.convertPoint(toScreen: event.locationInWindow)
@@ -115,6 +132,8 @@ struct WindowDragArea: NSViewRepresentable {
                 if outsideDropArmed { NSCursor.disappearingItem.set() } else { NSCursor.closedHand.set() }
                 return
             }
+            guard allowsWindowDrag else { return }
+            if firstDrag { (window as? ShellPanel)?.moveInteraction(true) }
             window.setFrameOrigin(NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy))
         }
         func isOutsideDrop(_ event: NSEvent) -> Bool {
@@ -127,6 +146,7 @@ struct WindowDragArea: NSViewRepresentable {
             startPoint = nil
             pressed(false)
             NSCursor.arrow.set()
+            if onOutsideDrop == nil { (window as? ShellPanel)?.moveInteraction(false) }
             if didDrag, onOutsideDrop != nil, let window {
                 let closing =
                     enabled
@@ -135,10 +155,33 @@ struct WindowDragArea: NSViewRepresentable {
                 finishPreview(closing: closing)
                 return
             }
-            if enabled && !didDrag && bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+            if enabled && !didDrag && bounds.contains(convert(event.locationInWindow, from: nil)) {
+                if event.clickCount >= 2, let onDoubleClick {
+                    onDoubleClick()
+                } else if delaySingleClick, onDoubleClick != nil, let onClick {
+                    Self.pendingClickOwner = self
+                    pendingClick = Task { @MainActor [weak self] in
+                        do {
+                            try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval))
+                            guard let self, self.enabled, self.window != nil,
+                                Self.pendingClickOwner === self
+                            else { return }
+                            Self.pendingClickOwner = nil
+                            self.pendingClick = nil
+                            onClick()
+                        } catch {}
+                    }
+                } else {
+                    onClick?()
+                }
+            }
         }
         override func keyDown(with event: NSEvent) {
+            if event.keyCode == 53 {
+                Self.cancelPendingClicks()
+            }
             if event.keyCode == 53, startPoint != nil {
+                if onOutsideDrop == nil { (window as? ShellPanel)?.moveInteraction(false) }
                 startPoint = nil
                 didDrag = false
                 pressed(false)
@@ -224,6 +267,11 @@ struct WindowDragArea: NSViewRepresentable {
             // A source refresh may replace its view during the dismissal. Once
             // released outside, finish that one committed close independently.
             if newWindow == nil {
+                if Self.pendingClickOwner === self { Self.cancelPendingClicks() }
+                pendingClick?.cancel()
+                pendingClick = nil
+                pressed(false)
+                if onOutsideDrop == nil { (window as? ShellPanel)?.moveInteraction(false) }
                 startPoint = nil
                 didDrag = false
                 if !committedDrop { clearPreview() }
@@ -234,11 +282,21 @@ struct WindowDragArea: NSViewRepresentable {
 }
 
 struct WindowDragButtonStyle: PrimitiveButtonStyle {
-    func makeBody(configuration: Configuration) -> some View { PressableDragButton(configuration: configuration) }
+    var onDoubleClick: (() -> Void)? = nil
+    var delaySingleClick = false
+    var allowsWindowDrag = true
+    func makeBody(configuration: Configuration) -> some View {
+        PressableDragButton(
+            configuration: configuration, onDoubleClick: onDoubleClick,
+            delaySingleClick: delaySingleClick, allowsWindowDrag: allowsWindowDrag)
+    }
 }
 
 private struct PressableDragButton: View {
     let configuration: PrimitiveButtonStyleConfiguration
+    let onDoubleClick: (() -> Void)?
+    let delaySingleClick: Bool
+    let allowsWindowDrag: Bool
     @Environment(\.isEnabled) private var enabled
     @Environment(\.calmReducedMotion) private var reduced
     @Environment(\.accessibilityReduceMotion) private var systemReduced
@@ -250,8 +308,12 @@ private struct PressableDragButton: View {
             .animation(CalmMotion.response(reduced: reduced || systemReduced, pressed: pressed), value: pressed)
             .contentShape(Rectangle())
             .overlay {
-                WindowDragArea(onClick: configuration.trigger, enabled: enabled, pressed: { pressed = $0 })
-                    .accessibilityHidden(true)
+                WindowDragArea(
+                    onClick: configuration.trigger, onDoubleClick: onDoubleClick,
+                    delaySingleClick: delaySingleClick, allowsWindowDrag: allowsWindowDrag,
+                    enabled: enabled, pressed: { pressed = $0 }
+                )
+                .accessibilityHidden(true)
             }
             .accessibilityAction { if enabled { configuration.trigger() } }
     }
@@ -304,8 +366,9 @@ struct TaskDragHandle: NSViewRepresentable {
 struct TaskCardButtonStyle: PrimitiveButtonStyle {
     let model: AppModel
     let id: UUID
+    var opensTask = false
     func makeBody(configuration: Configuration) -> some View {
-        PressableTaskCard(configuration: configuration, model: model, id: id)
+        PressableTaskCard(configuration: configuration, model: model, id: id, opensTask: opensTask)
     }
 }
 
@@ -313,6 +376,7 @@ private struct PressableTaskCard: View {
     let configuration: PrimitiveButtonStyleConfiguration
     let model: AppModel
     let id: UUID
+    let opensTask: Bool
     @Environment(\.isEnabled) private var enabled
     @State private var pressed = false
     var body: some View {
@@ -322,7 +386,10 @@ private struct PressableTaskCard: View {
             .contentShape(Rectangle())
             .overlay {
                 WindowDragArea(
-                    onClick: configuration.trigger, onOutsideDrop: { model.closeTask(id) }, taskID: id,
+                    onClick: configuration.trigger,
+                    onDoubleClick: opensTask ? { model.openTaskFromDoubleClick(id) } : nil,
+                    delaySingleClick: opensTask && model.taskClickWillCollapse(id),
+                    onOutsideDrop: { model.closeTask(id) }, taskID: id,
                     taskPreview: model.dragAppearance(id), dragging: { model.draggingTaskID = $0 ? id : nil },
                     enabled: enabled, pressed: { pressed = $0 }
                 ).accessibilityHidden(true)

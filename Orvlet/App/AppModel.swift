@@ -87,8 +87,13 @@ final class AppModel: ObservableObject {
     var musicJobs: [UUID: Task<Void, Never>] = [:]
     var musicRevisions: [UUID: UUID] = [:]
     var taskSourceRestorations: [UUID: Task<Void, Error>] = [:]
+    var dataRefreshTimer: Timer?
+    var dataRefreshAttempts: [UUID: Date] = [:]
     var taskClock: Timer?
-    var requestReceivedAt = Date()
+    var requestReceivedAt: Date {
+        get { currentRun.receivedAt }
+        set { currentRun.receivedAt = newValue }
+    }
     @Published var shortcutStatus = "Ready"
     var onShortcutChanged: (() -> Void)?
     var onCommandResize: ((Double) -> Void)?
@@ -103,6 +108,8 @@ final class AppModel: ObservableObject {
     @Published var canGoForward = false
     @Published var webExpanded = false
     @Published private(set) var preferredWebSize = NSSize(width: 320, height: 220)
+    var shelfArchive = SavedTaskList()
+    var historyArchive = SavedTaskList()
     let preferences: UserDefaults
     lazy var sessions = SessionStore(defaults: preferences)
     @Published var recentSessions: [SavedSession] = []
@@ -118,9 +125,7 @@ final class AppModel: ObservableObject {
         {
             messages = saved
         }
-        archivedTaskHistory =
-            defaults.data(forKey: "taskHistory.v1").flatMap { try? JSONDecoder().decode([SideTask].self, from: $0) }
-            ?? []
+        if let data = defaults.data(forKey: "taskHistory.v1") { archivedTaskHistory = historyArchive.read(data) }
         migrateConversationOwnership()
         if let saved = defaults.dictionary(forKey: "webWindowSize"),
             let w = saved["width"] as? Double, let h = saved["height"] as? Double, w.isFinite, h.isFinite
@@ -160,14 +165,22 @@ final class AppModel: ObservableObject {
     @Published var archivedTaskHistory: [SideTask] = []
     var conversationDrafts: [UUID: String] = [:]
     var newTaskDraft = ""
-    @Published var busy = false {
-        didSet {
-            refreshHover()
-            if !busy { taskRanking.schedule() }
-        }
+    @Published var commandRuns: [RequestRun] = []
+    lazy var idleRun = RequestRun(model: self)
+    weak var browserRun: RequestRun?
+    @Published private var legacyBusy = false
+    var busy: Bool {
+        get { legacyBusy || !commandRuns.isEmpty }
+        set { legacyBusy = newValue; refreshHover(); if !busy { taskRanking.schedule() } }
     }
-    @Published var activity = "" { didSet { recordProgress(activity) } }
-    @Published var activeRequest: TaskRequestContext?
+    var activity: String {
+        get { currentRun.activity }
+        set { currentRun.activity = newValue; recordProgress(newValue) }
+    }
+    var activeRequest: TaskRequestContext? {
+        get { currentRun.context }
+        set { objectWillChange.send(); currentRun.context = newValue }
+    }
     let taskCode = TaskCodeRuntime()
     lazy var apiData = APIDataService(code: taskCode)
     lazy var taskRuntime = TaskRuntimeEngine(store: self, code: taskCode) { id, attempt, error in
@@ -177,7 +190,15 @@ final class AppModel: ObservableObject {
     }
     @Published var taskActionJobs: [UUID: Task<Void, Never>] = [:]
     @Published var queuedTaskRequests: [TaskUserRequest] = []
-    @Published var ambientRequestID: UUID? { didSet { if oldValue != ambientRequestID { taskRanking.schedule() } } }
+    var ambientRequestID: UUID? {
+        get { currentRun.ambientID }
+        set {
+            guard currentRun.ambientID != newValue else { return }
+            objectWillChange.send()
+            currentRun.ambientID = newValue
+            taskRanking.schedule()
+        }
+    }
     var preferredMediaTaskID: UUID?
     @Published var buildingSurface = false
     @Published var surfaceOrigin = ""
@@ -241,8 +262,14 @@ final class AppModel: ObservableObject {
     @Published var lastActionError: String?
     var persistHistory = true
     var isLiveTest = false { didSet { if isLiveTest && !oldValue { messages = [] } } }
-    var taskFailed = false
-    var latestIntent = ""
+    var taskFailed: Bool {
+        get { currentRun.failed }
+        set { currentRun.failed = newValue }
+    }
+    var latestIntent: String {
+        get { currentRun.intent }
+        set { currentRun.intent = newValue }
+    }
     var lastInteraction = ""
     var hasCustomSurface = false
     var accent: Color { settings.theme.color }
@@ -280,13 +307,19 @@ final class AppModel: ObservableObject {
     var onHide: (() -> Void)?
     var onShow: (() -> Void)?
     var onSettings: (() -> Void)?
-    var agentTask: Task<Void, Never>?
-    var agentStopping = false
+    var agentTask: Task<Void, Never>? {
+        get { currentRun.job }
+        set { currentRun.job = newValue }
+    }
+    var agentStopping: Bool {
+        get { currentRun.stopping }
+        set { currentRun.stopping = newValue }
+    }
     var requestIsStopping: Bool { agentStopping }
     var messagesAfterStop: [String] = []
     let playbackCoordinator = PlaybackCoordinator()
     lazy var browser = BrowserController(model: self)
-    lazy var agent = AgentController(model: self)
+    var agent: AgentController { currentRun.agent }
     lazy var calendarService = CalendarService()
     lazy var bridge = LocalBridge(model: self)
     lazy var adaptive = InterfaceComposer(model: self)

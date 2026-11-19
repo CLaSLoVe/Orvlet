@@ -6,12 +6,39 @@ extension AgentController {
     func executeCompletionTool(_ name: String, _ input: [String: Any], revision: Int) async throws -> [String: Any] {
         switch name {
         case "finish":
+            if input["outcome"] as? String == "needs_input" {
+                let question = (input["reply"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !question.isEmpty, question.count <= RequestIntent.clarificationLimit else {
+                    throw ToolArgumentError(
+                        path: "$.reply",
+                        issue:
+                            "ask one concise question (at most 160 characters) limited to essential missing information"
+                    )
+                }
+                if !checkedStandaloneMeaning, currentRequest.count <= 160, model.activeRequest?.owner == nil,
+                    !attemptedTaskWork, !operatedPage, RequestRun.current?.assignment == nil {
+                    checkedStandaloneMeaning = true
+                    if let key = try? await model.loadModelKey(for: requestConnection),
+                        let reading = try? await standaloneReading(currentRequest, key: key) {
+                        try Task.checkCancellation()
+                        guard revision == steeringRevision else { return ["superseded": true] }
+                        return ["status": "continue", "possibleMeaning": reading,
+                            "next": "A standalone reading is available. Answer the original request directly if it matches; omit optional presentation questions."]
+                    }
+                }
+                replyKind = .needsInput
+                verifyEffect(question, needsInput: true)
+                return ["status": "needs_clarification", "verified": false]
+            }
             if requestIntent.isNative {
                 throw AppError.message(
                     "Local requests finish only through their native action or calendar_clarify, never through finish.")
             }
             let outcome = input["outcome"] as? String ?? ""
             if outcome == "blocked" {
+                if let tool = recovery.lastTool, recovery.awaitingAlternative || !recovery.switched, ["query_api", "read_value", "inspect_api", "compose_ui", "present_ui", "reuse_saved_ui", "navigate"].contains(tool) {
+                    throw AppError.message("A recoverable method failed. Try another source or capability before reporting a blocker.")
+                }
                 failureReason = input["reply"] as? String ?? "Unable to complete this page action."
                 return ["blocked": true]
             }
@@ -23,8 +50,21 @@ extension AgentController {
             if unresolvedCalendar {
                 throw AppError.message("The calendar action is not verified. Do not claim it succeeded.")
             }
-            if outcome == "answer", requestIntent.kind == .general {
-                throw AppError.message("A task request needs an executed and verified result, not finish(answer).")
+            if outcome == "answer" {
+                guard requestIntent.placement?.layout != .existing else {
+                    throw ToolArgumentError(path: "$.outcome", issue: "a change to a selected card needs an actual control or management action and its receipt before reporting success")
+                }
+                guard requestedDelivery != .card, RequestRun.current?.assignment == nil else {
+                    throw AppError.message("The requested card still needs to be created and verified.")
+                }
+                guard !recovery.requiresVerifiedResult, !attemptedTaskWork, !operatedPage, executionLedger.entries.isEmpty else {
+                    throw AppError.message(
+                        "An action was attempted. Verify its actual result instead of reporting an informational answer."
+                    )
+                }
+                replyKind = .information
+                verifyEffect(input["reply"] as? String ?? "")
+                return ["answer": true, "verified": false]
             }
             if outcome == "task_ready" {
                 if let receipt = taskControlReceipt, receipt.taskID == activeTaskID,

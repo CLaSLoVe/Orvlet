@@ -210,7 +210,7 @@ struct SurfacePlan: Codable {
         let rows = readings.map { "<div data-bind='" + $0.key + "'></div>" }.joined()
         let markup = CardMarkup(
             html: "<section class='source-result'>" + rows + "</section>",
-            compactHTML: "<strong data-bind='" + primary + "'></strong>",
+            compactHTML: "<div class='calm-glance'><small class='calm-label' data-bind='title'></small><strong class='calm-value' data-bind='" + primary + "'></strong></div>",
             css: ".source-result{display:grid;gap:8px;font-variant-numeric:tabular-nums}")
         return try SurfacePlan(
             components: [], width: 320, height: 180, title: observation["title"] as? String, markup: markup,

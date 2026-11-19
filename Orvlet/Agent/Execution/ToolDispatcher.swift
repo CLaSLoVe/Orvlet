@@ -2,6 +2,13 @@ import Foundation
 
 @MainActor
 extension AgentController {
+    func invalidatePendingInterface(_ name: String) {
+        if nativeRequestActive && ["compose_ui", "reuse_ui"].contains(name) {
+            interfaceAttempted = true
+            pendingSurface = nil
+        }
+    }
+
     func execute(_ name: String, _ input: [String: Any], goal proposedGoal: Int? = nil, requestScoped: Bool = true)
         async throws -> [String: Any]
     {
@@ -11,15 +18,15 @@ extension AgentController {
         payload.removeValue(forKey: "goal")
         let arguments: [String: Any]
         do { arguments = try ToolContract.arguments(name, payload) } catch {
-            if nativeRequestActive && ["compose_ui", "reuse_ui"].contains(name) {
-                interfaceAttempted = true
-                pendingSurface = nil
-            }
+            invalidatePendingInterface(name)
             throw error
         }
+        if nativeRequestActive { try bindExecutionRequirements(name, arguments) }
         let ledger = requestScoped ? executionLedger : RequestExecutionLedger()
         let goal = try ledger.resolveGoal(proposedGoal ?? input["goal"] as? Int)
-        let mutation = AgentToolName(rawValue: name)?.changesState == true
+        let mutation =
+            AgentToolName(rawValue: name)?.changesState == true
+            && !(name == "control_task" && arguments["operation"] as? String == "inspect")
         if ledger.goals.count > 1 && mutation && goal == nil {
             throw ToolArgumentError(path: "goal", issue: "Assign this action to one of the declared goals.")
         }
@@ -45,15 +52,22 @@ extension AgentController {
                 )
             }
         }
+        if mutation,
+            ledger.entries.values.contains(where: {
+                if case .uncertain = $0 { return true }
+                return false
+            })
+        {
+            throw AppError.message(
+                "An earlier effect is unconfirmed. Read back the result or report the blocker before making another change."
+            )
+        }
         if mutation, let goal, ledger.uncertainGoals.contains(goal) {
             throw AppError.message(
                 "This goal has an unconfirmed effect. Observe and verify it before any further change, or report the blocker."
             )
         }
-        if nativeRequestActive && ["compose_ui", "reuse_ui"].contains(name) {
-            interfaceAttempted = true
-            pendingSurface = nil
-        }
+        invalidatePendingInterface(name)
         let scope = ToolExecutionContext()
         let operation = Task { @MainActor in
             do {
@@ -101,11 +115,6 @@ extension AgentController {
         if nativeRequestActive && unavailableTools.contains(name) {
             throw AppError.message("This path is unavailable for the current request. Use the suggested fallback.")
         }
-        guard !nativeRequestActive || requestIntent.allows(name) else {
-            throw AppError.message(
-                "This action does not match the current human request. Use the appropriate tool or ask for clarification."
-            )
-        }
         if ["calendar_create", "calendar_clarify", "timer_start"].contains(name), !nativeRequestActive {
             throw AppError.message("Native actions require an active human request.")
         }
@@ -118,6 +127,19 @@ extension AgentController {
                 ? .verifying
                 : ["compose_ui", "present_ui", "reuse_ui", "reuse_saved_ui"].contains(name) ? .presenting : .executing)
         let revision = steeringRevision
+        if ["calendar_create", "timer_start"].contains(name) {
+            let humanText =
+                (RequestRun.current?.assignment?.original ?? currentRequest) + "\n"
+                + model.messages.filter { $0.isUser && $0.taskID == activeTaskID }.suffix(4).map(\.text).joined(
+                    separator: "\n")
+            guard nativeRequestActive, let evidence = input["request_evidence"] as? String,
+                !evidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, humanText.contains(evidence),
+                RequestRun.current?.assignment?.permitsActionEvidence(evidence) != false
+            else {
+                throw ToolArgumentError(
+                    path: "request_evidence", issue: "quote the human instruction authorizing this action")
+            }
+        }
         if nativeRequestActive {
             let action = input["action"] as? String ?? name
             let operation = input["operation"] as? String ?? ""
@@ -136,11 +158,13 @@ extension AgentController {
             name), let owner = model.requestPageID
         {
             try await model.prepareTaskSource(owner)
+            preparedBrowser = true
         }
         guard let tool = AgentToolName(rawValue: name) else { throw AppError.message("Unknown action.") }
         if name == "control_media" {
             return try await executeMediaControl(input)
         }
+        if tool.domain == .browser || model.requestPageID != nil { try await model.acquireBrowserForCommand() }
         switch tool.domain {
         case .data: return try await executeDataTool(name, input, revision: revision)
         case .workspace: return try await executeWorkspaceTool(name, input, revision: revision)

@@ -69,6 +69,12 @@ struct SideTask: Identifiable, Codable {
             return ["Task failed", "Needs attention"].contains(status) ? "exclamationmark.circle" : "checkmark.circle"
         }
     }
+    var timerSubject: String {
+        let label = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let duration, label.isEmpty || label.caseInsensitiveCompare("Timer") == .orderedSame else { return title }
+        let seconds = Int(duration)
+        return seconds % 60 == 0 ? "\(seconds / 60) min" : "\(seconds) s"
+    }
     var remaining: Double { max(0, deadline?.timeIntervalSinceNow ?? pausedSeconds ?? 0) }
     var state: [String: String] {
         let seconds = Int(ceil(remaining))
@@ -82,6 +88,7 @@ struct SideTask: Identifiable, Codable {
         ].merging(liveValues ?? [:]) { _, reading in reading }
         if kind == .timer, let duration {
             let total = Int(duration)
+            values["timerSubject"] = timerSubject
             values["timerDuration"] = total % 60 == 0 ? "\(total / 60) minute timer" : "\(total) second timer"
         }
         if let spec = taskSurface?.apiData { values = spec.presentationState(values) }

@@ -27,6 +27,9 @@ SUITES = {
     'listening': ('--listening-check', 'orvlet-listening-checks.json'),
     'music': ('--music-check', 'orvlet-music-check.json'),
     'motion': ('--motion-check', 'orvlet-motion-checks.json'),
+    'readings': ('--data-reading-check', 'orvlet-reading-checks.json'),
+    'generation': ('--generation-recovery-check', 'orvlet-generation-checks.json'),
+    'source-window': ('--source-window-check', 'orvlet-motion-checks.json'),
     'protection': ('--protection-check', 'orvlet-protection-checks.json'),
 }
 
@@ -44,6 +47,7 @@ def verify_report(path: Path, started: float) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--skip-build', action='store_true')
+    parser.add_argument('--app', type=Path, help='Explicit native test executable')
     parser.add_argument('--full', action='store_true', help='Run every distinct suite; default is core behavior only')
     parser.add_argument('suites', nargs='*', help=', '.join(SUITES))
     args = parser.parse_args()
@@ -56,7 +60,7 @@ def main() -> int:
         parser.error('Native checks require a logged-in macOS desktop session')
     if not args.skip_build:
         subprocess.run([str(ROOT / 'scripts/build.sh'), 'Debug'], cwd=ROOT, check=True)
-    app = ROOT / '.build/Build/Products/Debug/Orvlet.app/Contents/MacOS/Orvlet'
+    app = args.app.resolve() if args.app else ROOT / '.build/Build/Products/Debug/Orvlet.app/Contents/MacOS/Orvlet'
     if not app.is_file():
         parser.error('Debug app missing; run scripts/build.sh Debug first')
     with socket.socket() as probe:

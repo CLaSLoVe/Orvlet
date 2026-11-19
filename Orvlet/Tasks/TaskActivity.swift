@@ -46,6 +46,7 @@ extension AppModel {
     func taskActivity(_ task: SideTask) -> TaskActivity? {
         if interfaceJobs[task.id] != nil { return .working("Updating view…") }
         if taskActionJobs[task.id] != nil { return .working("Calculating…") }
+        if let run = runOwning(task.id) { return .working(run.activity.isEmpty ? "Starting…" : run.activity) }
         if busy && ownsRequest(task.id) {
             return .working(activity.isEmpty ? "Working…" : activity)
         }

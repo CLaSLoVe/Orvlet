@@ -6,6 +6,9 @@ import SwiftUI
 enum OrvletEntry {
     static func main() {
         if CommandLine.arguments.contains("--task-code-worker") { TaskCodeWorker.main() }
+        #if DEBUG
+            if DebugHarness.startStandalonePilot() { return }
+        #endif
         OrvletApp.main()
     }
 }
@@ -27,6 +30,13 @@ struct OrvletApp: App {
 }
 
 final class ShellPanel: NSPanel {
+    var onMoveInteraction: ((Bool) -> Void)?
+    private var movingByGesture = false
+    func moveInteraction(_ active: Bool) {
+        guard movingByGesture != active else { return }
+        movingByGesture = active
+        onMoveInteraction?(active)
+    }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }

@@ -120,12 +120,16 @@
             model.conversationTaskID = b.id
             try check(
                 model.visibleConversation.isEmpty, "Task conversation filtering never borrows another card's messages")
-            model.busy = true
+            let primaryRun = model.idleRun
+            model.commandRuns = [primaryRun]
+            model.agent.completionOverride = { _ in
+                ["tool_calls": [RequestStep(tool: "finish", arguments: JSONText.encode(["outcome": "answer", "reply": "B is ready"])).call]]
+            }
             model.submitTaskRequest("Change B", taskID: b.id)
-            try check(
-                model.queuedTaskRequests.first?.taskID == b.id && model.activeRequest?.owner?.id == a.id,
-                "A message from another card queues without steering the active task")
-            model.busy = false
+            try check(model.commandRuns.count == 2 && primaryRun.owns(a.id) && model.runOwning(b.id) !== primaryRun,
+                "A message from another card executes independently and keeps its own conversation")
+            for _ in 0..<100 where model.commandRuns.count > 1 { try await Task.sleep(for: .milliseconds(25)) }
+            model.commandRuns.removeAll { $0 === primaryRun }
             model.finishAmbientRequest()
             model.dismissFeedback()
             model.taskClock?.invalidate()
@@ -203,10 +207,11 @@
                 ]
             }
             let finish: [String: Any] = [
-                "outcome": "page_ready", "reply": "Beijing time is ready",
+                "outcome": "page_ready", "reply": "Beijing time is ready", "requirements": [["label": "city", "anyOf": ["Beijing"]]],
                 "outcomeEvidence": [["requirement": 0, "readingKey": "place", "valueKey": "clock"]],
             ]
             model.agent.completionOverride = { turns in
+                if !model.agent.loadedToolFamilies.contains("web") { return ["tool_calls": [call("load_tools", ["family": "web"])]] }
                 round += 1
                 let calls: [[String: Any]]
                 switch round {
@@ -228,11 +233,12 @@
                             "compose_ui",
                             (try JSONSerialization.jsonObject(with: JSONEncoder().encode(plan)) as! [String: Any])
                                 .filter { ["title", "markup", "actions", "readings"].contains($0.key) }),
-                        call("finish", finish), call("navigate", ["url": "http://127.0.0.1:19244/qualifier"]),
+                        call("finish", finish),
                     ]
                 }
                 return ["role": "assistant", "tool_calls": calls]
             }
+            model.selectedTaskID = other.id
             let reply = try await model.agent.run("改成北京时间", taskID: owner)
             let page = try await model.observation()
             guard refused, round == 3, reply == "Beijing time is ready", model.webURL.contains("city=Beijing"),

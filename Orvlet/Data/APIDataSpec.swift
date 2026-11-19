@@ -6,6 +6,7 @@ struct APIDataField: Codable {
     var label: String
     var pointer: String
     var unit: String? = nil
+    var itemPointer: String? = nil
 }
 struct APIDataOutput: Codable {
     var key: String
@@ -34,20 +35,39 @@ struct APIDataSpec: Codable {
     var outputs: [APIDataOutput]?
     var expectations: [String: String]?
     var maxAgeSeconds: Double?
+    var refreshSeconds: Double? = nil
+    // Captured by the host at generation; a later refresh keeps the card's own language.
+    var interfaceLanguage: String? = nil
+    var usesEnglishPresetCopy: Bool {
+        interfaceLanguage == nil || interfaceLanguage?.caseInsensitiveCompare("English") == .orderedSame
+    }
+    var refreshLabel: String? = nil
+    var visuals: [CardVisual]? = nil
     var card: DataCardPreset? = nil
     // Host-owned opt-out after a deliberate interface edit; not an acquisition parameter.
     var customLayout: Bool? = nil
 
     var keys: Set<String> { Set(fields.map(\.key) + (outputs ?? []).map(\.key)) }
+    var derivedKeys: Set<String> { Set((outputs ?? []).map(\.key)).subtracting(fields.map(\.key)) }
+    /// Bind optional visuals only to declared series or computed outputs. Never guess an axis.
+    func bindingVisuals() -> APIDataSpec {
+        guard let visuals else { return self }
+        let columns = fields.filter { $0.itemPointer != nil }.map { CardVisual.Column(key: $0.key, label: $0.label) }
+            + (outputs ?? []).map { CardVisual.Column(key: $0.key, label: $0.label) }
+        var copy = self
+        copy.visuals = Array(visuals.compactMap { $0.bound(to: columns) }.prefix(3))
+        return copy
+    }
+
     /// Presentation and validation share one set of displayed values.
     var displayRows: [APIDataOutput] {
         var rows =
             (outputs ?? []).isEmpty
-            ? fields.filter { !isWttrWeather || !$0.pointer.contains("/nearest_area/") || $0.key == card?.contextKey }
+            ? fields.filter { $0.itemPointer == nil && (!isWttrWeather || !$0.pointer.contains("/nearest_area/") || $0.key == card?.contextKey) }
                 .map { APIDataOutput(key: $0.key, label: $0.label, unit: $0.unit) }
             : outputs!
         if let primary = card?.primaryKey, !rows.contains(where: { $0.key == primary }),
-            let field = fields.first(where: { $0.key == primary })
+            let field = fields.first(where: { $0.key == primary && $0.itemPointer == nil })
         {
             rows.insert(APIDataOutput(key: field.key, label: field.label, unit: field.unit), at: 0)
         }
@@ -55,35 +75,51 @@ struct APIDataSpec: Codable {
     }
     func validated() throws -> APIDataSpec {
         _ = try requestURL()
+        if let refreshLabel, refreshLabel.count > 80 || refreshLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ToolArgumentError(path: "$.source.refreshLabel", issue: "provide a short button label")
+        }
         let all = fields.map { APIDataOutput(key: $0.key, label: $0.label, unit: $0.unit) } + (outputs ?? [])
         let reserved: Set<String> = [
             "title", "status", "detail", "appearance", "accent", "compact", "resultStatus", "sourceRequest",
             "sourceHost", "sourceDate", "sourceChecked",
-            "currencyFromName", "currencyToName", "currencyPair", "weatherSampleTime",
+            "sourceDateDisplay", "currencyFromName", "currencyToName", "currencyPair", "weatherSampleTime",
         ]
         func validKey(_ key: String) -> Bool {
             key.range(of: "^[a-zA-Z][a-zA-Z0-9_]{0,30}$", options: .regularExpression) != nil && !reserved.contains(key)
         }
-        guard !fields.isEmpty, fields.count <= Self.maximumSourceFields, all.count <= Self.maximumValues else {
-            throw AppError.message("Provide 1–10 source fields and at most 14 total source/output fields.")
+        guard !fields.isEmpty, fields.count <= Self.maximumSourceFields, keys.count <= Self.maximumValues, (outputs ?? []).count <= Self.maximumValues else {
+            throw ToolArgumentError(path: fields.isEmpty || fields.count > Self.maximumSourceFields ? "$.source.fields" : "$.source.outputs", issue: "Provide 1–10 source fields and at most 14 total source/output fields.")
         }
-        guard keys.count == all.count else {
-            throw AppError.message(
-                "Source and output keys must be unique; do not reuse a source key for a calculated output.")
+        var seen: Set<String> = []
+        for (index, output) in all.enumerated() {
+            if index == fields.count { seen.removeAll() }
+            let path = index < fields.count ? "$.source.fields[\(index)]" : "$.source.outputs[\(index - fields.count)]"
+            guard validKey(output.key), seen.insert(output.key).inserted else {
+                throw ToolArgumentError(path: path + ".key", issue: "use a unique, non-reserved source/output identifier")
+            }
+            guard !output.label.isEmpty, output.label.count <= 80 else {
+                throw ToolArgumentError(path: path + ".label", issue: "use a label of 1–80 characters")
+            }
+            guard (output.unit ?? "").count <= 20 else {
+                throw ToolArgumentError(path: path + ".unit", issue: "use a short source-defined unit")
+            }
         }
-        guard all.allSatisfy({ validKey($0.key) && !$0.label.isEmpty && $0.label.count <= 80 }) else {
-            throw AppError.message(
-                "Field keys need 1–31 letters/digits/underscores, starting with a letter; avoid reserved host keys. Labels need 1–80 characters."
-            )
+        for (index, field) in fields.enumerated() {
+            let path = "$.source.fields[\(index)]"
+            guard field.pointer.hasPrefix("/"), field.pointer.count <= 300 else {
+                throw ToolArgumentError(path: path + ".pointer", issue: "use an exact JSON pointer beginning with /")
+            }
+            if let item = field.itemPointer, !item.isEmpty && (!item.hasPrefix("/") || item.count > 300) {
+                throw ToolArgumentError(path: path + ".itemPointer", issue: "use a relative JSON pointer or an empty string for a scalar item")
+            }
         }
-        guard fields.allSatisfy({ $0.pointer.hasPrefix("/") && $0.pointer.count <= 300 }) else {
-            throw AppError.message(
-                "Source pointers must be exact JSON pointers beginning with /, at most 300 characters.")
+        guard !displayRows.isEmpty else {
+            throw ToolArgumentError(path: "$.source.fields", issue: "include a scalar field or computed output for the capsule")
         }
         let inputKeys = Set((inputs ?? [:]).keys)
-        let collisions = inputKeys.intersection(Set((outputs ?? []).map(\.key)))
+        let collisions = inputKeys.intersection(derivedKeys)
         guard collisions.isEmpty else {
-            throw AppError.message(
+            throw ToolArgumentError(path: "$.source.outputs", issue:
                 "Input keys collide with calculated output keys: " + collisions.sorted().joined(separator: ", ")
                     + ". Use distinct names for editable inputs and calculated results."
             )
@@ -91,7 +127,7 @@ struct APIDataSpec: Codable {
         guard inputKeys.count <= Self.maximumInputs, inputKeys.allSatisfy(validKey),
             (inputs ?? [:]).values.allSatisfy({ $0.count <= 1000 })
         else {
-            throw AppError.message(
+            throw ToolArgumentError(path: "$.source.inputs", issue:
                 "Provide at most 8 distinct valid input keys with string values up to 1000 characters.")
         }
         guard (controls ?? []).count <= 8, Set((controls ?? []).map(\.key)).count == (controls ?? []).count,
@@ -101,7 +137,7 @@ struct APIDataSpec: Codable {
                     && ($0.options ?? []).allSatisfy({ !$0.isEmpty && $0.count <= 80 })
             })
         else {
-            throw AppError.message(
+            throw ToolArgumentError(path: "$.source.controls", issue:
                 "Controls must name distinct existing inputs, use text/number/select and have short labels/options.")
         }
         guard
@@ -109,19 +145,19 @@ struct APIDataSpec: Codable {
                 output.unitKey == nil || fields.contains(where: { $0.key == output.unitKey })
             })
         else {
-            throw AppError.message(
+            throw ToolArgumentError(path: "$.source.outputs", issue:
                 "output.unitKey must name a source field containing the returned unit, not a literal unit label.")
         }
         if let calculation {
             guard !calculation.isEmpty, calculation.utf8.count <= 32768, !(outputs ?? []).isEmpty else {
-                throw AppError.message("A calculation needs a nonempty function body up to 32 KB and named outputs.")
+                throw ToolArgumentError(path: "$.source.calculation", issue: "A calculation needs a nonempty function body up to 32 KB and named outputs.")
             }
-        } else if !(outputs ?? []).isEmpty {
-            throw AppError.message(
-                "Calculated outputs require a calculation; otherwise display the source fields directly.")
+        } else if !derivedKeys.isEmpty {
+            throw ToolArgumentError(path: "$.source.calculation", issue:
+                "These derived fields need a calculation: " + derivedKeys.sorted().joined(separator: ", ") + ". Display existing source fields directly with card.primaryKey and detailKeys.")
         }
         guard Set((expectations ?? [:]).keys).isSubset(of: Set(fields.map(\.key))) else {
-            throw AppError.message("Expectations must name actual source fields, not input/output keys.")
+            throw ToolArgumentError(path: "$.source.expectations", issue: "Expectations must name actual source fields, not input/output keys.")
         }
         if let pointer = updatedAtPointer {
             guard pointer.hasPrefix("/"), pointer.count <= 300 else {
@@ -160,10 +196,11 @@ struct APIDataSpec: Codable {
                     "maxAgeSeconds must be between 60 and 604800; omit it when a freshness limit is not required.")
             }
         }
-        try card?.validate(
-            keys: keys.union(inputKeys),
-            rows: displayRows)
-        var normalized = self
+        if let refreshSeconds, !refreshSeconds.isFinite || !(15...86400).contains(refreshSeconds) {
+            throw ToolArgumentError(path: "$.source.refreshSeconds", issue: "choose a refresh interval from 15 to 86400 seconds")
+        }
+        var normalized = bindingVisuals()
+        normalized.card = try card?.bound(keys: keys.union(inputKeys), rows: displayRows)
         if var controls = normalized.controls {
             for i in controls.indices
             where controls[i].kind == "select" && !(controls[i].options ?? []).contains(inputs?[controls[i].key] ?? "")
@@ -172,9 +209,6 @@ struct APIDataSpec: Codable {
                 controls[i].options = nil
             }
             normalized.controls = controls
-        }
-        guard all.allSatisfy({ ($0.unit ?? "").count <= 20 }) else {
-            throw AppError.message("Use a short source-defined unit.")
         }
         if isWttrWeather, let day = inputs?["weatherDay"], !["0", "1", "2"].contains(day) {
             throw AppError.message("Choose an available forecast day.")
@@ -268,7 +302,10 @@ struct APIDataSpec: Codable {
         "type": "object",
         "description": "Acquisition recipe nested inside source; URL, fields, calculation and card belong here.",
         "properties": [
-            "card": DataCardPreset.schema,
+            "card": DataCardPreset.schema, "visuals": CardVisual.schema,
+            "refreshLabel": ["type": "string", "description": "Refresh button label in the configured interface language; defaults to Refresh."],
+            "refreshSeconds": ["type": "number", "minimum": 15, "maximum": 86400,
+                "description": "Background refresh interval for a changing reading, even when collapsed. Use 60 for current quotes unless requested otherwise; omit for one-time results."],
             "url": [
                 "type": "string",
                 "description":
@@ -290,10 +327,14 @@ struct APIDataSpec: Codable {
                             "description":
                                 "Unit fixed by the source schema, such as °C, %, mm or km/h. Required for measured weather values when the source supplies no unit field. Never guess.",
                         ],
+                        "itemPointer": [
+                            "type": "string",
+                            "description": "For a chart or table column, pointer selects an array (up to 512 observations); itemPointer selects one scalar inside each record, or an empty string for a scalar array. State holds a JSON-encoded column. Request a suitable source window.",
+                        ],
                         "pointer": [
                             "type": "string",
                             "description":
-                                "Exact RFC 6901 pointer to one scalar, e.g. /items/0/value. Arrays/objects are not scalar fields; select an element.",
+                                "Exact RFC 6901 pointer to one scalar or, with itemPointer, to the observation array.",
                         ],
                     ], "required": ["key", "label", "pointer"],
                 ],
@@ -336,7 +377,8 @@ struct APIDataSpec: Codable {
                     "Optional pure JS function body(input,state). input contains supplied strings; state contains fetched scalar strings (use Number for arithmetic). Return {state:{...}} with exactly the declared output keys. Never hardcode a remote value.",
             ],
             "outputs": [
-                "type": "array", "maxItems": maximumValues - 1,
+                "type": "array", "maxItems": maximumValues,
+                "description": "Optional display rows. Existing field keys show the verified source values directly. Only new keys need a calculation.",
                 "items": [
                     "type": "object",
                     "properties": [

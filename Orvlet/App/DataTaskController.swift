@@ -9,8 +9,8 @@ extension AppModel {
         else { return }
         if let spec = old.apiData, spec.customLayout != true {
             let legacy = old.markup.css == APIDataSpec.genericDataCSS && old.markup.html.contains("class='data-result'")
-            guard old.preset != nil || legacy, spec.resolvedCard != nil,
-                let updated = try? spec.surface(title: old.title, state: sideTasks[i].state)
+            guard old.preset != nil || legacy,
+                let updated = try? spec.surface(title: old.title, state: sideTasks[i].state, request: sideTasks[i].intent ?? "")
             else { return }
             guard !old.markup.hasSameDesign(as: updated.markup) else { return }
             old = updated
@@ -30,10 +30,64 @@ extension AppModel {
         persistSideTasks()
         if needsFreshFields { refreshAPIData(id, force: true) }
     }
-    func refreshAPIData(_ id: UUID, fields: [String: String] = [:], force: Bool = true) {
-        guard let task = sideTasks.first(where: { $0.id == id }), var spec = task.taskSurface?.apiData else { return }
-        if busy && ownsRequest(id) { return }
-        guard Set(fields.keys).isSubset(of: Set((spec.inputs ?? [:]).keys)) else { return }
+    /// A single deadline follows retained tasks independently of window focus and visibility.
+    func scheduleDataRefresh() {
+        dataRefreshTimer?.invalidate()
+        dataRefreshTimer = nil
+        let now = Date()
+        let ids = Set(sideTasks.map(\.id))
+        dataRefreshAttempts = dataRefreshAttempts.filter { ids.contains($0.key) }
+        guard let next = sideTasks.compactMap({ nextDataRefresh($0, now: now) }).min() else { return }
+        let timer = Timer(timeInterval: max(0.1, next.timeIntervalSinceNow), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshDueData() }
+        }
+        dataRefreshTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func nextDataRefresh(_ task: SideTask, now: Date) -> Date? {
+        guard let interval = task.taskSurface?.apiData?.refreshSeconds, task.terminalLabel == nil,
+            task.status != "Input needed", taskActionJobs[task.id] == nil else { return nil }
+        let last = max(task.dataUpdatedAt ?? task.created, dataRefreshAttempts[task.id] ?? .distantPast)
+        let due = last.addingTimeInterval(interval)
+        return busy && ownsRequest(task.id) ? max(due, now.addingTimeInterval(2)) : due
+    }
+
+    private func refreshDueData() {
+        let now = Date()
+        for task in sideTasks {
+            if let due = nextDataRefresh(task, now: now), due <= now {
+                refreshAPIData(task.id, scheduled: true)
+            }
+        }
+        scheduleDataRefresh()
+    }
+
+    @discardableResult
+    func performDataAction(_ id: UUID, action: TaskSurfaceAction, fields: [String: String], requestID: UUID? = nil) -> Task<Void, Never>? {
+        guard let surface = sideTasks.first(where: { $0.id == id })?.taskSurface, let spec = surface.apiData,
+            action.kind == .remote, let operation = action.operation,
+            ["update", "refresh", "swap"].contains(operation),
+            Set(fields.keys).isSubset(of: Set(surface.fields)), fields.values.allSatisfy({ $0.utf8.count <= 8000 })
+        else { return nil }
+        var inputs = fields
+        if operation == "swap" {
+            guard spec.supportsCurrencySwap, let roles = spec.currencyFields else { return nil }
+            let current = (spec.inputs ?? [:]).merging(fields) { _, new in new }
+            inputs[roles.from] = current[roles.to]
+            inputs[roles.to] = current[roles.from]
+        }
+        return refreshAPIData(id, fields: inputs, force: operation != "update", requestID: requestID)
+    }
+
+    @discardableResult
+    func refreshAPIData(_ id: UUID, fields: [String: String] = [:], force: Bool = true, scheduled: Bool = false,
+                        requestID: UUID? = nil) -> Task<Void, Never>? {
+        guard let task = sideTasks.first(where: { $0.id == id }), var spec = task.taskSurface?.apiData else { return nil }
+        if let requestID {
+            guard activeRequest?.id == requestID, activeRequest?.owner?.id == id else { return nil }
+        } else if busy && ownsRequest(id) { return nil }
+        guard Set(fields.keys).isSubset(of: Set((spec.inputs ?? [:]).keys)) else { return nil }
         if spec.isWttrWeather {
             if let day = fields["weatherDay"], day != spec.inputs?["weatherDay"], let key = spec.weatherDateKey {
                 spec.expectations?[key] = nil
@@ -47,13 +101,22 @@ extension AppModel {
             }
         }
         spec.inputs = (spec.inputs ?? [:]).merging(fields) { _, new in new }
-        let previous = task.liveValues ?? task.taskSurface?.state ?? [:]
+        dataRefreshAttempts[id] = Date()
+        // Only a successful read/calculation updates the verified snapshot. The editable
+        // live values can contain an invalid draft or belong to a superseded refresh.
+        let previous = task.taskSurface?.state ?? task.liveValues ?? [:]
         let inputs = spec.inputs ?? [:]
         taskActionJobs.removeValue(forKey: id)?.cancel()
         let ticket = beginTaskRevision(id, .execution)
-        guard let index = sideTasks.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = sideTasks.firstIndex(where: { $0.id == id }) else { return nil }
         sideTasks[index].taskSurface?.apiData = spec
-        sideTasks[index].liveValues = previous.merging(inputs) { _, new in new }
+        let changed = inputs.contains { previous[$0.key] != $0.value }
+        var display = previous
+        if changed {
+            for key in spec.keys { display[key] = "—" }
+            for key in ["sourceDate", "sourceDateDisplay", "sourceChecked", "weatherSampleTime"] { display[key] = "" }
+        }
+        sideTasks[index].liveValues = display.merging(inputs) { _, new in new }
         let invalid = spec.inputControls.first { control in
             let value = inputs[control.key] ?? ""
             return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -63,12 +126,11 @@ extension AppModel {
         if let invalid {
             for output in spec.outputs ?? [] { sideTasks[index].liveValues?[output.key] = "—" }
             sideTasks[index].liveValues?["resultStatus"] = "Enter " + invalid.label.lowercased()
-            sideTasks[index].taskSurface?.state = sideTasks[index].liveValues ?? [:]
             sideTasks[index].dataIssue = nil
             sideTasks[index].status = "Input needed"
             taskRevisions.finish(ticket)
             persistSideTasks()
-            return
+            return nil
         }
         let cached = !force && apiData.canReuse(spec, state: previous, fetchedAt: task.dataUpdatedAt)
         sideTasks[index].status = cached ? "Calculating…" : "Updating…"
@@ -79,6 +141,7 @@ extension AppModel {
                 if accepts(ticket) {
                     taskActionJobs[id] = nil
                     taskRevisions.finish(ticket)
+                    scheduleDataRefresh()
                 }
             }
             do {
@@ -93,7 +156,10 @@ extension AppModel {
                 guard accepts(ticket), let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
                 sideTasks[i].liveValues = values
                 sideTasks[i].taskSurface?.state = values
-                if !cached { sideTasks[i].dataUpdatedAt = Date() }
+                if !cached {
+                    sideTasks[i].dataUpdatedAt = Date()
+                    Diagnostics.record("api_data_refresh", ["taskID": id.uuidString, "origin": scheduled ? "scheduled" : "interaction", "verified": true])
+                }
                 sideTasks[i].dataIssue = nil
                 sideTasks[i].status = "Ready"
                 persistSideTasks()
@@ -105,13 +171,13 @@ extension AppModel {
                     sideTasks[i].dataIssue = nil
                     sideTasks[i].status = "Input needed"
                 } else {
-                    sideTasks[i].liveValues?["resultStatus"] = "Previous result"
-                    sideTasks[i].dataIssue = "Couldn’t update the source. Showing the last checked result."
+                    sideTasks[i].liveValues?["resultStatus"] = changed ? "Update unavailable" : "Previous result"
+                    sideTasks[i].dataIssue = changed ? "Couldn’t verify the new inputs." : "Couldn’t update the source. Showing the last checked result."
                     sideTasks[i].status = "Update unavailable"
                 }
-                sideTasks[i].taskSurface?.state = sideTasks[i].liveValues ?? [:]
                 persistSideTasks()
             }
         }
+        return taskActionJobs[id]
     }
 }

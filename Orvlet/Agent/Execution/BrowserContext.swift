@@ -10,7 +10,7 @@ extension AgentController {
         }
         if let retained = model.browser.reusableMediaSurface(observation) { return retained }
         if let key = SurfaceCache.pageKey(observation["url"] as? String ?? ""),
-            let cached = model.adaptive.cache.get(key), cached.markup != nil,
+            let cached = model.adaptive.cache.get(key), cached.markup?.matchesLanguage(model.settings.preferredInterfaceLanguage) == true,
             let checked = try? cached.validated(observation: observation)
         {
             return checked

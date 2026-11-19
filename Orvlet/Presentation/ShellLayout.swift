@@ -17,6 +17,54 @@ struct ShellLayout: Equatable {
     private func local(_ rect: NSRect) -> NSRect {
         NSRect(x: rect.minX - frame.minX, y: frame.maxY - rect.maxY, width: rect.width, height: rect.height)
     }
+    func translated(x: CGFloat, y: CGFloat) -> ShellLayout {
+        var result = self
+        result.frame.origin.x += x
+        result.frame.origin.y += y
+        result.compact.origin.x += x
+        result.compact.origin.y += y
+        if edge != nil {
+            result.content.origin.x += x
+            result.content.origin.y += y
+        }
+        if let viewport = compactViewport { result.compactViewport = viewport.offsetBy(dx: x, dy: y) }
+        return result
+    }
+    /// Fit what is visible, not the full task strip hidden behind a pinned rail.
+    func fitting(_ screen: NSRect) -> ShellLayout {
+        let safe = screen.insetBy(dx: 8, dy: 8)
+        let x = min(max(frame.minX, safe.minX), max(safe.minX, safe.maxX - frame.width))
+        let y = min(max(frame.minY, safe.minY), max(safe.minY, safe.maxY - frame.height))
+        return translated(x: x - frame.minX, y: y - frame.minY)
+    }
+    var chromeSize: NSSize {
+        guard let edge else { return .zero }
+        return edge == .left || edge == .right
+            ? NSSize(width: presentedCompact.width, height: 0)
+            : NSSize(width: 0, height: presentedCompact.height)
+    }
+    /// Live resizing owns the actual frame. Keep content and hit regions in that
+    /// frame on every event, rather than replaying an expansion after mouse-up.
+    func resized(to frame: NSRect) -> ShellLayout {
+        guard let edge else { return self }
+        let chrome = chromeSize
+        let content = NSRect(
+            x: frame.minX + (edge == .right ? chrome.width : 0),
+            y: frame.minY + (edge == .above ? chrome.height : 0),
+            width: max(1, frame.width - chrome.width), height: max(1, frame.height - chrome.height))
+        var anchor = compact
+        switch edge {
+        case .left, .right:
+            anchor.origin = NSPoint(
+                x: edge == .left ? content.maxX : content.minX - anchor.width,
+                y: content.maxY - anchor.height)
+        case .above, .below:
+            anchor.origin = NSPoint(
+                x: content.minX, y: edge == .above ? content.minY - anchor.height : content.maxY)
+        }
+        let result = ShellLayout(frame: frame, compact: anchor, content: content, edge: edge)
+        return compactViewport == nil ? result : result.tuckingCompact()
+    }
     func tuckingCompact() -> ShellLayout {
         guard let edge else { return self }
         var result = self

@@ -14,6 +14,9 @@ nonisolated enum TaskValues {
                 text = value
             } else if let value = value as? NSNumber {
                 text = value.stringValue
+            } else if let column = value as? [Any], column.count <= 512,
+                column.allSatisfy({ $0 is String || $0 is NSNumber || $0 is NSNull }) {
+                text = JSONText.encode(column)
             } else if value is NSNull {
                 text = ""
             } else {

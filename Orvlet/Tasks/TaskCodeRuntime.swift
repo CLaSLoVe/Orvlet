@@ -37,7 +37,39 @@ enum TaskCodeWorker {
                 }
                 let function = constructor.construct(withArguments: ["input", "state", "\"use strict\";\n" + code])
                 if let error = context.exception { throw WorkerError.script(error.toString() ?? "Invalid code") }
-                let result = try function?.call(withArguments: [value("input"), value("state")])
+                var input = try value("input")
+                var contract: JSValue?
+                if let fields = request["declaredInputs"] as? [String] {
+                    let keys = Set((request["input"] as? [String: Any] ?? [:]).keys)
+                    guard keys == Set(fields) else {
+                        throw WorkerError.contract("Supply exactly the declared input fields: " + fields.sorted().joined(separator: ", "))
+                    }
+                    // Keep the violation outside generated code: catching a missing-field error
+                    // must not turn a broken input contract into a passing negative check.
+                    let wrap = context.evaluateScript("""
+                        (function(value) {
+                            let violation = null;
+                            const fail = message => { violation = message; throw Error(message); };
+                            const names = Object.keys(value).sort().join(', ');
+                            const input = new Proxy(value, { get(target, key, receiver) {
+                                if (key === Symbol.toPrimitive) return () => fail('input is an object of named fields (' + names + '); read input[fieldName], not the whole object as a scalar.');
+                                if (typeof key === 'string' && !(key in target) && key !== 'toJSON')
+                                    return fail('Undeclared input field "' + key + '". Available fields: ' + names + '. Keep form.inputs, state, checks and handler property names consistent.');
+                                return Reflect.get(target, key, receiver);
+                            }});
+                            return {input, violation: () => violation};
+                        })
+                        """)
+                    contract = wrap?.call(withArguments: [input])
+                    input = contract!.forProperty("input")
+                }
+                let result = try function?.call(withArguments: [input, value("state")])
+                let scriptError = context.exception?.toString()
+                context.exception = nil
+                if let violation = contract?.invokeMethod("violation", withArguments: []), !violation.isNull {
+                    throw WorkerError.contract(violation.toString() ?? "Input contract violation")
+                }
+                if let scriptError { throw WorkerError.script(scriptError) }
                 if let error = context.exception { throw WorkerError.script(error.toString() ?? "Code failed") }
                 if result?.hasProperty("then") == true {
                     throw WorkerError.script("Return a synchronous JSON result, not a Promise.")
@@ -65,7 +97,9 @@ enum TaskCodeWorker {
             }
             exit(0)
         } catch {
-            emit(["ok": false, "error": String(error.localizedDescription.prefix(500))])
+            let kind: String
+            if case WorkerError.script = error { kind = "script" } else if case WorkerError.contract = error { kind = "contract" } else { kind = "request" }
+            emit(["ok": false, "error": String(error.localizedDescription.prefix(500)), "kind": kind])
             exit(1)
         }
     }
@@ -75,11 +109,21 @@ enum TaskCodeWorker {
     private enum WorkerError: LocalizedError {
         case invalid
         case script(String)
+        case contract(String)
         nonisolated var errorDescription: String? {
             switch self {
             case .invalid: return "Invalid code request."
-            case .script(let value): return value
+            case .script(let value), .contract(let value): return value
             }
+        }
+    }
+}
+
+enum TaskCodeError: LocalizedError {
+    case script(String)
+    var errorDescription: String? {
+        switch self {
+        case .script(let message): return message
         }
     }
 }
@@ -88,6 +132,13 @@ enum TaskCodeWorker {
 @MainActor
 protocol TaskCodeExecuting: AnyObject {
     func run(code: String, input: [String: Any], state: [String: String]) async throws -> [String: Any]
+    func run(code: String, input: [String: Any], state: [String: String], declaredInputs: [String]) async throws -> [String: Any]
+}
+
+extension TaskCodeExecuting {
+    func run(code: String, input: [String: Any], state: [String: String], declaredInputs: [String]) async throws -> [String: Any] {
+        try await run(code: code, input: input, state: state)
+    }
 }
 
 @MainActor
@@ -97,13 +148,17 @@ final class TaskCodeRuntime: TaskCodeExecuting {
     func run(code: String, input: [String: Any] = [:], state: [String: String] = [:]) async throws -> [String: Any] {
         try await worker(["mode": "execute", "code": code, "input": input, "state": state])
     }
+    func run(code: String, input: [String: Any], state: [String: String], declaredInputs: [String]) async throws -> [String: Any] {
+        try await worker(["mode": "execute", "code": code, "input": input, "state": state, "declaredInputs": declaredInputs])
+    }
     func validate(_ codes: [String]) async throws {
         guard !codes.isEmpty else { return }
         _ = try await worker(["mode": "validate", "codes": codes])
     }
     private func worker(_ payload: [String: Any]) async throws -> [String: Any] {
         try Task.checkCancellation()
-        guard runningCount < 4, let executable = Bundle.main.executableURL else {
+        while runningCount >= 4 { try await Task.sleep(for: .milliseconds(30)) }
+        guard let executable = Bundle.main.executableURL else {
             throw AppError.message("Code execution is busy. Try again shortly.")
         }
         let data = try JSONSerialization.data(withJSONObject: payload)
@@ -158,6 +213,11 @@ final class TaskCodeRuntime: TaskCodeExecuting {
         guard process.terminationStatus == 0, envelope["ok"] as? Bool == true,
             let result = envelope["result"] as? [String: Any]
         else {
+            if process.terminationStatus == 1, envelope["kind"] as? String == "script",
+                let message = envelope["error"] as? String
+            {
+                throw TaskCodeError.script(message)
+            }
             throw AppError.message(envelope["error"] as? String ?? "The calculation failed.")
         }
         return result

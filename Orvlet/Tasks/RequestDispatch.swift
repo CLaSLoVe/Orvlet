@@ -3,21 +3,32 @@ import WebKit
 
 @MainActor
 extension AppModel {
-    func sendCommand() {
+    func sendCommand(forceNewTask: Bool = false) {
         guard isLiveTest || mainServiceState != "checking" else { return }
         let text = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        let editing = editingInterfaceID ?? conversationTaskID
-        requestReceivedAt = Date()
+        let editing = forceNewTask ? nil : (editingInterfaceID ?? conversationTaskID)
         command = ""
         backgroundRequest = true
         hasUnreadReply = false
         dismissFeedback()
-        if commandPanelVisible && conversationTaskID == nil { selectChat(false) }
-        let draftID = editing ?? UUID()
+        if commandPanelVisible && (forceNewTask || conversationTaskID == nil) { selectChat(false) }
+        // A completed card supplies conversation context. Start with a provisional
+        // destination until placement decides whether this message edits that card.
+        let reference = editing.flatMap { id in
+            sideTasks.first { $0.id == id && $0.kind != .result && $0.terminalLabel == nil }?.id
+        }
+        let draftID = reference == nil ? (editing ?? UUID()) : UUID()
         let messageID = appendMessage(text, isUser: true, taskID: draftID)
+        if forceNewTask {
+            startCommand(text, messageID: messageID, forceNewTask: true)
+            return
+        }
+        if let reference {
+            startCommand(text, messageID: messageID, conversationReference: reference)
+            return
+        }
         if let editing {
-            if restoreHistoryTask(editing, showCard: false), localTaskControl(text, taskID: editing) { return }
             submitTaskRequest(text, taskID: editing, messageID: messageID)
             return
         }
@@ -26,8 +37,6 @@ extension AppModel {
         {
             return
         }
-        latestIntent = text
-        taskFailed = false
         if busy {
             routeGlobalMessage(text, messageID: messageID, draftID: draftID)
             return
@@ -48,10 +57,15 @@ extension AppModel {
         persistSideTasks()
     }
     func startCommand(
-        _ text: String, taskID: UUID? = nil, receivedAt: Date? = nil, messageID: UUID? = nil,
-        prepared: PreparedRequest? = nil
+        _ text: String, taskID submittedTaskID: UUID? = nil, receivedAt: Date? = nil, messageID: UUID? = nil,
+        prepared: PreparedRequest? = nil, forceNewTask: Bool = false, assignment: CardAssignment? = nil, initialFamilies: Set<String> = [], conversationReference: UUID? = nil
     ) {
-        if let receivedAt { requestReceivedAt = receivedAt }
+        // A queued inferred route is not a user selection. Re-resolve stale
+        // packets before adopting/restoring an owner; valid routes execute directly.
+        let taskID =
+            (prepared.map { !$0.explicitSelection && !$0.usable(text: text, explicit: submittedTaskID, model: self) }
+                ?? false)
+            ? nil : submittedTaskID
         if !isLiveTest, mainServiceState == "unavailable" {
             checkModelConnections()
             selectChat(true, conversation: taskID)
@@ -68,12 +82,28 @@ extension AppModel {
                 taskID: messageID.flatMap { mid in messages.first(where: { $0.id == mid })?.taskID })
             return
         }
+        let run = RequestRun(model: self, forceNewTask: forceNewTask)
+        run.initialFamilies = initialFamilies
+        run.conversationReference = conversationReference
+        run.assignment = assignment
+        run.receivedAt = receivedAt ?? messageID.flatMap { id in messages.first { $0.id == id }?.date } ?? Date()
+        #if DEBUG
+            run.agent.interpretationOverride = agent.interpretationOverride
+            run.agent.completionOverride = agent.completionOverride
+        #endif
+        commandRuns.append(run)
+        RequestRun.$current.withValue(run) {
+            launchCommand(text, taskID: taskID, messageID: messageID, prepared: prepared, run: run)
+        }
+    }
+
+    private func launchCommand(_ text: String, taskID: UUID?, messageID: UUID?, prepared: PreparedRequest?, run: RequestRun) {
         adaptive.invalidate()
         adaptive.blockedSources.remove(taskID ?? browser.id)
         latestIntent = text
         taskFailed = false
         agent.operatedPage = false
-        busy = true
+        refreshHover()
         agentStopping = false
         activity = "On it…"
         beginAmbientRequest(text, taskID: taskID, messageID: messageID)
@@ -81,8 +111,11 @@ extension AppModel {
             defer {
                 if taskFailed, let page = requestPageID { adaptive.suspendAutomaticUpdates(page) }
                 finishAmbientRequest()
-                busy = false
-                activity = ""
+                if browserRun === run { browserRun = nil }
+                commandRuns.removeAll { $0 === run }
+                if commandRuns.isEmpty { idleRun = run; taskRanking.schedule() }
+                refreshHover()
+                run.activity = ""
                 agentStopping = false
                 agentTask = nil
                 if !messagesAfterStop.isEmpty {
@@ -91,8 +124,8 @@ extension AppModel {
                     latestIntent = next
                     taskFailed = false
                     startCommand(next)
-                } else if !queuedTaskRequests.isEmpty {
-                    let next = queuedTaskRequests.removeFirst()
+                } else if let index = queuedTaskRequests.firstIndex(where: { runOwning($0.taskID) == nil }) {
+                    let next = queuedTaskRequests.remove(at: index)
                     startCommand(
                         next.text, taskID: next.isNewTask ? nil : next.taskID, receivedAt: next.receivedAt,
                         messageID: next.messageID, prepared: next.prepared)
@@ -105,17 +138,6 @@ extension AppModel {
                     await checking.value
                     try Task.checkCancellation()
                 }
-                if !isLiveTest {
-                    let jevKey = try? await SecretStore.loadAvailable(settings.fastKeyAccount)
-                    guard settings.fast.isConfigured, jevKey?.isEmpty == false else {
-                        fastServiceState = "unconfigured"
-                        onSetupModels?()
-                        throw AppError.message(
-                            userText(
-                                "请先在 Models 中配置 Jev。这个请求已保留。",
-                                "Configure Jev in Models to continue. Your request is saved."))
-                    }
-                }
                 let reply = try await agent.run(text, receivedAt: requestReceivedAt, taskID: taskID, prepared: prepared)
                 if !Task.isCancelled, !reply.isEmpty { deliverReply(reply, kind: agent.replyKind) }
             } catch is CancellationError { taskFailed = true } catch {
@@ -125,8 +147,9 @@ extension AppModel {
                         agent.replyKind = .authorization
                         reportModelAccessIssue(error)
                     } else {
-                        failAmbientRequest(error.localizedDescription)
-                        deliverReply(friendlyFailure(error), kind: .failure)
+                        let message = friendlyFailure(error)
+                        failAmbientRequest(message)
+                        deliverReply(message, kind: .failure)
                     }
                 }
             }
@@ -140,7 +163,7 @@ extension AppModel {
                 "重新开始": "restart", "重置": "restart", "reset": "restart",
             ][normalized]
         {
-            if busy && ownsRequest(task.id) { cancel() }
+            if busy && ownsRequest(task.id) { stopCommand(for: task.id) }
             taskRuntime.control(task.id, operation: operation)
             if let index = messages.indices.last { messages[index].taskID = task.id }
             return true

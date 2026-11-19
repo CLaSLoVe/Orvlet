@@ -103,8 +103,9 @@ final class InterfaceMemory {
         }.prefix(8).map { $0 }
     }
     /// Semantic selection is made by the agent, never by title/keyword matching.
-    var catalogue: [[String: Any]] {
-        recipes.map {
+    var catalogue: [[String: Any]] { catalogue(language: nil) }
+    func catalogue(language: String?) -> [[String: Any]] {
+        recipes.filter { recipe in language.map { recipe.markup.matchesLanguage($0) } ?? true }.map {
             var entry: [String: Any] = [
                 "id": $0.id.uuidString, "purpose": $0.purpose, "kind": $0.kind.rawValue, "state_keys": $0.stateKeys,
                 "fields": $0.surface?.fields ?? [],

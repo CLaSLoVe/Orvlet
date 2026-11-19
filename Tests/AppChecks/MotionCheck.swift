@@ -11,16 +11,25 @@
             model.settings.autoAdapt = false
             model.settings.main = Endpoint()
             do {
-                if CommandLine.arguments.contains("--hold-preview") {
+                if CommandLine.arguments.contains("--hold-preview"),
+                    !CommandLine.arguments.contains("--source-window-check")
+                {
                     _ = try await settings(delegate: delegate)
                     model.settings.reduceMotion = false
                     let id = try model.startTimer(seconds: 600, title: "Tea timer")
                     model.selectTask(id, expanded: true)
                     return
                 }
-                let checks = try await run(model, delegate: delegate) + settings(delegate: delegate)
+                let checks =
+                    try await
+                    (CommandLine.arguments.contains("--window-core-only")
+                    ? coreWindow(model, delegate: delegate)
+                    : CommandLine.arguments.contains("--source-window-check")
+                        ? sourceResizing(model, delegate: delegate)
+                        : run(model, delegate: delegate) + settings(delegate: delegate))
                 try JSONSerialization.data(withJSONObject: ["ok": true, "checks": checks]).write(
                     to: URL(fileURLWithPath: "/tmp/orvlet-motion-checks.json"))
+                if CommandLine.arguments.contains("--hold-preview") { return }
                 exit(0)
             } catch {
                 try? JSONSerialization.data(withJSONObject: [
@@ -28,6 +37,294 @@
                 ]).write(to: URL(fileURLWithPath: "/tmp/orvlet-motion-checks.json"))
                 exit(1)
             }
+        }
+
+        static func coreWindow(_ model: AppModel, delegate: AppDelegate) async throws -> [String] {
+            model.settings.reduceMotion = true
+            model.dismissFeedback()
+            model.openURL("http://127.0.0.1:19244/fixture")
+            try await Task.sleep(for: .milliseconds(600))
+            model.collapse()
+            model.setCompactLayout(.vertical)
+            let shell = delegate.panel!
+            let screen = shell.screen!.visibleFrame
+            shell.setFrameOrigin(
+                NSPoint(
+                    x: screen.maxX - shell.frame.width - 24,
+                    y: screen.maxY - shell.frame.height - 90))
+            let home = shell.frame
+            var checks: [String] = []
+            for pinned in [false, true] {
+                model.showPage()
+                model.pinned = pinned
+                let before = shell.frame
+                delegate.windowWillStartLiveResize(
+                    Notification(name: NSWindow.willStartLiveResizeNotification, object: shell))
+                shell.setFrame(
+                    NSRect(
+                        x: before.minX - 36, y: before.minY - 28,
+                        width: before.width + 36, height: before.height + 28), display: true)
+                delegate.windowDidResize(Notification(name: NSWindow.didResizeNotification, object: shell))
+                delegate.windowDidEndLiveResize(
+                    Notification(name: NSWindow.didEndLiveResizeNotification, object: shell))
+                model.collapse()
+                guard shell.frame == home else {
+                    throw AppError.message("Resize/collapse moved the parked card (pinned: \(pinned))")
+                }
+                checks.append("Resize/collapse returns home, pinned: \(pinned)")
+            }
+            model.setCompactLayout(.horizontal)
+            model.setCompactLayout(.vertical)
+            guard shell.frame == home else {
+                throw AppError.message("Temporary orientation fitting overwrote the parked position")
+            }
+            checks.append("Orientation changes near a screen edge preserve the parked position")
+            model.showPage()
+            model.pinned = true
+            shell.moveInteraction(true)
+            shell.setFrameOrigin(NSPoint(x: shell.frame.minX - 24, y: shell.frame.minY - 16))
+            shell.moveInteraction(false)
+            model.collapse()
+            guard shell.frame == home.offsetBy(dx: -24, dy: -16) else {
+                throw AppError.message("A pinned drag failed to move the parked position")
+            }
+            checks.append("Intentional pinned drag updates the parked position")
+            model.settings.reduceMotion = false
+            return checks
+        }
+
+        static func sourceResizing(_ model: AppModel, delegate: AppDelegate) async throws -> [String] {
+            var checks: [String] = []
+            func check(_ value: Bool, _ name: String) throws {
+                guard value else { throw AppError.message(name) }
+                checks.append(name)
+            }
+            model.settings.reduceMotion = true
+            model.dismissFeedback()
+            model.selectChat(false, restoreFocus: false)
+            model.openURL("http://127.0.0.1:19244/fixture")
+            try await Task.sleep(for: .milliseconds(600))
+            model.showPage()
+            for orientation in [CompactLayout.vertical, .horizontal] {
+                model.setCompactLayout(orientation)
+                for pinned in [false, true] {
+                    model.pinned = pinned
+                    delegate.resize(to: model.windowSize)
+                    let shell = delegate.panel!
+                    for change: CGFloat in [70, -50] {
+                        let started = shell.frame
+                        delegate.windowWillStartLiveResize(
+                            Notification(name: NSWindow.willStartLiveResizeNotification, object: shell))
+                        let enlarged = NSRect(
+                            x: started.minX - change, y: started.minY - change / 2, width: started.width + change,
+                            height: started.height + change / 2)
+                        shell.setFrame(enlarged, display: true)
+                        delegate.windowDidResize(Notification(name: NSWindow.didResizeNotification, object: shell))
+                        try check(
+                            model.shellLayout.frame == shell.frame
+                                && model.shellLayout.localVisibleContent.size == model.shellLayout.content.size,
+                            "Live source resizing keeps rendered content and hit regions inside the actual frame (pinned: \(pinned))"
+                        )
+                        let during = model.shellLayout
+                        delegate.windowDidEndLiveResize(
+                            Notification(name: NSWindow.didEndLiveResizeNotification, object: shell))
+                        delegate.resize(to: model.windowSize)
+                        try check(
+                            shell.frame == during.frame && model.shellLayout.content == during.content,
+                            "Releasing a source resize and refreshing data does not snap or reflow the window (orientation: \(orientation), pinned: \(pinned), before: \(during), after: \(model.shellLayout), window: \(shell.frame))"
+                        )
+                    }
+                    if pinned, let screen = shell.screen?.visibleFrame {
+                        shell.setFrameOrigin(NSPoint(x: screen.maxX - 8 - shell.frame.width, y: shell.frame.minY))
+                        let moved = shell.frame
+                        delegate.resize(to: model.windowSize)
+                        try check(
+                            shell.frame == moved,
+                            "A pinned window dragged to the screen edge is not pulled back by its hidden task strip")
+                        try check(
+                            shell.minSize.width == AppModel.minimumWebSize.width + model.shellLayout.chromeSize.width,
+                            "Pinned source minimum width includes only the visible rail")
+                    }
+                }
+            }
+            model.setCompactLayout(.vertical)
+            model.settings.reduceMotion = false
+            model.pinned = false
+            try await Task.sleep(for: .milliseconds(60))
+            let shell = delegate.panel!
+            shell.moveInteraction(true)
+            shell.setFrameOrigin(NSPoint(x: shell.frame.minX - 24, y: shell.frame.minY - 20))
+            let dragged = shell.frame
+            try await Task.sleep(for: .milliseconds(100))
+            try check(shell.frame == dragged, "An interrupted pin animation cannot compete with an active window drag")
+            shell.moveInteraction(false)
+            try await Task.sleep(for: .milliseconds(400))
+            try check(
+                model.activeInteractions == 0 && model.shellLayout.frame == shell.frame,
+                "Releasing a drag restores layout and balances interaction tracking")
+            checks += try await sourceReturningHome(model, delegate: delegate)
+            checks += try await taskDoubleClick(model, delegate: delegate)
+            model.settings.reduceMotion = true
+            model.pinned = true
+            try await Task.sleep(for: .milliseconds(200))
+            try await SideScreenCheck.snapshot(delegate.panel, path: "/tmp/orvlet-source-resize-pinned.png")
+            return checks
+        }
+
+        static func sourceReturningHome(_ model: AppModel, delegate: AppDelegate) async throws -> [String] {
+            var checks: [String] = []
+            let shell = delegate.panel!
+            model.settings.reduceMotion = true
+            for orientation in [CompactLayout.vertical, .horizontal] {
+                for farEdge in [false, true] {
+                    for pinned in [false, true] {
+                        model.collapse()
+                        model.setCompactLayout(orientation)
+                        let screen = shell.screen!.visibleFrame
+                        let size = shell.frame.size
+                        let origin = NSPoint(
+                            x: orientation == .vertical
+                                ? (farEdge ? screen.maxX - size.width - 80 : screen.minX + 80)
+                                : screen.midX - size.width / 2,
+                            y: orientation == .horizontal && !farEdge
+                                ? screen.minY + 80 : screen.maxY - size.height - 80)
+                        shell.setFrameOrigin(origin)
+                        let home = shell.frame
+                        model.showPage()
+                        model.pinned = pinned
+                        delegate.resize(to: model.windowSize)
+                        for delta: CGFloat in [60, -40] {
+                            let before = shell.frame
+                            delegate.windowWillStartLiveResize(
+                                Notification(name: NSWindow.willStartLiveResizeNotification, object: shell))
+                            shell.setFrame(
+                                NSRect(
+                                    x: before.minX - delta / 2, y: before.minY - delta / 2,
+                                    width: before.width + delta, height: before.height + delta), display: true)
+                            delegate.windowDidResize(Notification(name: NSWindow.didResizeNotification, object: shell))
+                            delegate.windowDidEndLiveResize(
+                                Notification(name: NSWindow.didEndLiveResizeNotification, object: shell))
+                        }
+                        // Rail retraction, the task shelf and source/card changes are layouts, not moves.
+                        model.pinned.toggle()
+                        model.pinned.toggle()
+                        model.taskShelfVisible = true
+                        delegate.resize(to: model.windowSize)
+                        model.taskShelfVisible = false
+                        delegate.resize(to: model.windowSize)
+                        model.collapse()
+                        guard shell.frame == home else {
+                            throw AppError.message(
+                                "Resizing or switching layouts moved the compact home: \(orientation), \(farEdge), \(pinned), \(home) -> \(shell.frame)"
+                            )
+                        }
+                        checks.append(
+                            "Resize/pin/shelf/collapse returns to the parked position: \(orientation), far edge \(farEdge), pinned \(pinned)"
+                        )
+                        model.showPage()
+                        model.pinned = pinned
+                        delegate.resize(to: model.windowSize)
+                        shell.moveInteraction(true)
+                        shell.setFrameOrigin(NSPoint(x: shell.frame.minX + 18, y: shell.frame.minY - 14))
+                        shell.moveInteraction(false)
+                        model.collapse()
+                        guard shell.frame == home.offsetBy(dx: 18, dy: -14) else {
+                            throw AppError.message("An intentional expanded drag did not translate the compact home")
+                        }
+                        checks.append(
+                            "Intentional expanded movement translates the parked position without incorporating resize displacement"
+                        )
+                    }
+                }
+            }
+            return checks
+        }
+
+        static func taskDoubleClick(_ model: AppModel, delegate: AppDelegate) async throws -> [String] {
+            var checks: [String] = []
+            func check(_ condition: Bool, _ label: String) throws {
+                guard condition else { throw AppError.message(label) }
+                checks.append(label)
+            }
+            func targets(_ view: NSView) -> [WindowDragArea.DragView] {
+                (view as? WindowDragArea.DragView).map { [$0] } ?? view.subviews.flatMap(targets)
+            }
+            func click(_ view: WindowDragArea.DragView, count: Int) {
+                let window = view.window!
+                let point = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    let event = NSEvent.mouseEvent(
+                        with: type, location: point, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, eventNumber: 1, clickCount: count, pressure: 1)!
+                    if type == .leftMouseDown { view.mouseDown(with: event) } else { view.mouseUp(with: event) }
+                }
+            }
+            let id = model.selectedSideTask!.id
+            model.collapse()
+            try await Task.sleep(for: .milliseconds(100))
+            func title() throws -> WindowDragArea.DragView {
+                guard
+                    let target = targets(delegate.panel.contentView!).first(where: {
+                        $0.identifier?.rawValue == id.uuidString && $0.onDoubleClick != nil
+                    })
+                else { throw AppError.message("Missing compact task double-click target") }
+                return target
+            }
+            click(try title(), count: 1)
+            try await Task.sleep(for: .milliseconds(50))
+            click(try title(), count: 2)
+            try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.1))
+            try check(
+                model.showingWeb && !model.collapsed,
+                "Double-clicking a web task opens its source without a delayed collapse")
+            click(try title(), count: 1)
+            try check(
+                !model.collapsed, "A collapse click waits briefly so its second click cannot land on another window")
+            click(try title(), count: 2)
+            try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.1))
+            try check(
+                model.showingWeb && !model.collapsed,
+                "Double-clicking an already expanded task cancels the pending collapse")
+            click(try title(), count: 1)
+            WindowDragArea.DragView.cancelPendingClicks()
+            try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.1))
+            try check(!model.collapsed, "Another pointer or keyboard action cancels a pending single click")
+            click(try title(), count: 1)
+            WindowDragArea.DragView.cancelPendingClicks()
+            model.collapse()
+            try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.1))
+            try check(model.collapsed, "Escape or outside dismissal cannot be undone by a stale delayed click")
+            model.showPage()
+            try await Task.sleep(for: .milliseconds(100))
+            click(try title(), count: 1)
+            try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.1))
+            try check(model.collapsed, "An ordinary single click still collapses an expanded task")
+            model.taskShelfVisible = true
+            delegate.resize(to: model.windowSize)
+            try await Task.sleep(for: .milliseconds(100))
+            guard
+                let row = targets(delegate.panel.contentView!).first(where: {
+                    $0.onDoubleClick != nil && !$0.allowsWindowDrag
+                })
+            else { throw AppError.message("Missing task shelf double-click target") }
+            click(row, count: 1)
+            try check(
+                model.taskShelfVisible,
+                "Task shelf keeps its row under the pointer until double-click detection completes")
+            click(row, count: 2)
+            try await Task.sleep(for: .seconds(NSEvent.doubleClickInterval + 0.1))
+            try check(
+                model.showingWeb && !model.taskShelfVisible,
+                "Task shelf double-click opens the source and does not replay its single click")
+            let timer = try model.startTimer(seconds: 60, title: "Click check")
+            model.openTaskFromDoubleClick(timer)
+            try check(
+                !model.showingWeb && !model.collapsed && model.selectedTaskID == timer,
+                "Double-clicking a non-web task keeps its ordinary task details")
+            model.closeTask(timer)
+            model.selectTask(id, expanded: true, preferSource: true)
+            return checks
         }
 
         static func settings(delegate: AppDelegate) async throws -> [String] {
@@ -199,13 +496,16 @@
                 model.taskShelfVisible = false
                 try await wait()
                 model.selectChat(true)
-                try await wait(55)
                 guard let command = delegate.commandPanel else {
                     throw AppError.message("Animated input window missing")
                 }
+                // Initial SwiftUI layout may occupy more than one animation
+                // interval. Check the initial frame, not a lucky 55 ms sample.
+                let startsTransparent = command.alphaValue < 1
+                try await wait(55)
                 try check(
-                    command.isVisible && command.alphaValue > 0 && command.alphaValue < 1,
-                    "Alt-Space fades the independent input window into view")
+                    command.isVisible && startsTransparent && (0...1).contains(command.alphaValue),
+                    "Alt-Space starts the independent input window without an opaque flash")
                 model.selectChat(false, restoreFocus: false)
                 try check(
                     !model.commandPanelVisible && command.ignoresMouseEvents,

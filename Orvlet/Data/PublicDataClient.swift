@@ -54,8 +54,30 @@ nonisolated final class PublicDataClient: NSObject, URLSessionTaskDelegate, @unc
             cursor = address.ai_next
         }
     }
+    private struct TemporaryHTTPFailure: LocalizedError {
+        let status: Int
+        var errorDescription: String? { "The public data source is temporarily unavailable (HTTP " + String(status) + ")." }
+    }
+
+    /// Only idempotent public reads can replay. Validation, offline state and rate limits
+    /// go directly to the caller; cancellation also interrupts the short backoff.
+    static func readWithRetry<T>(_ read: () async throws -> T) async throws -> T {
+        do { return try await read() }
+        catch {
+            let transport = (error as? URLError)?.code
+            guard error is TemporaryHTTPFailure || transport == .timedOut || transport == .networkConnectionLost else { throw error }
+            try await Task.sleep(for: .milliseconds(300))
+            try Task.checkCancellation()
+            return try await read()
+        }
+    }
+
     func fetch(_ raw: String) async throws -> Any {
         let url = try Self.url(raw)
+        return try await Self.readWithRetry { try await self.fetchOnce(url) }
+    }
+
+    private func fetchOnce(_ url: URL) async throws -> Any {
         try await Task.detached { try Self.publicAddress(url.host!) }.value
         try Task.checkCancellation()
         let config = URLSessionConfiguration.ephemeral
@@ -70,12 +92,19 @@ nonisolated final class PublicDataClient: NSObject, URLSessionTaskDelegate, @unc
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let (stream, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
-            response.expectedContentLength <= 524288
-        else {
-            throw AppError.message(
-                "The data source is unavailable or returned an oversized response. Try another source.")
+        if let http = response as? HTTPURLResponse, [502, 503, 504].contains(http.statusCode),
+            http.value(forHTTPHeaderField: "Retry-After") == nil { throw TemporaryHTTPFailure(status: http.statusCode) }
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        switch http.statusCode {
+        case 200...299: break
+        case 404, 410:
+            throw AppError.message("HTTP \(http.statusCode): this endpoint or record was not found. Resolve the requested name in a public directory or search endpoint, then fetch the returned identifier.")
+        case 401, 403, 429:
+            throw AppError.message("HTTP \(http.statusCode): this source denied or limited the public request. Use another public endpoint or an accessible page.")
+        default:
+            throw AppError.message("The source returned HTTP \(http.statusCode). Verify the endpoint or try another public source.")
         }
+        guard response.expectedContentLength <= 524288 else { throw AppError.message("The data response is too large. Narrow the query.") }
         var data = Data()
         for try await byte in stream {
             try Task.checkCancellation()

@@ -1,7 +1,15 @@
 import Foundation
 
+struct ModelServiceFailure: LocalizedError {
+    let status: Int
+    let detail: String
+    let retryAfter: Bool
+    var errorDescription: String? { detail }
+}
+
 @MainActor
 enum ModelClient {
+    nonisolated static let defaultTimeout: TimeInterval = 600
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
@@ -11,15 +19,20 @@ enum ModelClient {
     }()
     static func complete(
         endpoint: Endpoint, key: String, messages: [[String: Any]], tools: [[String: Any]], reasoning: Bool = true,
-        requiredTool: String? = nil, timeout: TimeInterval? = nil, budget: ThinkingBudget = .standard
+        requiredTool: String? = nil, timeout: TimeInterval? = nil, budget: ThinkingBudget = .standard,
+        onStream: ((String, String?) -> Void)? = nil
     ) async throws -> [String: Any] {
         guard let url = endpoint.completionURL else { throw AppError.message("Enter a model endpoint in Settings.") }
-        let body = try ModelWire.body(
+        var body = try ModelWire.body(
             endpoint: endpoint, messages: messages, tools: tools,
             reasoning: reasoning, requiredTool: requiredTool, budget: budget)
+        if onStream != nil, try endpoint.options.object(endpoint.options.parameters, label: "Request parameters")["stream"] == nil {
+            body["stream"] = true
+        }
         let headers = try ModelWire.headers(endpoint: endpoint, key: key)
         let started = Date()
         let callID = UUID().uuidString
+        let requestTimeout = Double(endpoint.options.timeout) ?? timeout ?? defaultTimeout
         #if DEBUG
             // Explicit isolated live harness only, including opt-in saved-context replay. Never log headers.
             let capture =
@@ -43,13 +56,25 @@ enum ModelClient {
                 "messageBytes": JSONText.encode(messages).utf8.count,
                 "toolBytes": JSONText.encode(tools).utf8.count, "toolCount": tools.count,
                 "inputBytes": JSONText.encode(body).utf8.count,
+                "timeoutSeconds": requestTimeout,
             ])
         let json: [String: Any]
         do {
-            json = try await request(
-                url: url, key: key, body: body,
-                timeout: Double(endpoint.options.timeout) ?? timeout ?? (reasoning ? 90 : 40),
-                headers: headers)
+            func decisionRequest() async throws -> [String: Any] {
+                try await request(url: url, key: key, body: body, timeout: requestTimeout, headers: headers, onStream: onStream)
+            }
+            do { json = try await decisionRequest() }
+            catch {
+                try Task.checkCancellation()
+                let service = error as? ModelServiceFailure
+                let transport = (error as? URLError)?.code
+                guard (service.map { [502, 503, 504].contains($0.status) && !$0.retryAfter } ?? false)
+                    || transport == .networkConnectionLost else { throw error }
+                // Tool calls are dispatched only after an entire decision has arrived.
+                Diagnostics.record("decision_retry", ["category": Diagnostics.category(error)])
+                try await Task.sleep(for: .milliseconds(300))
+                json = try await decisionRequest()
+            }
         } catch {
             try Task.checkCancellation()
             Diagnostics.record(
@@ -96,10 +121,15 @@ enum ModelClient {
         return message
     }
     static func request(
-        url: URL, key: String, body: [String: Any], timeout: TimeInterval = 40, headers: [String: String]? = nil
+        url: URL, key: String, body: [String: Any], timeout: TimeInterval = defaultTimeout,
+        headers: [String: String]? = nil, onStream: ((String, String?) -> Void)? = nil
     ) async throws -> [String:
         Any]
     {
+        #if DEBUG
+            let studyCallID = try ContinuationStudy.beginProvider(url: url, body: body)
+            defer { ContinuationStudy.endProvider(studyCallID) }
+        #endif
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -110,21 +140,35 @@ enum ModelClient {
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         // Reuse connections for fast repeated operations, without persistent cookies or caches.
+        if let onStream, body["stream"] as? Bool == true {
+            do { return try await stream(request, key: key, headers: headers, notify: onStream) }
+            catch {
+                let reason = error.localizedDescription.lowercased()
+                guard reason.contains("stream"), reason.contains("http 400") || reason.contains("http 422") else { throw error }
+                var buffered = body
+                buffered["stream"] = false
+                request.httpBody = try JSONSerialization.data(withJSONObject: buffered)
+            }
+        }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw AppError.message("The model service did not respond.")
         }
+        #if DEBUG
+            ContinuationStudy.endProvider(studyCallID, status: http.statusCode, json: (try? JSONSerialization.jsonObject(with: data)) as? [String: Any])
+        #endif
         guard (200..<300).contains(http.statusCode) else {
-            throw AppError.message(
-                providerError(
-                    status: http.statusCode, data: data,
-                    secrets: [key] + Array((headers ?? [:]).values)))
+            throw serviceFailure(http, data: data, secrets: [key] + Array((headers ?? [:]).values))
         }
 
         guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AppError.message("The model returned an unreadable response.")
         }
         return result
+    }
+    static func serviceFailure(_ response: HTTPURLResponse, data: Data, secrets: [String]) -> ModelServiceFailure {
+        ModelServiceFailure(status: response.statusCode, detail: providerError(status: response.statusCode, data: data, secrets: secrets),
+                            retryAfter: response.value(forHTTPHeaderField: "Retry-After") != nil)
     }
     static func providerError(status: Int, data: Data, secrets: [String]) -> String {
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]

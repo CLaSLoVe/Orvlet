@@ -30,8 +30,10 @@ belong in request parameters because their shape and budget requirements differ.
 An empty output limit omits the parameter, except Messages which requires a limit
 and defaults to 8192. Chat providers can choose `max_completion_tokens` or `max_tokens`.
 Temperature is omitted when blank, including on models that reject it. An explicit
-request timeout overrides the normal per-stage timeout. These settings apply to
-connection tests and real model requests.
+request timeout overrides the default 600-second model-request timeout and any
+explicit connection-test timeout. Connection tests retain their short explicit
+timeout when the profile leaves this field blank. Jev routing keeps its separate
+short timeout.
 
 **Force required tool calls** can be turned off for gateways supporting only automatic
 tool choice. The result still has to pass Orvlet's normal tool and argument validation.

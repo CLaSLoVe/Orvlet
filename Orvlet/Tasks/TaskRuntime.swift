@@ -222,7 +222,7 @@ final class TaskRuntimeEngine {
         RunLoop.main.add(timer!, forMode: .common)
     }
     private func refreshInput(_ task: RuntimeTask, now: Date) -> [String: Any] {
-        Dictionary(uniqueKeysWithValues: task.fields.map { ($0, task.values[$0] ?? "" as Any) })
+        Dictionary(uniqueKeysWithValues: Set(task.fields).map { ($0, task.values[$0] ?? "" as Any) })
             .merging(["now": now.timeIntervalSince1970 * 1000]) { _, new in new }
     }
     private func runRefresh(_ refresh: TaskRefresh, input: [String: Any], state: [String: String]) async throws

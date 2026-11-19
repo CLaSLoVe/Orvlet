@@ -4,6 +4,7 @@ import SwiftUI
 struct TaskConversationHistoryView: View {
     @ObservedObject var model: AppModel
     @State private var deleting: UUID?
+    @State private var showEarlierSteps = false
     var body: some View {
         Group {
             if let id = model.conversationTaskID {
@@ -42,30 +43,36 @@ struct TaskConversationHistoryView: View {
                                         .frame(maxWidth: .infinity, alignment: message.isUser ? .trailing : .leading)
                                         .id(message.id)
                                 }
-                                if model.conversationProgress.count > 1 {
-                                    DisclosureGroup("Progress") {
-                                        VStack(alignment: .leading, spacing: 5) {
-                                            ForEach(Array(model.conversationProgress.enumerated()), id: \.offset) {
-                                                _, step in Text(step).frame(maxWidth: .infinity, alignment: .leading)
+                                if !model.conversationProgress.isEmpty || model.conversationActivity != nil {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        if model.conversationProgress.count > 3 {
+                                            DisclosureGroup("Earlier steps", isExpanded: $showEarlierSteps) {
+                                                ForEach(Array(model.conversationProgress.dropLast(3).enumerated()), id: \.offset) { _, step in
+                                                    Text(step).textSelection(.enabled).foregroundStyle(.secondary)
+                                                }
                                             }
-                                        }.padding(.top, 4)
-                                    }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 10)
-                                }
-                                if let activity = model.conversationActivity {
-                                    HStack(spacing: 8) {
-                                        if activity.isWorking && !model.motionReduced {
-                                            ProgressView().controlSize(.small).frame(width: 14, height: 14)
-                                        } else {
-                                            Image(systemName: activity == .stopped ? "stop.circle" : "ellipsis")
-                                                .frame(width: 14, height: 14)
                                         }
-                                        Text(activity.label).fixedSize(horizontal: false, vertical: true)
+                                        ForEach(Array(model.conversationProgress.suffix(3).enumerated()), id: \.offset) { index, step in
+                                            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                                                Image(systemName: step.contains(" · ") ? "exclamationmark.circle" : "circle.fill")
+                                                    .font(.system(size: step.contains(" · ") ? 10 : 4))
+                                                Text(step).textSelection(.enabled)
+                                            }
+                                            .foregroundStyle(index == min(2, model.conversationProgress.count - 1) ? .primary : .secondary)
+                                        }
+                                        if let draft = model.runOwning(id)?.streamText, !draft.isEmpty {
+                                            Text(draft).font(.system(size: 12)).textSelection(.enabled)
+                                        } else if model.conversationProgress.isEmpty, let activity = model.conversationActivity {
+                                            Text(activity.label)
+                                        }
                                     }
-                                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                                    .padding(.horizontal, 10).padding(.vertical, 8)
-                                    .accessibilityElement(children: .combine)
-                                    .id("request-activity")
+                                    .font(.system(size: 11)).frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.leading, 10).overlay(alignment: .leading) {
+                                        RoundedRectangle(cornerRadius: 1).fill(model.accent.opacity(0.5)).frame(width: 2)
+                                    }
+                                    .accessibilityElement(children: .contain).id("request-activity")
                                 }
+
                             }.padding(.horizontal, 14).padding(.vertical, 10)
                         }
                         .onChange(of: model.conversationActivity) { _, state in

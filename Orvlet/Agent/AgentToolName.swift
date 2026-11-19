@@ -3,6 +3,10 @@ import Foundation
 /// Stable wire names. Domains select executors; they do not grant permissions.
 enum AgentToolName: String, CaseIterable {
     enum Domain { case data, workspace, native, browser, completion }
+    case loadTools = "load_tools"
+    case manageTask = "manage_task"
+    case readValue = "read_value"
+    case showReadings = "show_readings"
     case inspectApi = "inspect_api"
     case queryApi = "query_api"
     case runCode = "run_code"
@@ -27,14 +31,14 @@ enum AgentToolName: String, CaseIterable {
     /// Inspection and final verification may always be repeated. Effects use request-scoped receipts.
     var changesState: Bool {
         switch self {
-        case .observe, .screenshot, .history, .inspectApi, .calendarClarify, .finish: return false
+        case .loadTools, .observe, .screenshot, .history, .inspectApi, .calendarClarify, .finish: return false
         default: return true
         }
     }
     var domain: Domain {
         switch self {
-        case .inspectApi, .queryApi: return .data
-        case .runCode, .presentUi, .controlTask, .reuseSavedUi: return .workspace
+        case .inspectApi, .readValue, .queryApi, .showReadings: return .data
+        case .loadTools, .manageTask, .runCode, .presentUi, .controlTask, .reuseSavedUi: return .workspace
         case .timerStart, .calendarClarify, .calendarCreate: return .native
         case .findMusic, .observe, .reuseUi, .navigate, .act, .composeUi, .visibility, .history, .restore, .screenshot,
             .controlMedia:

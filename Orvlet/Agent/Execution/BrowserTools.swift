@@ -110,7 +110,9 @@ extension AgentController {
             // Agent page clicks must not toggle an already playing player. Direct
             // human page interaction and native pause controls remain unrestricted.
             input["preservePlayback"] = requestIntent.playbackIntent != "pause"
+            if input["action"] as? String == "reload" { input["fresh"] = true }
             let actionResult = try await model.performBrowserAction(input)
+            if input["action"] as? String == "reload" { freshSourceLoaded = true }
             if actionResult["playbackDeferred"] as? Bool == true { return context(actionResult) }
             let page = try await (model.externalBrowser ? model.observation() : model.browser.settledObservation())
             if requestIntent.playbackIntent == "play"
@@ -128,7 +130,9 @@ extension AgentController {
             interfaceAttempted = true
             pendingSurface = nil
             if model.requestCardID != nil { ownCurrentPage() }
-            let plan = try InterfaceComposer.decodePlan(JSONText.encode(input))
+            var plan = try InterfaceComposer.decodePlan(JSONText.encode(input))
+            try plan.markup?.validateLanguage(model.settings.preferredInterfaceLanguage)
+            plan.markup?.interfaceLanguage = model.settings.preferredInterfaceLanguage
             let mapped = try plan.validated(observation: model.lastObservation)
             let observation = try await model.observation()
             let checked = try mapped.validated(observation: observation)

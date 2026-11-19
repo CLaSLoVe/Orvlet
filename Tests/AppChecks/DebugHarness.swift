@@ -33,6 +33,8 @@
             case rankingLiveCheck = "--ranking-live-check"
             case taskAgentCheck = "--task-agent-check"
             case motionCheck = "--motion-check"
+            case sourceWindowCheck = "--source-window-check"
+            case generationRecoveryCheck = "--generation-recovery-check"
             case listeningCheck = "--listening-check"
             case musicCheck = "--music-check"
             case musicLiveCheck = "--music-live-check"
@@ -43,6 +45,8 @@
             case protectionCheck = "--protection-check"
             case commandWindowCheck = "--command-window-check"
             case workflowBenchmark = "--workflow-benchmark"
+            case backgroundReadingCheck = "--background-reading-check"
+            case dataReadingCheck = "--data-reading-check"
             case apiDataCheck = "--api-data-check"
             case clockCheck = "--clock-check"
             case preparationCheck = "--preparation-check"
@@ -66,6 +70,14 @@
             }
         }
         static var pipelineSuite: String?
+        static func startStandalonePilot() -> Bool {
+            guard CommandLine.arguments.contains("--pilot-replay") else { return false }
+            let app = NSApplication.shared
+            let delegate = AppDelegate()
+            app.delegate = delegate
+            withExtendedLifetime(delegate) { app.run() }
+            return true
+        }
         static func pipelineModel() -> AppModel? {
             guard CommandLine.arguments.contains("--request-pipeline-live") else { return nil }
             let name = "orvlet.pipeline.live." + UUID().uuidString
@@ -99,6 +111,89 @@
                 exit(2)
             }
             let model = delegate.model
+            if mode == .requestPipelineLive, let index = CommandLine.arguments.firstIndex(of: "--check-saved-reading"), index + 1 < CommandLine.arguments.count {
+                Task {
+                    do { try await ParallelCardsCheck.checkSavedReading(model, subject: CommandLine.arguments[index + 1]); exit(0) }
+                    catch { print(error.localizedDescription); exit(1) }
+                }
+                return true
+            }
+            if mode == .requestPipelineLive, ["--verify-scopes", "--verify-source-join", "--verify-calculated-answer"].contains(where: CommandLine.arguments.contains) {
+                Task {
+                    defer { if let suite = pipelineSuite { model.preferences.removePersistentDomain(forName: suite) } }
+                    do { try await ParallelCardsCheck.verifyEdgeRequest(model, join: CommandLine.arguments.contains("--verify-source-join")); exit(0) }
+                    catch { print(error.localizedDescription); exit(1) }
+                }
+                return true
+            }
+            if mode == .requestPipelineLive, let i = CommandLine.arguments.firstIndex(of: "--verify-placement"),
+                let scenario = CommandLine.arguments.dropFirst(i + 1).first {
+                Task {
+                    do { try await ParallelCardsCheck.verifyPlacement(model, scenario: scenario) }
+                    catch { print(error.localizedDescription); exit(1) }
+                    if let suite = pipelineSuite { model.preferences.removePersistentDomain(forName: suite) }
+                    exit(0)
+                }
+                return true
+            }
+            if mode == .requestPipelineLive, CommandLine.arguments.contains("--verify-comparison") {
+                Task {
+                    defer { if let suite = pipelineSuite { model.preferences.removePersistentDomain(forName: suite) } }
+                    do { try await ParallelCardsCheck.verifyComparison(model); exit(0) }
+                    catch { print(error.localizedDescription); exit(1) }
+                }
+                return true
+            }
+            if mode == .requestPipelineLive, let i = CommandLine.arguments.firstIndex(of: "--verify-readings") {
+                Task {
+                    defer { if let suite = pipelineSuite { model.preferences.removePersistentDomain(forName: suite) } }
+                    do { try await ParallelCardsCheck.verifyReadings(model, cases: CommandLine.arguments.suffix(from: i + 1)); exit(0) }
+                    catch { print(error.localizedDescription); exit(1) }
+                }
+                return true
+            }
+            if mode == .requestPipelineLive && CommandLine.arguments.contains("--parallel-cards") {
+                Task {
+                    defer { if let suite = pipelineSuite { model.preferences.removePersistentDomain(forName: suite) } }
+                    do { try await ParallelCardsCheck.run(model); exit(0) }
+                    catch { print(error.localizedDescription); exit(1) }
+                }
+                return true
+            }
+            if mode == .requestPipelineLive && CommandLine.arguments.contains("--continuation-study") {
+                Task { await ContinuationStudy.run(model, delegate: delegate) }
+                return true
+            }
+            if mode == .requestPipelineLive && CommandLine.arguments.contains("--pilot-export-trace") {
+                for name in ["deduplicate", "countdown", "bill"] {
+                    let url = FileManager.default.temporaryDirectory.appendingPathComponent("simple-pilot-\(name).jsonl")
+                    SimpleTaskPilot.emit(["traceName": name, "trace": (try? String(contentsOf: url, encoding: .utf8)) ?? "", "path": url.path])
+                }
+                exit(0)
+            }
+            if mode == .requestPipelineLive && CommandLine.arguments.contains("--simple-task-pilot") {
+                Task { await SimpleTaskPilot.run(model, delegate: delegate) }
+                return true
+            }
+            if mode == .generationRecoveryCheck {
+                Task {
+                    do {
+                        var checks = try await GenerationRecoveryCheck.run()
+                        if !CommandLine.arguments.contains("--generation-only") {
+                            checks += try await UnifiedRequestCheck.run() + RequestBoundaryCheck.run()
+                        }
+                        print(JSONText.encode(["ok": true, "checks": checks]))
+                        try JSONSerialization.data(withJSONObject: ["ok": true, "checks": checks]).write(
+                            to: URL(fileURLWithPath: "/tmp/orvlet-generation-checks.json"))
+                        exit(0)
+                    } catch {
+                        try? JSONSerialization.data(withJSONObject: ["ok": false, "error": error.localizedDescription])
+                            .write(to: URL(fileURLWithPath: "/tmp/orvlet-generation-checks.json"))
+                        exit(1)
+                    }
+                }
+                return true
+            }
             if mode == .modelPolicyProbe {
                 Task { await ModelPolicyProbe.run(model) }
                 return true
@@ -214,7 +309,9 @@
                 delegate.panel.ignoresMouseEvents = true
                 model.onCommandPanel = nil
                 Task {
-                    if CommandLine.arguments.contains("--playback-restart") {
+                    if CommandLine.arguments.contains("--simple-task-pilot") {
+                        await SimpleTaskPilot.run(model, delegate: delegate)
+                    } else if CommandLine.arguments.contains("--playback-restart") {
                         await PlaybackRestartCheck.live(model)
                     } else if CommandLine.arguments.contains("--background-read-benchmark") {
                         await BackgroundReadLiveCheck.run(model)
@@ -293,7 +390,7 @@
                 Task { await TaskAgentLiveCheck.run(model, delegate: delegate) }
                 return true
             }
-            if mode == .motionCheck {
+            if mode == .motionCheck || mode == .sourceWindowCheck {
                 Task { await MotionCheck.start(model, delegate: delegate) }
                 return true
             }
@@ -311,6 +408,23 @@
             }
             if mode == .workflowBenchmark {
                 Task { await TaskAgentLiveCheck.benchmark(model, delegate: delegate) }
+                return true
+            }
+            if mode == .backgroundReadingCheck || mode == .dataReadingCheck {
+                Task {
+                    do {
+                        let checks = mode == .dataReadingCheck ? try await APIDataCheck.run() : try await APIDataCheck.backgroundReading()
+                        let report: [String: Any] = ["checks": checks, "ok": true]
+                        if mode == .dataReadingCheck {
+                            try JSONSerialization.data(withJSONObject: report).write(to: URL(fileURLWithPath: "/tmp/orvlet-reading-checks.json"))
+                        }
+                        print(JSONText.encode(report))
+                        exit(0)
+                    } catch {
+                        print(error.localizedDescription)
+                        exit(1)
+                    }
+                }
                 return true
             }
             if mode == .apiDataCheck {

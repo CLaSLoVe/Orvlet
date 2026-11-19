@@ -1,79 +1,87 @@
 import Foundation
 
 /// Discovery is small. Construction schemas are loaded only by the executor.
-@MainActor
-enum RequestPlanning {
-    /// Inline only bounded schemas. Larger construction tools remain discoverable,
-    /// and use the same executor after their full schema is loaded.
-    static func actions(_ capability: RequestCapability) -> [[String: Any]] {
-        guard capability != .general else { return [] }
-        return AgentToolRegistry.definitions.compactMap { tool in
-            guard let function = tool["function"] as? [String: Any],
-                let name = function["name"] as? String, capability.planningTools.contains(name), name != "reuse_saved_ui",
-                let parameters = function["parameters"] as? [String: Any],
-                JSONText.encode(parameters).utf8.count + (function["description"] as? String ?? "").utf8.count <= 3500
-            else { return nil }
-            return function
-        }
-    }
-
-    static func discovery(_ capability: RequestCapability) -> [[String: Any]] {
-        let inline = Set(actions(capability).compactMap { $0["name"] as? String })
-        return AgentToolRegistry.definitions.compactMap { tool in
-            guard let function = tool["function"] as? [String: Any], let name = function["name"] as? String,
-                capability.planningTools.contains(name), !inline.contains(name), name != "reuse_saved_ui"
-            else { return nil }
-            return ["name": name, "description": String((function["description"] as? String ?? "").prefix(160))]
-        }
-    }
-
-    static func compactSchema(_ schema: [String: Any], capability: RequestCapability, resolved: Bool, hasMethods: Bool)
-        -> [String: Any]
-    {
-        var schema = schema
-        var function = schema["function"] as! [String: Any]
-        var parameters = function["parameters"] as! [String: Any]
-        var properties = parameters["properties"] as! [String: [String: Any]]
-        var remove: Set<String> = ["summary"]
-        if resolved { remove.formUnion(["targetTaskID", "restoreTaskID"]) }
-        if !hasMethods { remove.insert("reuse") }
-        if capability != .general {
-            let tools = capability.tools
-            if !tools.contains("calendar_create") { remove.formUnion(["missingFields", "continuesClarification"]) }
-            if !tools.contains("timer_start") { remove.formUnion(["timerSeconds", "timerEvidence"]) }
-            if !tools.contains("control_media") { remove.formUnion(["playbackIntent", "mediaSetting"]) }
-            if !tools.contains("present_ui") && !tools.contains("control_task") {
-                remove.formUnion(["timeZones", "updateIntervalSeconds"])
+#if DEBUG
+    // Frozen planning-schema fixtures; production executes tools directly.
+    @MainActor
+    enum RequestPlanning {
+        /// Inline only bounded schemas. Larger construction tools remain discoverable,
+        /// and use the same executor after their full schema is loaded.
+        static func actions(_ capability: RequestCapability) -> [[String: Any]] {
+            guard capability != .general else { return [] }
+            return AgentToolRegistry.definitions.compactMap { tool in
+                guard let function = tool["function"] as? [String: Any],
+                    let name = function["name"] as? String, capability.planningTools.contains(name),
+                    !["reuse_saved_ui", "run_code"].contains(name),
+                    let parameters = function["parameters"] as? [String: Any],
+                    JSONText.encode(parameters).utf8.count + (function["description"] as? String ?? "").utf8.count
+                        <= 3500
+                else { return nil }
+                return function
             }
-            if capability != .answer { remove.insert("answer") }
         }
-        for key in remove { properties.removeValue(forKey: key) }
-        parameters["properties"] = properties
-        parameters["required"] = (parameters["required"] as? [String] ?? []).filter {
-            !remove.contains($0)
+
+        static func discovery(_ capability: RequestCapability) -> [[String: Any]] {
+            let inline = Set(actions(capability).compactMap { $0["name"] as? String })
+            return AgentToolRegistry.definitions.compactMap { tool in
+                guard let function = tool["function"] as? [String: Any], let name = function["name"] as? String,
+                    capability.planningTools.contains(name), !inline.contains(name), name != "reuse_saved_ui"
+                else { return nil }
+                return ["name": name, "description": String((function["description"] as? String ?? "").prefix(160))]
+            }
         }
-        function["parameters"] = parameters
-        schema["function"] = function
-        return schema
-    }
-    static var reuseTool: [String: Any] {
-        ToolSchema.function(
-            "reuse_saved_ui", "Execute a saved method with fresh inputs; its receipt completes the request.",
-            [
-                "id": ["type": "string"],
-                "state": ["type": "object", "additionalProperties": ["type": "string"]],
-                "outcomeEvidence": [
-                    "type": "array",
-                    "items": [
-                        "type": "object",
-                        "properties": [
-                            "requirement": ["type": "integer"], "fieldKey": ["type": "string"],
-                        ], "required": ["requirement", "fieldKey"],
+
+        static func compactSchema(
+            _ schema: [String: Any], capability: RequestCapability, resolved: Bool, hasMethods: Bool
+        )
+            -> [String: Any]
+        {
+            var schema = schema
+            var function = schema["function"] as! [String: Any]
+            var parameters = function["parameters"] as! [String: Any]
+            var properties = parameters["properties"] as! [String: [String: Any]]
+            var remove: Set<String> = ["summary"]
+            if resolved { remove.formUnion(["targetTaskID", "restoreTaskID"]) }
+            if !hasMethods { remove.insert("reuse") }
+            if capability != .general {
+                let tools = capability.tools
+                if !tools.contains("calendar_create") { remove.formUnion(["missingFields", "continuesClarification"]) }
+                if !tools.contains("timer_start") { remove.formUnion(["timerSeconds", "timerEvidence"]) }
+                if !tools.contains("control_media") { remove.formUnion(["playbackIntent", "mediaSetting"]) }
+                if !tools.contains("present_ui") && !tools.contains("control_task") {
+                    remove.formUnion(["timeZones", "updateIntervalSeconds"])
+                }
+                if capability != .answer { remove.insert("answer") }
+            }
+            for key in remove { properties.removeValue(forKey: key) }
+            parameters["properties"] = properties
+            parameters["required"] = (parameters["required"] as? [String] ?? []).filter {
+                !remove.contains($0)
+            }
+            function["parameters"] = parameters
+            schema["function"] = function
+            return schema
+        }
+        static var reuseTool: [String: Any] {
+            ToolSchema.function(
+                "reuse_saved_ui", "Execute a saved method with fresh inputs; its receipt completes the request.",
+                [
+                    "id": ["type": "string"],
+                    "state": ["type": "object", "additionalProperties": ["type": "string"]],
+                    "outcomeEvidence": [
+                        "type": "array",
+                        "items": [
+                            "type": "object",
+                            "properties": [
+                                "requirement": ["type": "integer"], "fieldKey": ["type": "string"],
+                            ], "required": ["requirement", "fieldKey"],
+                        ],
                     ],
-                ],
-            ], required: ["id", "state"])
+                ], required: ["id", "state"])
+        }
     }
-}
+
+#endif
 
 /// The first model response carries executable work as well as its checked intent.
 /// Both planned and subsequent actions pass through the same dispatcher.
@@ -139,8 +147,9 @@ struct RequestStep: Codable {
             ? ["type": "object", "additionalProperties": false] : ["anyOf": variants]
         return [
             "type": "array",
-            "description":
-                "Start known work NOW. Include the first executable action with object arguments when its inputs are supplied. A discovery tool performs its own search: do not wait for its results to plan invoking it. Empty only for an answer, clarification, saved-method reuse, or when no supplied action can start without new evidence. Never invent page IDs or external results.",
+            "description": variants.isEmpty
+                ? "No action schemas are supplied in this stage. Return [] and stepsComplete:false for work requiring execution; the executor loads the needed schema next. Do not invent steps from discovery summaries."
+                : "Start known work NOW. Include the first executable action with object arguments when its inputs are supplied. A discovery tool performs its own search: do not wait for its results to plan invoking it. Empty only for an answer, clarification, saved-method reuse, or when no supplied action can start without new evidence. Never invent page IDs or external results.",
             "items": items,
             "maxItems": variants.isEmpty ? 0 : 4,
         ]

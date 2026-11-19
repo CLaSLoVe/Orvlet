@@ -20,6 +20,9 @@ struct TaskForm: Decodable {
     var inputs: [Field]
     var outputs: [Output]
     var buttons: [Button]
+    var visuals: [CardVisual]? = nil
+    var compactUnit: String? = nil
+    var compactSubject: String? = nil
     var compactKey: String
     static let schema: [String: Any] = [
         "type": "object",
@@ -49,10 +52,13 @@ struct TaskForm: Decodable {
                     "required": ["action", "label"],
                 ],
             ],
+            "visuals": CardVisual.schema,
+            "compactUnit": ["type": "string", "maxLength": 12, "description": "Unit for a raw numerical compact value, unless the state value already includes it."],
+            "compactSubject": ["type": "string", "maxLength": 40, "description": "Short object or activity name in the configured UI language for the capsule, e.g. Studio. Use a name a person recognizes."],
             "compactKey": [
                 "type": "string",
                 "description":
-                    "State key for the compact glance, including a separate computed summary. Choose a short useful result, not long body text.",
+                    "Use the primary output key with a formatted short value and unit. The capsule has only 82 px: one amount or status, no explanatory sentence. For a long output provide a separate concise summary.",
             ],
         ], "required": ["inputs", "outputs", "buttons", "compactKey"],
     ]
@@ -113,21 +119,27 @@ struct TaskForm: Decodable {
             return "<label class='calm-field" + (field.kind == "textarea" ? " form-wide" : "") + "'>"
                 + escape(field.label) + control + "</label>"
         }.joined()
-        let resultsHTML = outputs.map { output in
+        let ordered = outputs.filter { $0.key == compactKey } + outputs.filter { $0.key != compactKey }
+        let resultsHTML = ordered.map { output in
             "<div class='calm-result'><small class='calm-label'>" + escape(output.label)
-                + "</small><strong class='form-value' data-bind='" + output.key + "'></strong></div>"
-        }.joined()
+                + "</small><div><strong class='form-value' data-bind='" + output.key + "'></strong>"
+                + (output.key == compactKey ? CardMarkup.unitSuffix(compactUnit) : "") + "</div></div>"
+        }
         let buttonsHTML = buttons.enumerated().map { index, button in
             "<button class='" + (index == 0 ? "calm-primary" : "calm-secondary") + "' data-action='" + button.action
                 + "'>" + escape(button.label) + "</button>"
         }.joined()
+        let visualHTML = try CardVisual.markup(visuals ?? [])
+        let name = compactSubject?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let subject = name.flatMap { $0.isEmpty ? nil : $0 }.map { "<small class='calm-label'>" + escape($0) + "</small>" } ?? "<small class='calm-label' data-bind='title'></small>"
         return CardMarkup(
-            html: "<section class='calm-surface calm-stack'><div class='calm-fields'>" + fieldsHTML
-                + "</div><div class='calm-actions'>" + buttonsHTML + "</div>" + resultsHTML + "</section>",
-            compactHTML: "<div class='calm-glance'><strong class='calm-value' data-bind='" + compactKey
-                + "'></strong></div>",
+            html: "<section class='calm-surface calm-stack calm-form'>" + (resultsHTML.first ?? "") + visualHTML
+                + "<div class='calm-fields'>" + fieldsHTML + "</div><div class='calm-actions'>" + buttonsHTML
+                + "</div><div class='form-details'>" + resultsHTML.dropFirst().joined() + "</div></section>",
+            compactHTML: "<div class='calm-glance'>" + subject + "<span><strong class='calm-value' data-bind='" + compactKey
+                + "'></strong>" + CardMarkup.unitSuffix(compactUnit) + "</span></div>",
             css:
-                ".form-wide{grid-column:1/-1}.form-value{font-size:18px;font-weight:600;white-space:pre-wrap;overflow-wrap:anywhere;max-height:110px;overflow:auto;font-variant-numeric:tabular-nums}",
+                ".calm-form .form-details{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.calm-form .form-details:empty,.calm-form .calm-fields:empty,.calm-form figure:not(:has(svg)){display:none}.calm-form>.calm-result .form-value{font-size:26px}.form-details .form-value{font-size:14px}.calm-form .preset-unit-suffix{font-size:12px;margin-left:3px;color:var(--muted)}.form-wide{grid-column:1/-1}.form-value{font-size:18px;font-weight:600;white-space:pre-wrap;overflow-wrap:anywhere;max-height:110px;overflow:auto;font-variant-numeric:tabular-nums}",
             height: 280)
     }
 }

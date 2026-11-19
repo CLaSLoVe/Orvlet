@@ -73,6 +73,53 @@
                 model.dismissFeedback()
                 model.selectChat(false)
                 model.setCompactLayout(.vertical)
+                // Identical values force the visible label to carry the identity of each instance.
+                model.setCompactTaskLimit(3)
+                let examples = [
+                    (["Z.AI", "Tencent", "Xiaomi"], ["2513.HK", "0700.HK", "1810.HK"],
+                     ["Z.AI (2513.HK)", "Tencent (0700.HK)", "Xiaomi (1810.HK)"], "Price", "HKD", "named-capsules"),
+                    (["North Pier", "Lab East", "Lab West"], ["B12", "R201", "R202"],
+                     ["North Pier water level", "Lab East — R201", "Lab West / R202"], "Water level", "cm", "named-instruments")
+                ]
+                for (names, codes, headings, metric, unit, capture) in examples {
+                    var sampleIDs: [UUID] = []
+                    for (index, name) in names.enumerated() {
+                        let code = codes[index]
+                        var source = APIDataSpec(url: "https://example.org/data", fields: [
+                            .init(key: "value", label: metric, pointer: "/value", unit: unit),
+                            .init(key: "identity", label: "Code", pointer: "/id")
+                        ])
+                        source.expectations = ["identity": code]
+                        source.card = DataCardPreset(kind: .reading, primaryKey: "value")
+                        switch index {
+                        case 0: source.card?.subject = code
+                        case 1: source.card?.contextKey = "identity"
+                        default: source.card?.displayNameKey = "identity"
+                        }
+                        let id = UUID()
+                        sampleIDs.append(id)
+                        let service = APIDataService(code: model.taskCode, fetch: { _ in ["id": code, "value": 100] })
+                        let reading = try source.surface(title: headings[index], state: try await service.read(source), request: "关注" + name)
+                        model.publishTaskSurface(reading, id: id)
+                    }
+                    model.activeRequest = nil
+                    model.collapse()
+                    for name in names {
+                        let web = try await rendered(".calm-glance", ready: "document.querySelector('.calm-label')?.innerText === '" + name + "'")
+                        let fits = try await web.evaluateJavaScript("""
+                            (()=>{const label=document.querySelector('.calm-label'), range=document.createRange();
+                            range.selectNodeContents(label); const r=range.getBoundingClientRect();
+                            return r.width>0 && r.left>=0 && r.right<=innerWidth && r.bottom<=innerHeight &&
+                                document.querySelector('.calm-value').innerText.trim()==='100 \(unit)'})()
+                            """)
+                        try check(fits as? Bool == true, name + " is legible beside two same-kind cards with the same value")
+                    }
+                    try await SideScreenCheck.snapshot(delegate.panel, path: "/tmp/orvlet-" + capture + ".png")
+                    model.toggleTaskPresentation(sampleIDs[1])
+                    _ = try await rendered(".reading-preset", ready: "document.querySelector('.preset-number').innerText.includes('100')")
+                    try check(model.selectedTaskID == sampleIDs[1] && !model.collapsed, "Opening a named capsule selects the corresponding instance")
+                    for id in sampleIDs { model.closeTask(id) }
+                }
                 let today = String(ISO8601DateFormatter().string(from: Date()).prefix(10))
                 var fetches = 0
                 var rate = 0.85
@@ -147,7 +194,8 @@
                 }
                 model.agent.completionOverride = { _ in
                     decisions += 1
-                    throw AppError.message("Jev reuse unexpectedly invoked the main planner")
+                    return ["tool_calls": [RequestStep(tool: "control_task", arguments: JSONText.encode([
+                        "operation": "invoke", "action": "updateData", "fields": ["amount": "200", "fromCurrency": "USD", "toCurrency": "EUR"], "complete": true])).call]]
                 }
                 _ = try await model.agent.run(
                     reuseText, taskID: id,
@@ -156,8 +204,8 @@
                     $0.state["converted"] == "180.00" && $0.state["quote"] == "EUR"
                 })
                 try check(
-                    decisions == 0 && fetches == 3 && reused != nil,
-                    "Jev-matched currency executes with zero main-model calls and fresh data for the new pair")
+                    decisions == 1 && fetches == 3 && reused != nil,
+                    "An owned currency task uses one direct action and fresh data for the new pair")
                 model.activeRequest = nil
                 model.selectTask(reused!.id, expanded: true)
                 let reusedCard = try await rendered(
@@ -447,7 +495,7 @@
                     title: "Time", markup: BuiltinCards.clock(clockRuntime), fields: [], actions: [], state: [:],
                     runtime: clockRuntime, preset: "clock"
                 ).validated()
-                model.publishTaskSurface(clock, id: clockID)
+                try model.commitTaskSurface(clock, id: clockID, ticket: nil)
                 model.activeRequest = nil
                 model.selectTask(clockID, expanded: true)
                 let clockCard = try await rendered(".clock-preset")
@@ -493,8 +541,13 @@
                     RequestIntent(kind: .general, behavior: .advancing, timeZones: ["Europe/London"], route: .local)
                 }
                 decisions = 0
-                model.agent.completionOverride = { _ in
+                model.agent.completionOverride = { turns in
                     decisions += 1
+                    if decisions > 2 {
+                        let reason = turns.last { $0["role"] as? String == "tool" }?["content"] as? String ?? "No tool receipt"
+                        throw AppError.message("Saved clock was not accepted: " + String(reason.prefix(450)))
+                    }
+                    if decisions == 1 { return ["tool_calls": [RequestStep(tool: "load_tools", arguments: JSONText.encode(["family": "workspace"])).call]] }
                     return [
                         "role": "assistant",
                         "tool_calls": [
@@ -517,7 +570,7 @@
                     })
                 else { throw AppError.message("Saved clock kept the old zone") }
                 try check(
-                    decisions == 1 && reusedClock.state["clockLocationLabel"] == "London"
+                    decisions == 2 && reusedClock.state["clockLocationLabel"] == "London"
                         && reusedClock.state["clockZone0"] == "Europe/London",
                     "Saved clock verifies the newly requested zone and regenerates its location label without model-written markup"
                 )

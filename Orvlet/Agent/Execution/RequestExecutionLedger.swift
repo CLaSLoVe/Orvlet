@@ -57,7 +57,7 @@ final class RequestExecutionLedger {
     }
 
     static func signature(_ name: String, _ input: [String: Any], goal: Int?) -> String {
-        let effect = input.filter { !["complete", "goal"].contains($0.key) }
+        let effect = input.filter { !["complete", "goal", "request_evidence"].contains($0.key) }
         let data = (try? JSONSerialization.data(withJSONObject: effect, options: [.sortedKeys])) ?? Data()
         return "\(goal.map(String.init) ?? "unassigned"):\(name):" + String(decoding: data, as: UTF8.self)
     }

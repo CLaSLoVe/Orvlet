@@ -24,6 +24,7 @@ enum BundledMethods {
                 let empty = Dictionary(uniqueKeysWithValues: Set(keys).map { ($0, "") })
                 var surface = try source.surface(title: definition.purpose, state: empty)
                 surface.state = [:]
+                surface.markup.interfaceLanguage = "English"
                 return InterfaceRecipe(
                     id: definition.id, purpose: definition.purpose, kind: .workspace,
                     markup: surface.markup, surface: surface, stateKeys: [])

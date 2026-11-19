@@ -29,11 +29,35 @@ struct ToolArgumentError: LocalizedError {
 
 @MainActor
 enum ToolContract {
+    static func payload(_ raw: Any?, tool: String) throws -> [String: Any] {
+        if let object = raw as? [String: Any] { return object }
+        if let text = raw as? String {
+            let data = Data(text.utf8)
+            if let value = try? JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed) {
+                if let object = value as? [String: Any] { return object }
+                if let nested = value as? String,
+                    let object = (try? JSONSerialization.jsonObject(with: Data(nested.utf8))) as? [String: Any] { return object }
+            }
+        }
+        throw ToolArgumentError(path: "$.arguments", issue: "send one complete JSON object for " + tool + ", with quoted property names and no surrounding prose")
+    }
+
     static func arguments(_ name: String, _ input: [String: Any]) throws -> [String: Any] {
+        let input = normalizedCardArguments(name, input)
         try validate(name, input)
         let function = AgentToolRegistry.definitions.compactMap { $0["function"] as? [String: Any] }
             .first { $0["name"] as? String == name }!
-        return omittingNullOptions(input, schema: function["parameters"] as! [String: Any]) as! [String: Any]
+        var arguments = omittingNullOptions(input, schema: function["parameters"] as! [String: Any]) as! [String: Any]
+        if name == "present_ui", let values = arguments["state"] as? [String: Any] {
+            arguments["state"] = try values.mapValues { value -> String in
+                if let text = value as? String { return text }
+                if value is NSNull { return "" }
+                let bytes = try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys])
+                guard bytes.count <= 16000 else { throw ToolArgumentError(path: "$.state", issue: "Keep each value within 16 KB") }
+                return String(decoding: bytes, as: UTF8.self)
+            }
+        }
+        return arguments
     }
 
     /// Optional null means absent at every named-record boundary; dynamic dictionaries keep their values.
@@ -60,13 +84,70 @@ enum ToolContract {
         return value
     }
 
+    static func normalizedCardArguments(_ name: String, _ input: [String: Any]) -> [String: Any] {
+        guard name == "present_ui" else { return input }
+        var result = input
+        if result["actions"] == nil { result["actions"] = [] as [Any] }
+        var form = result["form"] as? [String: Any] ?? [:]
+        if let nestedTitle = form["title"] as? String, result["title"] == nil || result["title"] as? String == nestedTitle {
+            result["title"] = form.removeValue(forKey: "title")
+        }
+        let fields = (TaskForm.schema["properties"] as? [String: Any] ?? [:]).keys
+        // Models sometimes place a component at the root. Move only unambiguous
+        // component properties; conflicting definitions still get a precise validation error.
+        for key in fields where form[key] == nil && result[key] != nil { form[key] = result.removeValue(forKey: key) }
+        if !form.isEmpty {
+            if form["compactKey"] == nil, let outputs = form["outputs"] as? [[String: Any]], outputs.count == 1 {
+                form["compactKey"] = outputs[0]["key"]
+            }
+            if var inputs = form["inputs"] as? [[String: Any]] {
+                for index in inputs.indices where inputs[index]["kind"] == nil {
+                    inputs[index]["kind"] = (inputs[index]["options"] as? [String])?.isEmpty == false ? "select" : "text"
+                }
+                form["inputs"] = inputs
+            }
+            if form["inputs"] == nil { form["inputs"] = [] as [Any] }
+            if form["buttons"] == nil { form["buttons"] = [] as [Any] }
+            result["form"] = form
+        }
+        if result["fields"] == nil, let html = (result["markup"] as? [String: Any])?["html"] as? String,
+            html.range(of: "data-field", options: .caseInsensitive) == nil {
+            result["fields"] = [] as [String]
+        }
+        if var checks = result["checks"] as? [[String: Any]] {
+            for index in checks.indices {
+                for field in ["input", "expected"] {
+                    guard let values = checks[index][field] as? [String: Any] else { continue }
+                    checks[index][field] = values.mapValues { value -> Any in
+                        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                            number.doubleValue.isFinite else { return value }
+                        return number.stringValue
+                    }
+                }
+            }
+            result["checks"] = checks
+        }
+        return result
+    }
+
     static func validate(_ name: String, _ input: [String: Any]) throws {
         guard
             let function = AgentToolRegistry.definitions.compactMap({ $0["function"] as? [String: Any] })
                 .first(where: { $0["name"] as? String == name }),
             let schema = function["parameters"] as? [String: Any]
         else { throw ToolArgumentError(path: "$", issue: "unknown tool") }
-        try validate(input, schema: schema)
+        var arguments = normalizedCardArguments(name, input)
+        // query_api decodes optional display blocks independently. Keep every acquisition
+        // parameter under the full tool contract even if one chart cannot be decoded.
+        if name == "query_api", var source = arguments["source"] as? [String: Any] {
+            source.removeValue(forKey: "visuals")
+            arguments["source"] = source
+        }
+        if name == "present_ui", var form = arguments["form"] as? [String: Any] {
+            form.removeValue(forKey: "visuals")
+            arguments["form"] = form
+        }
+        try validate(arguments, schema: schema)
     }
 
     static func validate(_ value: Any, schema: [String: Any], path: String = "$") throws {
@@ -127,9 +208,8 @@ enum ToolContract {
                     // Dynamic keys may contain user data; never include them in diagnostics.
                     try validate(object[key]!, schema: child, path: path + ".*")
                 } else if schema["additionalProperties"] as? Bool == false {
-                    try fail(
-                        "unexpected field; use the declared nesting. Allowed here: "
-                            + properties.keys.sorted().joined(separator: ", "))
+                    let field = key.range(of: "^[A-Za-z_][A-Za-z0-9_-]{0,39}$", options: .regularExpression) != nil ? path + "." + key : path
+                    try fail("Unexpected field. Remove it with a null patch or move it to the declared nesting. Allowed here: " + properties.keys.sorted().joined(separator: ", "), at: field)
                 }
             }
         }

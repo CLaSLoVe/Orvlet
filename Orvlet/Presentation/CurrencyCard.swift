@@ -36,7 +36,7 @@ extension APIDataSpec {
         }
         return [roles.amount, roles.from, roles.to].compactMap { key in
             guard var control = inputControls.first(where: { $0.key == key }) else { return nil }
-            control.label = key == roles.amount ? "Amount" : key == roles.from ? "From" : "To"
+            if usesEnglishPresetCopy { control.label = key == roles.amount ? "Amount" : key == roles.from ? "From" : "To" }
             if key != roles.amount {
                 control.kind = "select"
                 if control.options?.isEmpty != false {
@@ -59,10 +59,20 @@ extension APIDataSpec {
             result["weatherSampleTime"] = state["weatherSampleTime"] ?? ""
             if let key = card?.contextKey, result[key] == nil { result[key] = "" }
         }
-        if result["sourceDate"] == "Source update time unavailable" { result["sourceDate"] = "" }
+        result["sourceDateDisplay"] = result["sourceDate"] ?? ""
+        if let raw = result["sourceDate"], raw.hasPrefix("Data as of "),
+            let date = sourceTimestamp(String(raw.dropFirst("Data as of ".count)))
+        {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .short
+            formatter.timeStyle = .medium
+            result["sourceDateDisplay"] = formatter.string(from: date)
+        }
+        if result["sourceDate"] == "Source update time unavailable" { result["sourceDateDisplay"] = "" }
         if resolvedCard?.kind == .currency { result["currencyPair"] = "" }
         guard resolvedCard?.kind == .currency, let roles = currencyFields else { return result }
         result["currencyPair"] = (state[roles.from] ?? "") + " → " + (state[roles.to] ?? "")
+        guard usesEnglishPresetCopy else { return result }
         let locale = Locale(identifier: "en_US")
         result["currencyFromName"] = locale.localizedString(forCurrencyCode: state[roles.from] ?? "") ?? ""
         result["currencyToName"] = locale.localizedString(forCurrencyCode: state[roles.to] ?? "") ?? ""

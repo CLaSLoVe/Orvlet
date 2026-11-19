@@ -128,6 +128,7 @@ extension AppModel {
         return value
     }
     func ownsRequest(_ id: UUID) -> Bool {
-        activeRequest?.owner?.id == id || requestCardID == id
+        if let run = RequestRun.current, run.model === self { return run.owns(id) }
+        return runOwning(id) != nil || idleRun.owns(id)
     }
 }

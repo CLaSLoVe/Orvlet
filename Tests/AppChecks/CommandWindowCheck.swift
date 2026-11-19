@@ -16,6 +16,29 @@
             }
             func pause() async throws { try await Task.sleep(for: .milliseconds(350)) }
             do {
+                if CommandLine.arguments.contains("--progress-preview") {
+                    func add(_ text: String, steps: [String]) -> UUID {
+                        let run = RequestRun(model: model)
+                        let id = UUID()
+                        let message = model.appendMessage(text, isUser: true, taskID: id)
+                        model.commandRuns.append(run)
+                        RequestRun.$current.withValue(run) {
+                            model.beginAmbientRequest(text, messageID: message)
+                            for step in steps { model.activity = step }
+                        }
+                        return id
+                    }
+                    let first = add("帮我记录这一期播客的剪辑进度。", steps: ["Preparing task tools…", "Building and checking the card…", "Checking present_ui · $.checks[0].expected · The remaining duration did not match.", "Preparing a correction…"])
+                    let other = add("看一下陶艺窑温的趋势。", steps: ["Checking the calculation…"])
+                    model.openTaskConversation(other)
+                    try check(model.conversationProgress == ["Checking the calculation…"], "Other conversation contains only its own updates")
+                    model.openTaskConversation(first)
+                    try check(!model.conversationProgress.contains("Checking the calculation…") && model.conversationProgress.contains(where: { $0.contains("$.checks[0].expected") }), "Failed field and earlier work stay in their own conversation")
+                    guard let window = delegate.commandPanel else { throw AppError.message("The task chat window is missing") }
+                    try await pause()
+                    try await SideScreenCheck.snapshot(window, path: "/tmp/orvlet-progress-preview.png")
+                    print(JSONText.encode(["ok": true, "checks": checks])); exit(0)
+                }
                 let timer = try model.startTimer(seconds: 600, title: "Tea")
                 model.collapse()
                 try await pause()
@@ -72,6 +95,48 @@
                 model.collapse()
                 model.selectChat(true)
                 model.settings.main = Endpoint(baseURL: "http://127.0.0.1:19244", model: "fixture")
+                func pressReturn(_ modifiers: NSEvent.ModifierFlags = []) throws {
+                    guard let event = NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: modifiers,
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: input.windowNumber,
+                        context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36
+                    ) else { throw AppError.message("Could not create Return key event") }
+                    NSApp.postEvent(event, atStart: false)
+                }
+                let repeated = "Check my tea"
+                var routed: [String] = []
+                model.agent.interpretationOverride = { text in
+                    routed.append(text)
+                    return RequestIntent(kind: .general, targetTaskID: timer.uuidString)
+                }
+                model.agent.completionOverride = { _ in
+                    try await Task.sleep(for: .seconds(2))
+                    return ["tool_calls": [RequestStep(tool: "finish", arguments: JSONText.encode([
+                        "outcome": "answer", "reply": "Checked",
+                    ])).call]]
+                }
+                model.command = repeated
+                try await pause()
+                try pressReturn()
+                try await pause()
+                try check(routed == [repeated] && model.runOwning(timer) != nil,
+                    "Return routes the message to the matching timer")
+                model.openTaskConversation(timer)
+                model.command = repeated
+                try await pause()
+                try pressReturn(.option)
+                try await pause()
+                let submitted = model.messages.filter { $0.isUser && $0.text == repeated }
+                try check(submitted.count == 2 && submitted.first?.taskID == timer
+                    && submitted.last?.taskID != timer && submitted.last?.taskID.flatMap(model.runOwning) != nil
+                    && model.commandRuns.count == 2 && routed == [repeated],
+                    "Option-Return from the running conversation starts an independent task without routing")
+                for _ in 0..<30 {
+                    if !model.busy { break }
+                    try await pause()
+                }
+                model.agent.interpretationOverride = nil
+                model.selectChat(true)
                 model.agent.completionOverride = { _ in
                     try await Task.sleep(for: .milliseconds(700))
                     return ["role": "assistant", "content": "Background reply"]
@@ -101,6 +166,8 @@
                     model.commandWindowHeight >= 240 && input.frame.height >= 240,
                     "History remains readable while a request is running")
                 try await SideScreenCheck.snapshot(input, path: "/tmp/orvlet-conversation-history.png")
+                let running = RequestRun(model: model)
+                model.commandRuns.append(running)
                 model.beginAmbientRequest("Play music", taskID: timer)
                 model.openTaskConversation(timer)
                 model.activity = "Finding your music…"
@@ -124,6 +191,7 @@
                 model.openTaskConversation(timer)
                 model.deliverReply("Playing Dream Funk.", taskID: timer)
                 model.finishAmbientRequest()
+                model.commandRuns.removeAll { $0 === running }
                 model.busy = false
                 try await pause()
                 try check(

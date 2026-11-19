@@ -13,8 +13,9 @@ struct CalmMediaControl: View {
                     Text(task.title).font(.system(size: 11, weight: .medium, design: .rounded)).lineLimit(1).frame(
                         width: 52, alignment: .leading)
                 }.frame(width: 78, height: 28)
-            }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id)).help(task.title).accessibilityLabel(
-                "Open " + task.title)
+            }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id, opensTask: true)).help(task.title)
+                .accessibilityLabel(
+                    "Open " + task.title)
             Button {
                 model.taskRanking.record(task.id, .control)
                 model.controlMedia(task.id, operation: "toggle")
@@ -39,13 +40,17 @@ struct CalmTimerControl: View {
             } label: {
                 HStack(spacing: 6) {
                     TaskActivityGlyph(model: model, task: task, symbol: task.finished ? "checkmark" : "timer")
-                    Text(task.finished ? "Done" : task.state["remaining"] ?? "")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded)).monospacedDigit().lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                        .frame(width: 52, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(task.timerSubject)
+                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary).lineLimit(1)
+                        Text(task.finished ? "Done" : task.state["remaining"] ?? "")
+                            .font(.system(size: 11, weight: .semibold, design: .rounded)).monospacedDigit().lineLimit(1)
+                    }.frame(width: 52, alignment: .leading)
                 }.frame(width: 78, height: 28)
-            }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id)).help(task.title).accessibilityLabel(
-                task.title + ", " + (task.state["remaining"] ?? ""))
+            }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id, opensTask: true)).help(task.title)
+                .accessibilityLabel(
+                    task.title + ", " + (task.state["remaining"] ?? ""))
             Button {
                 model.taskRanking.record(task.id, .control)
                 model.timerAction(task.id, action: "toggle")
@@ -65,6 +70,9 @@ struct CalmTaskControl: View {
     @Environment(\.colorScheme) private var scheme
     @ObservedObject var model: AppModel
     let task: SideTask
+    private var shortcut: TaskSurfaceAction? {
+        task.taskSurface?.actions.first { $0.compactLabel != nil }
+    }
     var body: some View {
         Group {
             if let label = task.terminalLabel {
@@ -107,9 +115,9 @@ struct CalmTaskControl: View {
                             ).foregroundStyle(.secondary).lineLimit(1)
                         }.frame(width: 82, alignment: .leading)
                     }.frame(width: 108, height: 28)
-                }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id)).help(
+                }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id, opensTask: true)).help(
                     task.title + " · " + model.preparationLabel)
-            } else if task.customCompact == true {
+            } else if task.customCompact == true || shortcut != nil {
                 HStack(spacing: 6) {
                     HTMLCardView(
                         markup: task.presentation, compact: true, state: task.state,
@@ -117,13 +125,15 @@ struct CalmTaskControl: View {
                         appearance: model.settings.appearance, accent: model.settings.theme.hex,
                         reduceMotion: model.motionReduced, action: { _, _ in }
                     )
-                    .frame(width: task.kind == .timer || task.isMediaTask ? 78 : 108, height: 28)
+                    .frame(width: task.kind == .timer || task.isMediaTask || shortcut != nil ? 78 : 108, height: 28)
                     .overlay(alignment: .leading) {
                         TaskActivityGlyph(model: model, task: task).allowsHitTesting(false)
                     }
                     .overlay {
                         WindowDragArea(
                             onClick: { model.toggleTaskPresentation(task.id) },
+                            onDoubleClick: { model.openTaskFromDoubleClick(task.id) },
+                            delaySingleClick: model.taskClickWillCollapse(task.id),
                             onOutsideDrop: { model.closeTask(task.id) }, taskID: task.id,
                             taskPreview: model.dragAppearance(task.id),
                             dragging: { model.draggingTaskID = $0 ? task.id : nil })
@@ -147,6 +157,15 @@ struct CalmTaskControl: View {
                             .font(.system(size: 9, weight: .semibold)).frame(width: 24, height: 28)
                         }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id)).accessibilityLabel(
                             (task.state["toggleLabel"] ?? "Toggle") + " " + task.title)
+                    } else if let shortcut, let label = shortcut.compactLabel {
+                        Button {
+                            model.taskRanking.record(task.id, .control)
+                            model.performTaskAction(task.id, action: shortcut.id, value: nil)
+                        } label: {
+                            Text(label).font(.system(size: 10, weight: .semibold, design: .rounded))
+                                .lineLimit(1).frame(width: 24, height: 28)
+                        }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id))
+                            .accessibilityLabel(task.title + " · " + label)
                     }
                 }.frame(width: 108, height: 28)
             } else if model.quickMediaTasks.contains(where: { $0.id == task.id }) {
@@ -163,7 +182,10 @@ struct CalmTaskControl: View {
                 .overlay(alignment: .leading) { TaskActivityGlyph(model: model, task: task).allowsHitTesting(false) }
                 .overlay {
                     WindowDragArea(
-                        onClick: { model.toggleTaskPresentation(task.id) }, onOutsideDrop: { model.closeTask(task.id) },
+                        onClick: { model.toggleTaskPresentation(task.id) },
+                        onDoubleClick: { model.openTaskFromDoubleClick(task.id) },
+                        delaySingleClick: model.taskClickWillCollapse(task.id),
+                        onOutsideDrop: { model.closeTask(task.id) },
                         taskID: task.id, taskPreview: model.dragAppearance(task.id),
                         dragging: { model.draggingTaskID = $0 ? task.id : nil })
                 }
@@ -177,8 +199,9 @@ struct CalmTaskControl: View {
                         Text(task.title).font(.system(size: 11, weight: .medium, design: .rounded)).lineLimit(1).frame(
                             maxWidth: .infinity, alignment: .leading)
                     }.frame(width: 108, height: 28)
-                }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id)).help(task.title).accessibilityLabel(
-                    "Open " + task.title)
+                }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id, opensTask: true)).help(task.title)
+                    .accessibilityLabel(
+                        "Open " + task.title)
             }
         }.frame(width: 120, height: 34)
             .background {
@@ -388,7 +411,12 @@ struct CalmTaskShelf: View {
                     }
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle())
-            }.help("Open " + task.title)
+            }.buttonStyle(
+                WindowDragButtonStyle(
+                    onDoubleClick: { model.openTaskFromDoubleClick(task.id) },
+                    delaySingleClick: true, allowsWindowDrag: false)
+            )
+            .help("Open " + task.title)
             if model.taskListEditing {
                 Button {
                     model.dismissTask(task.id)

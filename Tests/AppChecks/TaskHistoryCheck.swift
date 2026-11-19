@@ -111,24 +111,28 @@
                         && migrated.messages[0].taskID == migrated.messages[1].taskID,
                     "Unattributed old requests migrate into separate conversations")
                 model.busy = true
+                let musicRun = RequestRun(model: model)
+                model.commandRuns.append(musicRun)
                 model.beginAmbientRequest("Background music", taskID: music.id)
                 model.agent.interpretationOverride = { _ in RequestIntent(kind: .general) }
+                var independentID: UUID?
+                model.agent.completionOverride = { _ in
+                    independentID = model.requestCardID
+                    return ["tool_calls": [RequestStep(tool: "finish", arguments: JSONText.encode(["outcome": "answer", "reply": "Independent task"])).call]]
+                }
                 model.selectChat(true)
                 model.command = "Create an independent calculator"
                 model.sendCommand()
-                for _ in 0..<20 {
-                    if model.globalRoutingTask == nil { break }
-                    try await settle()
+                for _ in 0..<100 where independentID == nil || model.commandRuns.count > 1 {
+                    try await Task.sleep(for: .milliseconds(30))
                 }
+                try check(independentID != nil && independentID != music.id && musicRun.context?.owner?.id == music.id
+                    && model.queuedTaskRequests.isEmpty, "An independent task runs without steering the conversation already open")
                 model.agent.interpretationOverride = nil
-                try check(
-                    model.queuedTaskRequests.last?.isNewTask == true
-                        && model.queuedTaskRequests.last?.taskID != music.id
-                        && model.activeRequest?.owner?.id == music.id,
-                    "New tasks queue independently instead of steering another conversation")
+                model.agent.completionOverride = nil
                 model.busy = false
-                model.queuedTaskRequests = []
                 model.finishAmbientRequest()
+                model.commandRuns.removeAll { $0 === musicRun }
                 let requestID = UUID()
                 let failedID = UUID()
                 let failedMessage = model.appendMessage("A request that fails", isUser: true, taskID: failedID)
@@ -185,8 +189,12 @@
                     "Restoring a running local tool resumes its data engine")
                 model.openTaskConversation(runtimeID)
                 model.selectedTaskID = music.id
+                model.agent.completionOverride = { _ in
+                    ["tool_calls": [RequestStep(tool: "control_task", arguments: JSONText.encode(["operation": "pause", "complete": true])).call]]
+                }
                 model.command = "暂停"
                 model.sendCommand()
+                for _ in 0..<100 where model.busy { try await Task.sleep(for: .milliseconds(25)) }
                 try check(
                     model.sideTasks.first(where: { $0.id == runtimeID })?.runtimeState?.phase == .paused
                         && model.messages.last?.taskID == runtimeID,
@@ -198,12 +206,16 @@
                     "A tool paused before closing stays paused when restored")
                 model.closeTask(runtimeID)
                 model.openTaskConversation(runtimeID)
+                model.agent.completionOverride = { _ in
+                    ["tool_calls": [RequestStep(tool: "control_task", arguments: JSONText.encode(["operation": "resume", "complete": true])).call]]
+                }
                 model.command = "继续"
                 model.sendCommand()
+                for _ in 0..<100 where model.busy { try await Task.sleep(for: .milliseconds(25)) }
                 try check(
                     model.sideTasks.first(where: { $0.id == runtimeID })?.runtimeState?.phase == .running
                         && model.visibleConversation.contains { $0.text == "暂停" }
-                        && model.visibleConversation.last?.text == "继续",
+                        && model.visibleConversation.last(where: { $0.isUser })?.text == "继续",
                     "Continuing a removed task restores it from history with its messages and local controls intact")
                 let result: [String: Any] = ["ok": true, "checks": checks]
                 try JSONSerialization.data(withJSONObject: result, options: .prettyPrinted).write(

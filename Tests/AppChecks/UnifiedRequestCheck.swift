@@ -152,153 +152,66 @@
             model.isLiveTest = true
             model.persistHistory = false
             model.settings.allowAgents = false
-            var decisions = 0
-            model.agent.interpretationOverride = { _ in
-                var intent = RequestIntent(kind: .general)
-                intent.route = .api
-                intent.steps = [RequestStep(tool: "query_api", arguments: "{}")]
-                return intent
+            // Ownership resolution and direct tool execution are separate. Script only
+            // the model replies; the ordinary runner still validates and dispatches each call.
+            model.agent.interpretationOverride = { _ in RequestIntent(kind: .general) }
+            func step(_ tool: String, _ args: [String: Any]) -> RequestStep {
+                RequestStep(tool: tool, arguments: JSONText.encode(args))
             }
-            model.agent.completionOverride = { _ in
-                decisions += 1
-                return ["tool_calls": [RequestStep(tool: "query_api", arguments: "{}").call]]
+            var rounds = 0
+            func script(_ batches: [[RequestStep]]) {
+                rounds = 0
+                model.agent.completionOverride = { _ in
+                    rounds += 1
+                    guard rounds <= batches.count else { throw AppError.message("Unexpected extra model round") }
+                    return ["tool_calls": batches[rounds - 1].map(\.call)]
+                }
             }
-            var sourceStopped = false
-            do { _ = try await model.agent.run("Read structured public data") } catch { sourceStopped = true }
-            try check(
-                sourceStopped && decisions == 2 && model.webURL.isEmpty,
-                "A repeated API contract failure stops after two bounded structural repairs without navigating or rebuilding"
-            )
-            decisions = 0
-            model.agent.completionOverride = { _ in
-                decisions += 1
-                throw AppError.message("A known plan must not be planned again")
+            let invalid = step("query_api", [:])
+            script([[step("load_tools", ["family": "data"])], [invalid], [invalid], [invalid]])
+            do {
+                _ = try await model.agent.run("Read structured public data")
+                throw AppError.message("Invalid API request unexpectedly completed")
+            } catch let issue as ToolArgumentError {
+                try check(issue.path == "$.source" && rounds == 4 && model.webURL.isEmpty,
+                    "A repeated contract failure allows two repairs and never navigates")
             }
-            model.agent.interpretationOverride = { _ in
-                var intent = RequestIntent(kind: .timer)
-                intent.timerSeconds = 60
-                intent.timerEvidence = "一分钟"
-                intent.steps = [RequestStep(tool: "timer_start", arguments: "{\"seconds\":60,\"title\":\"Timer\"}")]
-                intent.stepsComplete = true
-                return try intent.validated(for: "倒计时一分钟")
-            }
+            script([[step("load_tools", ["family": "timer"])],
+                    [step("timer_start", ["seconds": 60, "title": "Tea", "request_evidence": "一分钟"])]])
             _ = try await model.agent.run("倒计时一分钟")
             guard let timer = model.sideTasks.first(where: { $0.kind == .timer }) else {
-                throw AppError.message("The planned countdown was not created")
+                throw AppError.message("The verified countdown was not created")
             }
-            try check(
-                decisions == 0 && timer.deadline != nil,
-                "A main-model plan executes the countdown without a second planning call")
-            model.agent.interpretationOverride = nil
-            let triage = RequestTriage(
-                budget: .low, capability: .control, target: timer.id,
-                routeKnown: true, action: "pause", localControl: true)
-            _ = try await model.agent.run(
-                "先停一下计时", taskID: timer.id,
-                prepared: PreparedRequest(text: "先停一下计时", triage: triage, model: model))
-            try check(
-                decisions == 0 && model.sideTasks.first(where: { $0.id == timer.id })?.deadline == nil,
-                "Jev and the main model share the same verified task-control dispatcher")
-            model.agent.interpretationOverride = { _ in
-                var intent = RequestIntent(kind: .general)
-                intent.route = .local
-                intent.targetTaskID = timer.id.uuidString
-                intent.steps = [
-                    RequestStep(tool: "control_task", arguments: "{\"operation\":\"resume\"}"),
-                    RequestStep(tool: "control_task", arguments: "{\"operation\":\"pause\"}"),
-                ]
-                intent.stepsComplete = true
-                return intent
-            }
-            _ = try await model.agent.run("Resume then pause the timer", taskID: timer.id)
-            try check(
-                decisions == 0 && model.sideTasks.first(where: { $0.id == timer.id })?.deadline == nil,
-                "An intermediate verified receipt cannot skip remaining planned actions")
-            model.agent.interpretationOverride = { _ in
-                var intent = RequestIntent(kind: .general)
-                intent.route = .local
-                intent.targetTaskID = timer.id.uuidString
-                return intent
-            }
-            model.agent.completionOverride = { _ in
-                decisions += 1
-                return [
-                    "tool_calls": [
-                        RequestStep(tool: "control_task", arguments: "{\"operation\":\"resume\"}").call,
-                        RequestStep(tool: "control_task", arguments: "{\"operation\":\"pause\"}").call,
-                    ]
-                ]
-            }
+            try check(rounds == 2 && timer.deadline != nil, "A verified native action completes without another model call")
+            let pause = step("control_task", ["operation": "pause", "complete": true])
+            let resume = step("control_task", ["operation": "resume", "complete": true])
+            script([[pause]])
+            let triage = RequestTriage(budget: .low, capability: .control, target: timer.id, routeKnown: true, action: "pause", localControl: true)
+            _ = try await model.agent.run("先停一下计时", taskID: timer.id, prepared: PreparedRequest(text: "先停一下计时", triage: triage, model: model))
+            try check(rounds == 1 && model.sideTasks.first(where: { $0.id == timer.id })?.deadline == nil,
+                "A resolved owner uses the same verified control dispatcher")
+            script([[resume, pause]])
             _ = try await model.agent.run("Resume and pause", taskID: timer.id)
-            try check(
-                decisions == 1 && model.sideTasks.first { $0.id == timer.id }?.deadline == nil,
-                "Later model batches use the same complete-all-steps rule as initial plans")
-            decisions = 0
-            model.agent.completionOverride = { _ in
-                decisions += 1
-                throw AppError.message("Execution needs to recover the failed step")
-            }
-            model.agent.interpretationOverride = { _ in
-                var intent = RequestIntent(kind: .general)
-                intent.route = .local
-                intent.targetTaskID = timer.id.uuidString
-                intent.steps = [
-                    RequestStep(tool: "control_task", arguments: "{\"operation\":\"unsupported\"}"),
-                    RequestStep(tool: "control_task", arguments: "{\"operation\":\"pause\"}"),
-                ]
-                intent.stepsComplete = true
-                return intent
-            }
-            var recoveredFailure = false
-            do { _ = try await model.agent.run("Two independent controls", taskID: timer.id) } catch {
-                recoveredFailure = true
-            }
-            try check(
-                recoveredFailure && decisions == 1,
-                "A successful later action cannot hide an earlier failed step")
-            decisions = 0
-            model.agent.interpretationOverride = { _ in
-                var intent = RequestIntent(kind: .general)
-                intent.route = .local
-                intent.targetTaskID = timer.id.uuidString
-                intent.steps = [RequestStep(tool: "control_task", arguments: "{\"operation\":\"resume\"}")]
-                intent.stepsComplete = false
-                return intent
-            }
-            model.agent.completionOverride = { _ in
-                decisions += 1
-                return ["tool_calls": [RequestStep(tool: "finish", arguments: "{\"outcome\":\"task_ready\"}").call]]
-            }
+            try check(rounds == 1 && model.sideTasks.first(where: { $0.id == timer.id })?.deadline == nil,
+                "An intermediate verified receipt cannot skip the next action in a batch")
+            script([[step("control_task", ["operation": "unsupported"]), resume], [pause]])
+            _ = try await model.agent.run("Pause the timer", taskID: timer.id)
+            try check(rounds == 2 && model.sideTasks.first(where: { $0.id == timer.id })?.deadline == nil,
+                "An invalid batch requires correction before later controls can run")
+            script([[step("control_task", ["operation": "resume", "complete": false])],
+                    [step("finish", ["outcome": "task_ready"])]])
             _ = try await model.agent.run("Continue that timer", taskID: timer.id)
-            try check(
-                decisions == 1 && model.sideTasks.first { $0.id == timer.id }?.deadline != nil,
-                "A partial plan can finish from its verified control receipt without repeating the action")
-            decisions = 0
-            model.agent.completionOverride = { _ in
-                decisions += 1
-                throw AppError.message("Known actions need no extra model call")
-            }
+            try check(rounds == 2 && model.sideTasks.first(where: { $0.id == timer.id })?.deadline != nil,
+                "An explicit finish uses the previous control receipt without repeating the action")
             let calculatorID = UUID()
             let definition = try TaskRuntimeCheck.surface().validated()
             model.publishTaskSurface(definition, id: calculatorID)
-            model.agent.interpretationOverride = { _ in
-                var intent = RequestIntent(kind: .general)
-                intent.route = .local
-                intent.targetTaskID = calculatorID.uuidString
-                intent.steps = [
-                    RequestStep(
-                        tool: "control_task",
-                        arguments: "{\"operation\":\"invoke\",\"action\":\"calculate\",\"fields\":{\"amount\":\"150\"}}"
-                    )
-                ]
-                intent.stepsComplete = true
-                return intent
-            }
+            script([[step("control_task", ["operation": "invoke", "action": "calculate", "fields": ["amount": "150"], "complete": true])]])
             _ = try await model.agent.run("Change the amount to 150, keep the people", taskID: calculatorID)
             let calculated = model.sideTasks.first { $0.id == calculatorID }!
             try check(
                 calculated.state["share"] == "50.00" && calculated.state["people"] == "3"
-                    && calculated.taskSurface?.markup == definition.markup && decisions == 0,
+                    && calculated.taskSurface?.markup == definition.markup && rounds == 1,
                 "Conversation invokes the existing card handler with unchanged inputs and layout preserved")
             model.performTaskAction(calculatorID, action: "calculate", value: "{\"amount\":\"210\"}")
             if let job = model.taskActionJobs[calculatorID] { await job.value }

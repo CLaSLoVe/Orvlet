@@ -3,6 +3,36 @@ import Foundation
 /// Public data acquisition and calculation. No UI, task catalogue, model service or credentials.
 @MainActor
 final class APIDataService {
+    struct Sample {
+        let url: String
+        let checked: Date
+        let response: Any
+
+        /// Keep small responses intact. For large payloads show real paths and representative
+        /// values without copying whole time series into every subsequent decision.
+        var preview: Any {
+            if let data = try? JSONSerialization.data(withJSONObject: response), data.count <= 6000 { return response }
+            var rows: [[String: String]] = []
+            var bytes = 0
+            func visit(_ value: Any, _ path: String, _ depth: Int) {
+                guard depth <= 12, bytes < 6000, rows.count < 80, path.utf8.count <= 400 else { return }
+                if let object = value as? [String: Any] {
+                    for key in object.keys.sorted() where bytes < 6000 && rows.count < 80 {
+                        let segment = key.replacingOccurrences(of: "~", with: "~0").replacingOccurrences(of: "/", with: "~1")
+                        visit(object[key]!, path + "/" + segment, depth + 1)
+                    }
+                } else if let array = value as? [Any] {
+                    for (index, item) in array.prefix(2).enumerated() { visit(item, path + "/" + String(index), depth + 1) }
+                } else if let scalar = APIDataSpec.scalar(value) {
+                    let example = String(scalar.prefix(100))
+                    rows.append(["pointer": path, "example": example])
+                    bytes += path.utf8.count + example.utf8.count + 30
+                }
+            }
+            visit(response, "", 0)
+            return ["sampledPointers": rows, "partial": true] as [String: Any]
+        }
+    }
     struct Reading {
         let state: [String: String]
         let response: Any
@@ -60,13 +90,25 @@ final class APIDataService {
     func read(_ proposed: APIDataSpec) async throws -> [String: String] {
         try await acquire(proposed).state
     }
-    func acquire(_ proposed: APIDataSpec) async throws -> Reading {
+    func sample(url: String, previous: Sample?, maxAge: TimeInterval = 60) async throws -> Sample {
+        let address = try PublicDataClient.url(url).absoluteString
+        if let previous, previous.url == address, (0..<maxAge).contains(now().timeIntervalSince(previous.checked)) { return previous }
+        let response = try await fetch(address)
+        return Sample(url: address, checked: now(), response: response)
+    }
+    func acquire(_ proposed: APIDataSpec, previous: Sample? = nil, observed: ((Sample) -> Void)? = nil) async throws -> Reading {
         let spec = try proposed.validated()
         let requestURL = try spec.requestURL().absoluteString
-        let json = try await fetch(requestURL)
+        let sample = try await sample(url: requestURL, previous: previous, maxAge: min(60, spec.refreshSeconds ?? 60))
+        observed?(sample)
+        let json = sample.response
         var state: [String: String] = [:]
         for (index, field) in spec.fields.enumerated() {
             let value = APIDataSpec.value(try spec.expanded(field.pointer), in: json)
+            if let pointer = field.itemPointer {
+                state[field.key] = try Self.column(value, pointer: pointer, index: index)
+                continue
+            }
             guard let text = APIDataSpec.scalar(value) else {
                 let structured = value is [Any] || value is [String: Any]
                 Diagnostics.record(
@@ -95,8 +137,10 @@ final class APIDataService {
                 {
                     throw repair
                 }
-                throw AppError.message(
-                    "The API returned a different entity or unit. Correct the query before presenting a result.")
+                let observed = String((state[key] ?? "").prefix(120))
+                throw ToolArgumentError(path: "$.source.expectations." + key,
+                    issue: "Expected " + String(target.prefix(120)) + " but the source returned " + observed
+                        + ". Verify the requested identity against the same record or look it up at another source. Never just accept a different entity.")
             }
         }
         let updated = try spec.updatedAtPointer.flatMap {
@@ -151,8 +195,33 @@ final class APIDataService {
         state["resultStatus"] = ""
         state["sourceHost"] = URL(string: requestURL)?.host ?? "Data source"
         state["sourceDate"] = updated.map { "Data as of " + $0 } ?? ""
-        state["sourceChecked"] = "Checked " + ISO8601DateFormatter().string(from: now())
+        state["sourceChecked"] = "Checked " + ISO8601DateFormatter().string(from: sample.checked)
         return Reading(state: state, response: json)
+    }
+
+    private static func column(_ value: Any?, pointer: String, index: Int) throws -> String {
+        let path = "$.source.fields[\(index)]"
+        guard let array = value as? [Any], array.count <= 512 else {
+            throw ToolArgumentError(path: path + ".pointer", issue: "select an array with at most 512 observations")
+        }
+        var found = false
+        let cells: [Any] = try array.map { item in
+            guard let cell = APIDataSpec.value(pointer, in: item) else { return NSNull() }
+            found = true
+            if cell is NSNull { return cell }
+            guard APIDataSpec.scalar(cell) != nil else {
+                throw ToolArgumentError(path: path + ".itemPointer", issue: "select a scalar value inside each observation")
+            }
+            return cell
+        }
+        guard cells.isEmpty || found else {
+            throw ToolArgumentError(path: path + ".itemPointer", issue: "no observations contain a reading at this pointer")
+        }
+        let data = try JSONSerialization.data(withJSONObject: cells)
+        guard data.count <= 16000 else {
+            throw ToolArgumentError(path: path, issue: "narrow the source window so this column fits in the card")
+        }
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// Initial acquisition and cached edits use the same handler and output contract.
@@ -178,11 +247,28 @@ final class APIDataService {
         if let calculation = spec.calculation {
             do {
                 let result = try await code.run(code: calculation, input: spec.inputs ?? [:], state: values)
-                let output = try TaskValues.decode(result)
-                guard Set(output.keys) == Set((spec.outputs ?? []).map(\.key)),
-                    output.values.allSatisfy({ !$0.isEmpty && !["NaN", "Infinity", "-Infinity"].contains($0) })
-                else { throw AppError.message("The calculation did not produce the declared results.") }
-                values.merge(output) { _, new in new }
+                let raw = result["state"] as? [String: Any] ?? result
+                let declared = Set((spec.outputs ?? []).map(\.key))
+                let output = try TaskValues.decode(["state": raw.filter { declared.contains($0.key) }])
+                for row in spec.outputs ?? [] {
+                    let key = row.key
+                    if sourceKeys.contains(key) {
+                        // Source values remain authoritative, including when code echoes the full state.
+                        if let echo = output[key], echo != values[key] {
+                            throw AppError.message("The calculation changes fetched field '" + key
+                                + "'. Use a distinct output key for a transformed value or display the fetched field directly.")
+                        }
+                        continue
+                    }
+                    guard let value = output[key], !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                        !["NaN", "Infinity", "-Infinity"].contains(value) else {
+                        throw AppError.message("Missing or invalid result '" + key + "'. Required derived keys: "
+                            + spec.derivedKeys.sorted().joined(separator: ", ") + ". Returned keys: "
+                            + raw.keys.sorted().prefix(16).map { String($0.prefix(40)) }.joined(separator: ", ")
+                            + ". Read fetched values from state and return {state:{...}} with the named results. For a direct reading use the fetched field as card.primaryKey.")
+                    }
+                    values[key] = value
+                }
             } catch {
                 try Task.checkCancellation()
                 if error is CancellationError { throw error }
@@ -194,8 +280,8 @@ final class APIDataService {
     func canReuse(_ spec: APIDataSpec, state: [String: String], fetchedAt: Date?) -> Bool {
         let current = now()
         let age = current.timeIntervalSince(fetchedAt ?? .distantPast)
-        guard age >= 0, age < min(3600, spec.maxAgeSeconds ?? 3600),
-            (try? spec.requestURL().absoluteString) == state["sourceRequest"]
+        guard age >= 0, age < min(3600, spec.maxAgeSeconds ?? 3600, spec.refreshSeconds ?? 3600),
+            let url = try? spec.requestURL().absoluteString, url == state["sourceRequest"]
         else { return false }
         if let limit = spec.maxAgeSeconds {
             guard let text = state["sourceDate"],
@@ -203,8 +289,13 @@ final class APIDataService {
                 current.timeIntervalSince(date) <= limit, date.timeIntervalSince(current) < 86400
             else { return false }
         }
+        for (key, pattern) in spec.expectations ?? [:] {
+            guard let expanded = try? spec.expanded(pattern),
+                state[key]?.caseInsensitiveCompare(expanded.removingPercentEncoding ?? expanded) == .orderedSame else { return false }
+        }
         for key in (spec.inputs ?? [:]).keys
-        where spec.fields.contains(where: { $0.key == key || $0.pointer.contains("{" + key + "}") }) {
+        where spec.fields.contains(where: { $0.key == key || $0.pointer.contains("{" + key + "}") })
+            || spec.updatedAtPointer?.contains("{" + key + "}") == true {
             if spec.inputs?[key] != state[key] { return false }
         }
         return true
