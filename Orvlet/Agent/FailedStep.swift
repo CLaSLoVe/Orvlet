@@ -2,7 +2,7 @@ import Foundation
 
 /// Retain only a failed, replayable tool definition within the current request revision.
 struct FailedStep {
-    static let tools: Set<String> = ["present_ui", "query_api", "run_code", "compose_ui"]
+    static let tools: Set<String> = ["present_ui", "query_api", "build_data_tool", "run_code", "compose_ui"]
     let name: String
     let arguments: [String: Any]
     @MainActor init(name: String, arguments: [String: Any]) {
@@ -67,10 +67,57 @@ struct FailedStep {
     }
 }
 
-/// A method gets one correction. Changing a field path does not reset that allowance.
-/// Different sources, direct bindings and generated calculations are distinct methods.
+/// Acquisition failed before a usable response existed. Keep this distinct from a
+/// bad pointer, calculation or layout: those can reuse the response already fetched.
+struct SourceReadFailure: LocalizedError {
+    let url: String
+    let reason: String
+    var allowsCorrection = false
+    var hostUnavailable = false
+    var errorDescription: String? { reason }
+    static func route(_ raw: String) -> String {
+        guard let url = URLComponents(string: raw) else { return raw }
+        return (url.host?.lowercased() ?? "") + url.percentEncodedPath
+    }
+}
+
+/// Acquisition, definition repair and execution keep separate bounded failure counts.
+/// A valid source remains usable while independent definition errors are corrected.
 struct RequestRecovery {
     private var failures: [String: Int] = [:]
+    private var unavailableSources = Set<String>()
+    private var unavailableHosts = Set<String>()
+    private var recoveredSource = false
+    private var alternativePageAttempted = false
+    var sourceRecoveryContext: [String: Any]? {
+        guard !unavailableSources.isEmpty else { return nil }
+        return ["unavailableRoutes": unavailableSources.sorted(), "unavailableHosts": unavailableHosts.sorted()]
+    }
+    private(set) var definitionFailures = 0
+    private(set) var lastDefinitionIssue: String?
+    private(set) var repeatedDefinitionField = 0
+    private var definitionField: String?
+    mutating func definitionFailed(_ reason: String, field: String?) {
+        definitionFailures += 1
+        repeatedDefinitionField = field == definitionField ? repeatedDefinitionField + 1 : 1
+        definitionField = field
+        lastDefinitionIssue = reason
+    }
+    var needsAlternativeSource: Bool { unavailableSources.count == 1 && !recoveredSource && !alternativePageAttempted }
+    mutating func sourceFailed(_ failure: SourceReadFailure) {
+        unavailableSources.insert(SourceReadFailure.route(failure.url))
+        if failure.hostUnavailable, let host = URL(string: failure.url)?.host?.lowercased() { unavailableHosts.insert(host) }
+        recoveredSource = false
+        switched = true
+    }
+    mutating func attemptingPage(_ raw: String) {
+        if !unavailableSources.isEmpty, !sourceUnavailable(raw) { alternativePageAttempted = true }
+    }
+    mutating func sourceSucceeded() { recoveredSource = true }
+    func sourceUnavailable(_ raw: String) -> Bool {
+        unavailableSources.contains(SourceReadFailure.route(raw)) || URL(string: raw)?.host.map { unavailableHosts.contains($0.lowercased()) } == true
+    }
+
     private(set) var total = 0
     private(set) var switched = false
     private(set) var lastTool: String?
@@ -82,6 +129,10 @@ struct RequestRecovery {
         guard !needsTimedRecipe else {
             throw ToolArgumentError(path: "$.bindings", issue: "the requested recipe needs freshness or recurring updates; verify them with a source recipe")
         }
+        try validateIdentity(sourceValues, requirements: requirements)
+    }
+
+    func validateIdentity(_ sourceValues: [String], requirements: [OutcomeRequirement]) throws {
         let missing = expectedValues.filter { expected in !sourceValues.contains { $0.caseInsensitiveCompare(expected) == .orderedSame } }
         let unproven = requirements.filter { requirement in
             !sourceValues.contains { text in requirement.anyOf.contains { OutcomeEvidence.matches(text, expected: $0) } }
@@ -107,6 +158,7 @@ struct RequestRecovery {
         let site = endpoint?.host ?? ""
         let resource = site + (endpoint?.percentEncodedPath ?? "")
         switch tool {
+        case "build_data_tool": return tool + "/" + (arguments["source"] as? String ?? resource)
         case "query_api": return tool + "/" + resource + (source["calculation"] is String ? "/calculation" : "/binding")
         case "inspect_api", "read_value", "navigate": return tool + "/" + resource
         case "present_ui": return tool + (arguments["markup"] == nil ? "/components" : "/markup")
@@ -116,14 +168,24 @@ struct RequestRecovery {
     }
 
     func exhausted(_ tool: String, _ arguments: [String: Any]) -> Bool {
-        rejectedMethod == method(tool, arguments)
+        if ["query_api", "read_value", "inspect_api"].contains(tool) {
+            let source = arguments["source"] as? [String: Any] ?? arguments
+            var raw = source["url"] as? String ?? ""
+            for (key, value) in source["inputs"] as? [String: String] ?? [:] {
+                raw = raw.replacingOccurrences(of: "{" + key + "}", with: value)
+            }
+            if sourceUnavailable(raw) { return true }
+        }
+        return rejectedMethod == method(tool, arguments)
     }
 
-    mutating func record(_ tool: String, _ arguments: [String: Any]) -> Int {
-        let key = method(tool, arguments)
+    mutating func record(_ tool: String, _ arguments: [String: Any], definitionIssue: Bool = false) -> Int {
+        // Independent corrections are progress, not evidence that a healthy source
+        // is unavailable. Bound repetitions of the exact invalid definition instead.
+        let key = method(tool, arguments) + (definitionIssue ? "/definition/" + JSONText.encode(arguments) : "")
         failures[key, default: 0] += 1
-        total += 1
-        if ["read_value", "query_api"].contains(tool) {
+        if !definitionIssue { total += 1; lastDefinitionIssue = nil; definitionField = nil; repeatedDefinitionField = 0 }
+        if ["read_value", "query_api", "build_data_tool", "inspect_api"].contains(tool) {
             needsSourceReading = true
             let source = arguments["source"] as? [String: Any] ?? arguments
             needsTimedRecipe = needsTimedRecipe || source["maxAgeSeconds"] is NSNumber || source["refreshSeconds"] is NSNumber
@@ -139,9 +201,9 @@ struct RequestRecovery {
             }
         }
         if !["finish", "load_tools", "arguments"].contains(tool) { lastTool = tool }
-        if failures[key, default: 0] >= 2 {
+        if failures[key, default: 0] >= 2 && !definitionIssue {
             switched = true
-            if ["query_api", "read_value", "inspect_api", "compose_ui", "present_ui", "reuse_saved_ui", "navigate"].contains(tool) {
+            if ["query_api", "build_data_tool", "read_value", "inspect_api", "compose_ui", "present_ui", "reuse_saved_ui", "navigate"].contains(tool) {
                 rejectedMethod = key
             }
         }
@@ -151,18 +213,33 @@ struct RequestRecovery {
 
 extension AgentController {
     func recover(_ error: Error, tool: String, arguments: [String: Any]) throws -> String {
-        let attempt = recovery.record(tool, arguments)
-        if recovery.total >= 8 { throw RecoveryLimit(tool: recovery.lastTool ?? tool) }
-        if attempt == 1 {
+        let acquisition = (error as? SourceReadFailure).flatMap { $0.allowsCorrection ? nil : $0 }
+        if let acquisition { recovery.sourceFailed(acquisition) }
+        let definitionIssue = error is ToolArgumentError || error is DecodingError
+        let attempt = recovery.record(tool, arguments, definitionIssue: definitionIssue)
+        if definitionIssue { recovery.definitionFailed(error.localizedDescription, field: (error as? ToolArgumentError)?.path) }
+        if recovery.total >= 8 || recovery.definitionFailures >= 8 || definitionIssue && attempt >= 3 { throw RecoveryLimit(tool: recovery.lastTool ?? tool) }
+        if definitionIssue {
+            model.activity = model.userText("正在修正这一步的定义…", "Correcting this step…")
+            return "Correct the reported definition field with repair_step when available. This is not a failed source: keep the acquired response, its identity and the same task. Do not switch providers or rebuild the tool solely because separate definition fields need correction."
+        }
+        if attempt == 1 && acquisition == nil {
             model.activity = model.userText("正在重新核对这一步…", "Checking this step again…")
             return failedStep == nil ? "Correct the step or use another method. Preserve verified work." :
                 "Use repair_step for a targeted correction, or choose a simpler method."
         }
         failedStep = nil
         model.activity = model.userText("正在换一种方法…", "Trying another approach…")
+        if acquisition != nil {
+            // A source outage does not invalidate the API renderer or recipe tools.
+            // Keep them available so a new response can go straight onto the card.
+            loadedToolFamilies.formUnion(["data", "reading", "source_lookup"])
+            Diagnostics.record("recovery_switch", ["name": tool, "attempt": attempt, "category": "source", "requestID": model.activeRequest?.id.uuidString ?? ""])
+            return "No usable response was acquired. This endpoint is unavailable for the request. Choose another public endpoint/provider or inspect an accessible page in the owned browser. After inspecting an alternative JSON source, use build_data_tool with its observation handle, parameters and result expressions. The host assembles the executable recipe and card. For a direct page reading, use finish(page_ready,source_only:true) with a short title, primaryKey, observed readings and exact readingValues instead of generating markup. Keep the goal, units and requested interactions. Do not ask the human to retry an internal source failure."
+        }
         let next: String
         switch tool {
-        case "inspect_api", "read_value", "query_api":
+        case "inspect_api", "read_value", "query_api", "build_data_tool":
             loadedToolFamilies.remove("data")
             loadedToolFamilies.formUnion(["reading", "source_lookup"])
             if observations.hasSeveralSources && RequestRun.current?.assignment == nil {

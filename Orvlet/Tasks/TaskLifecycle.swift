@@ -20,6 +20,9 @@ struct TaskRequestContext {
     var stageStartedAt = Date()
     var placeholderID: UUID?
     var owner: Owner?
+    var browserResourceID: UUID?
+    var expectsPlayback = false
+    var musicSessionRole: MusicSessionRole?
     var presentationFailure: String?
 }
 
@@ -69,7 +72,7 @@ extension AppModel {
     // Read-only projections keep rendering code simple; mutations belong here.
     var requestCardID: UUID? { activeRequest?.placeholderID }
     var requestPageID: UUID? {
-        activeRequest?.owner?.kind == .web ? activeRequest?.owner?.id : nil
+        activeRequest?.browserResourceID ?? (activeRequest?.owner?.kind == .web ? activeRequest?.owner?.id : nil)
     }
     var requestTaskID: UUID? {
         activeRequest?.owner?.kind != .web ? activeRequest?.owner?.id : nil

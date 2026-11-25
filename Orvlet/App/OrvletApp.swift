@@ -6,6 +6,8 @@ import SwiftUI
 enum OrvletEntry {
     static func main() {
         if CommandLine.arguments.contains("--task-code-worker") { TaskCodeWorker.main() }
+        NativeChromium.prepareApplication()
+        if NativeChromium.runApplication() { return }
         #if DEBUG
             if DebugHarness.startStandalonePilot() { return }
         #endif

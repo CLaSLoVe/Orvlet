@@ -7,6 +7,8 @@ extension AgentController {
         switch name {
         case "find_music":
             let music = try JSONDecoder().decode(MusicRequest.self, from: JSONSerialization.data(withJSONObject: input))
+            try bindMusicRequest(newPlayerQuote: music.newPlayerQuote)
+            if music.placement == .replace { model.activeRequest?.expectsPlayback = true }
             do {
                 let reply = try await executeMusicRequest(
                     music, key: try await model.loadModelKey(for: requestConnection), revision: revision)
@@ -23,7 +25,7 @@ extension AgentController {
                 ownCurrentPage()
             }
             return context(
-                try await model.observation(), detail: input["detail"] as? String ?? "page",
+                try await model.observation(query: input["query"] as? String), detail: input["detail"] as? String ?? "page",
                 offset: input["offset"] as? Int ?? 0)
         case "reuse_ui":
             interfaceAttempted = true
@@ -38,13 +40,14 @@ extension AgentController {
             return ["ok": true, "reused": true]
         case "navigate":
             let destination = input["url"] as? String
+            if let destination { recovery.attemptingPage(destination) }
             if !preparedBrowser {
                 try model.prepareBrowserForNewTask(destination: destination)
                 preparedBrowser = true
             }
             if let destination, let key = SurfaceCache.pageKey(destination), key == SurfaceCache.pageKey(model.webURL),
                 URL(string: destination)?.fragment == URL(string: model.webURL)?.fragment,
-                model.browser.webView.url != nil, !model.webLoading, model.webError == nil
+                model.browser.currentURL != nil, !model.webLoading, model.webError == nil
             {
                 operatedPage = true
                 ownCurrentPage()
@@ -77,6 +80,10 @@ extension AgentController {
             return context(page, detail: "page")
         case "act":
             var input = input
+            if input["action"] as? String == "media", ["play", "toggle"].contains(input["operation"] as? String ?? "") {
+                model.activeRequest?.expectsPlayback = true
+                model.markPlaybackTask(model.browser.id)
+            }
             // Resolve an exact, unique accessible name when a provider omits role.
             // Never interpret arbitrary CSS, aliases or ambiguous matches as a target.
             if ["click", "type", "select", "submit"].contains(input["action"] as? String ?? ""), input["id"] == nil,
@@ -133,6 +140,7 @@ extension AgentController {
             var plan = try InterfaceComposer.decodePlan(JSONText.encode(input))
             try plan.markup?.validateLanguage(model.settings.preferredInterfaceLanguage)
             plan.markup?.interfaceLanguage = model.settings.preferredInterfaceLanguage
+            plan.readings = try checkedPageReadings(plan.readings ?? [], values: input["readingValues"] as? [String: String], observation: model.lastObservation)
             let mapped = try plan.validated(observation: model.lastObservation)
             let observation = try await model.observation()
             let checked = try mapped.validated(observation: observation)
@@ -185,6 +193,10 @@ extension AgentController {
 
     private func recoverMusicSearch(_ request: MusicRequest) async throws -> [String: Any] {
         guard request.placement == .replace else { throw MusicSelectionUnavailable() }
+        if let owner = model.requestPageID {
+            try await model.prepareTaskSource(owner)
+            preparedBrowser = true
+        }
         var search = URLComponents(string: "https://www.youtube.com/results")!
         search.queryItems = [URLQueryItem(name: "search_query", value: request.query)]
         Diagnostics.record("music_search_fallback")

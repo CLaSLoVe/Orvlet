@@ -1,7 +1,7 @@
 import Foundation
 
 struct TaskSurfaceAction: Codable {
-    enum Kind: String, Codable { case code, agent, runtime, remote }
+    enum Kind: String, Codable { case code, agent, runtime, remote, openRecord, view, resource }
     var id: String
     var kind: Kind
     var code: String?
@@ -12,6 +12,17 @@ struct TaskSurfaceAction: Codable {
 
 /// A task's interface and behavior, independent of any browser or DOM bindings.
 struct TaskSurface: Codable {
+    var hasEditableOperation: Bool {
+        let controls = markup.boundControlIDs
+        return actions.contains { action in
+            guard controls.contains(action.id) else { return false }
+            switch action.kind {
+            case .code, .agent, .openRecord, .view, .resource: return true
+            case .remote, .runtime: return action.operation != "refresh"
+            }
+        }
+    }
+
     var title: String
     var markup: CardMarkup
     var fields: [String]
@@ -61,6 +72,14 @@ struct TaskSurface: Codable {
         }
         for action in normalized {
             switch action.kind {
+            case .resource:
+                guard action.operation != nil, action.code == nil, action.prompt == nil else {
+                    throw AppError.message("Use the registered resource operation.")
+                }
+            case .view:
+                guard action.operation == "select", action.code == nil, action.prompt == nil else {
+                    throw AppError.message("View controls only select retained results.")
+                }
             case .code:
                 guard let code = action.code, code.utf8.count <= 32768 else {
                     throw AppError.message(
@@ -70,6 +89,9 @@ struct TaskSurface: Codable {
                     throw AppError.message(
                         "Action '\(action.id)' is a code action: omit its prompt field, or leave prompt empty.")
                 }
+            case .openRecord:
+                guard let raw = action.operation, (try? PublicDataClient.url(raw)) != nil,
+                    action.code == nil, action.prompt == nil else { throw AppError.message("Invalid record handoff.") }
             case .remote:
                 guard apiData != nil, action.code == nil, action.prompt == nil else {
                     throw AppError.message(
@@ -106,7 +128,9 @@ struct TaskSurface: Codable {
             )
         }
         value.actions = normalized
-        value.markup = try markup.validated()
+        var controls = markup
+        try controls.resolveCatalogInputs(state: state)
+        value.markup = try controls.validated()
         try value.markup.validateActions(Set(actions.map(\.id)).union(["expand", "dismiss"]), fields: Set(fields))
         if let spec = runtime {
             value.runtime = try spec.validated(fields: fields, at: Date())
@@ -152,51 +176,52 @@ extension AppModel {
             sideTasks[i].plan?.markup?.height = height
             if browser.id == id { surface.markup?.height = height }
         }
+        if var view = work.view(id) {
+            view.height = height
+            try? work.putView(view)
+        }
         if selectedTaskID == id && !collapsed { onResize?(windowSize) }
         persistSideTasks()
     }
-    func commitTaskSurface(_ proposed: TaskSurface, id: UUID, ticket: TaskRevisionLedger.Ticket?) throws {
+    func commitTaskSurface(_ proposed: TaskSurface, id: UUID, ticket: TaskRevisionLedger.Ticket?, workFile: WorkFile? = nil) throws {
         var surface = proposed
         surface.markup.interfaceLanguage = settings.preferredInterfaceLanguage
         if let ticket, !accepts(ticket) {
             guard let current = sideTasks.first(where: { $0.id == id }) else { throw CancellationError() }
             surface.markup = current.presentation
         }
-        publishTaskSurface(try surface.validated(), id: id)
-    }
-    func publishTaskSurface(_ surface: TaskSurface, id: UUID) {
-        taskActivityReceipts[id] = nil
-        taskActionJobs.removeValue(forKey: id)?.cancel()
-        taskRevisions.invalidate(id, .execution)
-        var task = sideTasks.first(where: { $0.id == id }) ?? SideTask(kind: .workspace, title: surface.title)
-        task.id = id
-        task.kind = .workspace
-        task.title = surface.title
-        task.taskSurface = surface
-        task.markup = surface.markup
-        task.liveValues = surface.state
-        if surface.apiData != nil {
-            task.dataUpdatedAt = ISO8601DateFormatter().date(
-                from: (surface.state["sourceChecked"] ?? "").replacingOccurrences(of: "Checked ", with: ""))
-            task.dataIssue = nil
+        if let run = RequestRun.current, run.agent.wantsEditableTool, run.agent.activeTaskID == id,
+            !surface.hasEditableOperation {
+            throw ToolArgumentError(path: "$", issue: "Bind a visible control to the next useful action. It can act on current state with no fields. Verify its effect; a passive reading or refresh alone cannot fulfill the operation.")
         }
-        task.runtimeState = surface.runtime == nil ? nil : TaskRuntimeState()
-        task.status = surface.runtime == nil ? "Ready" : "Starting…"
-        task.generated = true
-        task.hidden = false
-        if let index = sideTasks.firstIndex(where: { $0.id == id }) {
-            sideTasks[index] = task
-        } else {
-            sideTasks.append(task)
-        }
-        if surface.runtime != nil { taskRuntime.attach(id) } else { taskRuntime.detach(id) }
-        adoptRequestTask(.workspace(id))
-        ambientRequestID = id
-        if selectedTaskID == nil { selectedTaskID = id }
-        persistSideTasks()
-        reconcileTasks()
-        onShow?()
+        try installWorkSurface(try surface.validated(), id: id, workFile: workFile)
     }
+    func publishTaskSurface(_ surface: TaskSurface, id: UUID, workFile: WorkFile? = nil) {
+        do { try installWorkSurface(surface, id: id, workFile: workFile) }
+        catch {
+            activeRequest?.presentationFailure = error.localizedDescription
+            if let index = sideTasks.firstIndex(where: { $0.id == id }) { sideTasks[index].interfaceIssue = error.localizedDescription }
+            reportTaskIssue(id, source: .interface, detail: error.localizedDescription)
+        }
+    }
+    private func installWorkSurface(_ surface: TaskSurface, id: UUID, workFile: WorkFile?) throws {
+        let existing = work.view(id)?.selected
+        let prior = existing.flatMap { work.artifact($0) }
+        let artifact = work.retain(title: surface.title, values: surface.state,
+            definition: WorkDefinition(surface: surface),
+            design: WorkDesign(markup: surface.markup, card: surface.apiData?.card, preset: surface.preset),
+            goalID: RequestRun.current?.goalID, replacing: existing, file: workFile)
+            _ = try presentWork([artifact], layout: .single, title: surface.title, destination: id)
+            resolveTaskIssue(id, source: .interface)
+            if surface.runtime != nil {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = .sortedKeys
+                if prior == nil || (try? encoder.encode(prior?.definition.runtime)) != (try? encoder.encode(surface.runtime)) {
+                    taskRuntime.attach(artifact)
+                }
+            } else if prior?.definition.runtime != nil { taskRuntime.detach(artifact) }
+    }
+
     func performTaskAction(_ id: UUID, action name: String, value: String?) {
         guard let task = sideTasks.first(where: { $0.id == id }), let surface = task.taskSurface,
             let action = surface.actions.first(where: { $0.id == name })
@@ -211,12 +236,20 @@ extension AppModel {
         } else {
             fields = [:]
         }
+        if work.view(id) != nil {
+            performWorkAction(viewID: id, action: name, fields: fields)
+            return
+        }
         guard Set(fields.keys).isSubset(of: Set(surface.fields)), fields.values.allSatisfy({ $0.utf8.count <= 8000 })
         else {
             deliverReply("The task input is too large or contains an unknown field.", kind: .failure, taskID: id)
             return
         }
         taskActivityReceipts[id] = nil
+        if action.kind == .openRecord, let raw = action.operation, let url = try? PublicDataClient.url(raw) {
+            openHandoff(url, taskID: id)
+            return
+        }
         if action.kind == .remote {
             performDataAction(id, action: action, fields: fields)
             return
@@ -255,12 +288,14 @@ extension AppModel {
             }
             do {
                 _ = try await executeTaskCodeAction(id, action: name, fields: fields, ticket: ticket)
+                resolveTaskIssue(id, source: .data)
             } catch is CancellationError {} catch {
                 guard accepts(ticket), let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
                 taskRuntime.attach(id)
                 sideTasks[i].status = "Input needs attention"
                 recordTaskOutcome(id, .failed)
-                deliverReply("The calculation could not finish. Your inputs are preserved.", kind: .failure, taskID: id)
+                reportTaskIssue(id, source: .data,
+                    detail: "The calculation could not finish. " + error.localizedDescription + " Your inputs are preserved.")
             }
         }
     }
@@ -269,6 +304,14 @@ extension AppModel {
     func executeTaskCodeAction(
         _ id: UUID, action name: String, fields: [String: String], ticket: TaskRevisionLedger.Ticket
     ) async throws -> [String: String] {
+        if let view = work.view(id) {
+            guard accepts(ticket), let job = performWorkOperation(view.selected, action: name, fields: fields) else { throw CancellationError() }
+            await job.value
+            guard accepts(ticket), let artifact = work.artifact(view.selected), artifact.issue == nil else {
+                throw AppError.message("The operation did not complete; the previous result is retained.")
+            }
+            return artifact.values
+        }
         guard accepts(ticket), let task = sideTasks.first(where: { $0.id == id }),
             let surface = task.taskSurface,
             let action = surface.actions.first(where: { $0.id == name && $0.kind == .code }),

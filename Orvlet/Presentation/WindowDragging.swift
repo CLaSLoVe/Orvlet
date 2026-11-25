@@ -54,6 +54,7 @@ private struct TaskDragPreview: View {
 
 /// Delay activation until release. Card drags preview closing; background drags move the window.
 struct WindowDragArea: NSViewRepresentable {
+    var excludedRects: [CGRect] = []
     var onClick: (() -> Void)? = nil
     var onDoubleClick: (() -> Void)? = nil
     var delaySingleClick = false
@@ -66,6 +67,7 @@ struct WindowDragArea: NSViewRepresentable {
     var pressed: (Bool) -> Void = { _ in }
     func makeNSView(context: Context) -> DragView { DragView() }
     func updateNSView(_ view: DragView, context: Context) {
+        view.excludedRects = excludedRects
         view.onClick = onClick
         view.onDoubleClick = onDoubleClick
         view.delaySingleClick = delaySingleClick
@@ -78,6 +80,13 @@ struct WindowDragArea: NSViewRepresentable {
         view.identifier = taskID.map { NSUserInterfaceItemIdentifier($0.uuidString) }
     }
     class DragView: NSView {
+        var excludedRects: [CGRect] = []
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let local = convert(point, from: superview)
+            let topLeft = NSPoint(x: local.x, y: isFlipped ? local.y : bounds.height - local.y)
+            guard !excludedRects.contains(where: { $0.contains(topLeft) }) else { return nil }
+            return super.hitTest(point)
+        }
         private static weak var pendingClickOwner: DragView?
         static func cancelPendingClicks() {
             pendingClickOwner?.pendingClick?.cancel()
@@ -101,6 +110,11 @@ struct WindowDragArea: NSViewRepresentable {
         private var previewHome = NSRect.zero
         private var committedDrop = false
         private var startPoint: NSPoint?
+        private weak var movingPanel: ShellPanel?
+        private func endWindowMove() {
+            movingPanel?.moveInteraction(false)
+            movingPanel = nil
+        }
         private var startOrigin: NSPoint = .zero
         private(set) var didDrag = false
         override var acceptsFirstResponder: Bool { onClick != nil && enabled }
@@ -133,7 +147,10 @@ struct WindowDragArea: NSViewRepresentable {
                 return
             }
             guard allowsWindowDrag else { return }
-            if firstDrag { (window as? ShellPanel)?.moveInteraction(true) }
+            if firstDrag {
+                movingPanel = window as? ShellPanel
+                movingPanel?.moveInteraction(true)
+            }
             window.setFrameOrigin(NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy))
         }
         func isOutsideDrop(_ event: NSEvent) -> Bool {
@@ -146,7 +163,7 @@ struct WindowDragArea: NSViewRepresentable {
             startPoint = nil
             pressed(false)
             NSCursor.arrow.set()
-            if onOutsideDrop == nil { (window as? ShellPanel)?.moveInteraction(false) }
+            endWindowMove()
             if didDrag, onOutsideDrop != nil, let window {
                 let closing =
                     enabled
@@ -181,7 +198,7 @@ struct WindowDragArea: NSViewRepresentable {
                 Self.cancelPendingClicks()
             }
             if event.keyCode == 53, startPoint != nil {
-                if onOutsideDrop == nil { (window as? ShellPanel)?.moveInteraction(false) }
+                endWindowMove()
                 startPoint = nil
                 didDrag = false
                 pressed(false)
@@ -271,12 +288,36 @@ struct WindowDragArea: NSViewRepresentable {
                 pendingClick?.cancel()
                 pendingClick = nil
                 pressed(false)
-                if onOutsideDrop == nil { (window as? ShellPanel)?.moveInteraction(false) }
+                endWindowMove()
                 startPoint = nil
                 didDrag = false
                 if !committedDrop { clearPreview() }
             }
             super.viewWillMove(toWindow: newWindow)
+        }
+    }
+}
+
+private struct WindowDragExclusions: PreferenceKey {
+    static let defaultValue: [Anchor<CGRect>] = []
+    static func reduce(value: inout [Anchor<CGRect>], nextValue: () -> [Anchor<CGRect>]) {
+        value += nextValue()
+    }
+}
+
+extension View {
+    /// Keep native controls and scrolling/reordering regions out of the window gesture.
+    func windowDragControl() -> some View {
+        anchorPreference(key: WindowDragExclusions.self, value: .bounds) { [$0] }
+    }
+    /// SwiftUI can claim transparent gaps between buttons. An explicit hit mask
+    /// lets all remaining space move the window without stealing control input.
+    func windowDraggableSurface() -> some View {
+        overlayPreferenceValue(WindowDragExclusions.self) { anchors in
+            GeometryReader { geometry in
+                WindowDragArea(excludedRects: anchors.map { geometry[$0] })
+                    .accessibilityHidden(true)
+            }
         }
     }
 }
@@ -321,6 +362,9 @@ private struct PressableDragButton: View {
 
 /// A local row drag: keep mouse ownership separate from window movement and context menus.
 struct TaskDragHandle: NSViewRepresentable {
+    var taskID: UUID? = nil
+    var onClick: (() -> Void)? = nil
+    var onDoubleClick: (() -> Void)? = nil
     var appearance: TaskDragAppearance
     var close: () -> Void
     var begin: () -> Void
@@ -329,6 +373,11 @@ struct TaskDragHandle: NSViewRepresentable {
     var end: () -> Void
     func makeNSView(context: Context) -> HandleView { HandleView() }
     func updateNSView(_ view: HandleView, context: Context) {
+        view.identifier = taskID.map { NSUserInterfaceItemIdentifier($0.uuidString) }
+        view.onClick = onClick
+        view.onDoubleClick = onDoubleClick
+        view.delaySingleClick = onDoubleClick != nil
+        view.allowsWindowDrag = false
         view.taskPreview = appearance
         view.onOutsideDrop = close
         view.dragging = { active in if active { begin() } else { end() } }

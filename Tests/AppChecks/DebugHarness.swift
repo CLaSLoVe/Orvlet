@@ -27,6 +27,9 @@
             case deliveryMedia = "--delivery-media"
             case deliveryHistory = "--delivery-history"
             case setupCheck = "--setup-check"
+            case stateMachineCheck = "--state-machine-check"
+            case systemBrowserCheck = "--system-browser-check"
+            case nativeBrowserCheck = "--native-browser-check"
             case consistencyCheck = "--consistency-check"
             case taskHistoryCheck = "--task-history-check"
             case interfaceCheck = "--interface-check"
@@ -91,6 +94,17 @@
             let model = AppModel(defaults: store)
             model.isLiveTest = true
             model.persistHistory = false
+            if let index = CommandLine.arguments.firstIndex(of: "--test-model-profile"), index + 1 < CommandLine.arguments.count {
+                let profile = CommandLine.arguments[index + 1]
+                guard model.settings.selectProfile(profile) else { fputs("Unknown test model profile\n",stderr); exit(2) }
+                // In-memory only. Never save or change the desktop connection.
+            }
+            if CommandLine.arguments.contains("--test-reasoning-none") {
+                model.settings.main.options.reasoning = .none
+                var parameters = (try? model.settings.main.options.object(model.settings.main.options.parameters, label:"Test parameters")) ?? [:]
+                parameters["reasoning_effort"] = "none"
+                model.settings.main.options.parameters = JSONText.encode(parameters)
+            }
             return model
         }
         static func selected(arguments: [String] = CommandLine.arguments) -> Mode? {
@@ -110,7 +124,30 @@
                 fputs("This check uses external services. Add --allow-live-services to opt in.\n", stderr)
                 exit(2)
             }
+            if CommandLine.arguments.contains("--background-checks"), mode != .stateMachineCheck && mode != .modelAPICheck && mode != .systemBrowserCheck && mode != .nativeBrowserCheck {
+                fputs("This suite may show windows. It cannot run in background-check mode.\n", stderr)
+                exit(2)
+            }
+            if mode == .systemBrowserCheck {
+                Task { await SystemBrowserCheck.start() }
+                return true
+            }
+            if mode == .nativeBrowserCheck {
+                Task { await NativeChromiumCheck.start() }
+                return true
+            }
+            if mode == .stateMachineCheck {
+                Task { await StateMachineCheck.start() }
+                return true
+            }
             let model = delegate.model
+            if mode == .requestPipelineLive, CommandLine.arguments.contains("--verify-credentials") {
+                Task {
+                    do { print(JSONText.encode(["checks": try await LocalCredentialsCheck.run()])); exit(0) }
+                    catch { print(error.localizedDescription); exit(1) }
+                }
+                return true
+            }
             if mode == .requestPipelineLive, let index = CommandLine.arguments.firstIndex(of: "--check-saved-reading"), index + 1 < CommandLine.arguments.count {
                 Task {
                     do { try await ParallelCardsCheck.checkSavedReading(model, subject: CommandLine.arguments[index + 1]); exit(0) }
@@ -126,6 +163,13 @@
                 }
                 return true
             }
+            if mode == .requestPipelineLive, CommandLine.arguments.contains("--verify-site-browser") {
+                Task {
+                    do { try await BrowserCompatibilityCheck.run(model); exit(0) }
+                    catch { print(error.localizedDescription); exit(1) }
+                }
+                return true
+            }
             if mode == .requestPipelineLive, let i = CommandLine.arguments.firstIndex(of: "--verify-placement"),
                 let scenario = CommandLine.arguments.dropFirst(i + 1).first {
                 Task {
@@ -133,6 +177,13 @@
                     catch { print(error.localizedDescription); exit(1) }
                     if let suite = pipelineSuite { model.preferences.removePersistentDomain(forName: suite) }
                     exit(0)
+                }
+                return true
+            }
+            if mode == .requestPipelineLive, CommandLine.arguments.contains("--verify-work-separation") {
+                Task {
+                    do { try await WorkSeparationCheck.run(model); exit(0) }
+                    catch { print(error.localizedDescription); exit(1) }
                 }
                 return true
             }
@@ -183,10 +234,12 @@
                             checks += try await UnifiedRequestCheck.run() + RequestBoundaryCheck.run()
                         }
                         print(JSONText.encode(["ok": true, "checks": checks]))
+                        if CommandLine.arguments.contains("--stdout") { exit(0) }
                         try JSONSerialization.data(withJSONObject: ["ok": true, "checks": checks]).write(
                             to: URL(fileURLWithPath: "/tmp/orvlet-generation-checks.json"))
                         exit(0)
                     } catch {
+                        print(JSONText.encode(["ok": false, "error": error.localizedDescription]))
                         try? JSONSerialization.data(withJSONObject: ["ok": false, "error": error.localizedDescription])
                             .write(to: URL(fileURLWithPath: "/tmp/orvlet-generation-checks.json"))
                         exit(1)
@@ -415,7 +468,7 @@
                     do {
                         let checks = mode == .dataReadingCheck ? try await APIDataCheck.run() : try await APIDataCheck.backgroundReading()
                         let report: [String: Any] = ["checks": checks, "ok": true]
-                        if mode == .dataReadingCheck {
+                        if mode == .dataReadingCheck && !CommandLine.arguments.contains("--report-stdout") {
                             try JSONSerialization.data(withJSONObject: report).write(to: URL(fileURLWithPath: "/tmp/orvlet-reading-checks.json"))
                         }
                         print(JSONText.encode(report))

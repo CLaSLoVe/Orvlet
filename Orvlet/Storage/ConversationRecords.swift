@@ -14,4 +14,8 @@ struct ChatMessage: Codable, Identifiable {
     var requestID: UUID? = nil
     let text: String
     let isUser: Bool
+    var editsInterface: Bool? = nil
+    var issueSource: String? = nil
+    var issueResource: UUID? = nil
+    var issueResolved: Bool? = nil
 }

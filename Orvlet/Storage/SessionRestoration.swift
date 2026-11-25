@@ -30,7 +30,7 @@ extension AppModel {
         sessions.put(
             SavedSession(
                 url: webURL, title: trackTitle, plan: plan, position: max(0, progress), volume: volume,
-                mediaType: mediaType, listening: backgroundListening, wasPlaying: isPlaying))
+                mediaType: mediaType, listening: backgroundListening, wasPlaying: isPlaying, taskID: browser.id))
         recentSessions = sessions.entries
     }
     func cancelRestoration() {
@@ -49,6 +49,83 @@ extension AppModel {
             await owner.applyPlaybackPolicy()
         }
     }
+    func restoreSessionOnLaunch(_ entry: SavedSession) {
+        guard SessionStore.validURL(entry.url) else { return }
+        func matchesPage(_ task: SideTask) -> Bool {
+            if task.sourceURL == entry.url { return true }
+            guard task.isMusicSession, let track = MusicTrack.videoID(entry.url) else { return false }
+            return track == MusicTrack.videoID(task.sourceURL ?? "")
+        }
+        let matches: [SideTask]
+        if let id = entry.taskID {
+            matches = sideTasks.filter { $0.id == id && $0.kind == .web }
+            guard !matches.isEmpty else { return }
+        } else {
+            // Older session records only identified a page by its address.
+            matches = sideTasks.filter { $0.kind == .web && matchesPage($0) }
+        }
+        let open = matches.filter { task in
+            guard let view = work.view(task.id) else { return true }
+            return view.closed != true && work.artifact(view.selected)?.native?.id == task.id
+        }
+        if let owner = open.first {
+            guard open.count == 1, matchesPage(owner) else { return }
+        } else if !matches.isEmpty {
+            return
+        }
+        let play = settings.resumePlaybackOnLaunch && entry.wasPlaying && entry.isMedia
+        if usesNativeBrowser && !play {
+            // The saved card is enough until the user opens or operates its source.
+            var task = open.first ?? SideTask(id: entry.taskID ?? UUID(), kind: .web, title: entry.title)
+            task.sourceURL = entry.url
+            task.hidden = false
+            task.playing = false
+            task.listening = task.listening == true || entry.listening
+            task.hasMedia = task.hasMedia || entry.isMedia
+            if task.plan == nil, let plan = entry.plan, plan.hasMediaControls {
+                task.plan = SurfacePlan(components: [SurfaceComponent(kind: .media)], width: plan.width, height: plan.height)
+            }
+            task.status = task.isMediaTask ? "Paused" : "Resume page"
+            if let index = sideTasks.firstIndex(where: { $0.id == task.id }) { sideTasks[index] = task }
+            else { sideTasks.append(task) }
+            var saved = entry
+            saved.taskID = task.id
+            dormantLaunchSession = saved
+            selectedTaskID = task.id
+            persistSideTasks()
+            reconcileTasks()
+            return
+        }
+        if let id = open.first?.id, browser.id != id {
+            browser.dispose()
+            browser = BrowserController(model: self, id: id)
+            browserRevision += 1
+        }
+        restoreSession(entry, play: play)
+    }
+
+    func restoredObservation(_ page: [String: Any], entry: SavedSession, browser: BrowserController) async throws -> [String: Any] {
+        var latest = page
+        if entry.isMedia {
+            let deadline = Date().addingTimeInterval(8)
+            while (latest["hasMedia"] as? Bool != true || (latest["readyState"] as? Int ?? 0) < 1)
+                && Date() < deadline {
+                try await Task.sleep(for: .milliseconds(200))
+                latest = try await browser.observe()
+            }
+        }
+        try Task.checkCancellation()
+        return latest
+    }
+
+    func restoreMediaSettings(_ entry: SavedSession, page: [String: Any], browser: BrowserController) async {
+        guard page["hasMedia"] as? Bool == true else { return }
+        _ = try? await browser.action(["action": "media", "operation": "volume", "value": entry.volume])
+        if !Task.isCancelled, entry.position > 0, let length = page["duration"] as? Double, length > entry.position {
+            _ = try? await browser.action(["action": "media", "operation": "seek", "value": entry.position])
+        }
+    }
+
     func restoreSession(_ entry: SavedSession, play: Bool = false) {
         guard SessionStore.validURL(entry.url) else { return }
         saveSession(force: true)
@@ -81,23 +158,12 @@ extension AppModel {
                 await browser.applyPlaybackPolicy()
                 try Task.checkCancellation()
                 let page: [String: Any]
-                if browser.webView.url?.absoluteString == entry.url && !webLoading {
+                if browser.currentURL?.absoluteString == entry.url && !webLoading {
                     page = try await browser.observe()
                 } else {
-                    browser.webView.load(URLRequest(url: URL(string: entry.url)!, cachePolicy: .useProtocolCachePolicy))
-                    page = try await browser.settledObservation(navigation: true)
+                    page = try await browser.action(["action": "navigate", "url": entry.url])
                 }
-                var latest = page
-                if entry.isMedia {
-                    let deadline = Date().addingTimeInterval(8)
-                    while (latest["hasMedia"] as? Bool != true || (latest["readyState"] as? Int ?? 0) < 1)
-                        && Date() < deadline
-                    {
-                        try await Task.sleep(for: .milliseconds(200))
-                        latest = try await browser.observe()
-                    }
-                }
-                try Task.checkCancellation()
+                let latest = try await restoredObservation(page, entry: entry, browser: browser)
                 guard revision == restoreRevision else { return }
                 if let plan = entry.plan, let checked = try? plan.validated(observation: latest) {
                     surface = checked
@@ -111,14 +177,9 @@ extension AppModel {
                     hasCustomSurface = false
                 }
                 try Task.checkCancellation()
-                if latest["hasMedia"] as? Bool == true {
-                    _ = try? await browser.action(["action": "media", "operation": "volume", "value": entry.volume])
-                    if entry.position > 0, let length = latest["duration"] as? Double, length > entry.position {
-                        _ = try? await browser.action(["action": "media", "operation": "seek", "value": entry.position])
-                    }
-                }
+                await restoreMediaSettings(entry, page: latest, browser: browser)
                 try Task.checkCancellation()
-                await browser.webView.pauseAllMediaPlayback()
+                await browser.pauseMedia()
                 try Task.checkCancellation()
                 guard revision == restoreRevision else { return }
                 browser.setRestorationHeld(false)
@@ -142,6 +203,7 @@ extension AppModel {
                 guard revision == restoreRevision else { return }
                 browser.setRestorationHeld(false)
                 await browser.applyPlaybackPolicy()
+                guard revision == restoreRevision, self.browser === browser else { return }
                 restoringSession = false
                 queuedRestoreAction = nil
                 if !Task.isCancelled { webError = "Could not restore this page. Open it to retry." }

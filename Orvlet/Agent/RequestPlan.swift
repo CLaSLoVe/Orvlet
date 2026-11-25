@@ -212,7 +212,7 @@ enum RequestCapability: String, CaseIterable {
         case .music: return ["find_music", "control_media", "observe"]
         case .timer: return ["timer_start", "control_task"]
         case .calendar: return ["calendar_create", "calendar_clarify"]
-        case .data: return ["query_api", "inspect_api", "reuse_saved_ui"]
+        case .data: return ["build_data_tool", "read_value", "inspect_api", "reuse_saved_ui"]
         case .workspace: return ["present_ui", "run_code", "reuse_saved_ui", "control_task"]
         case .browser: return ["navigate", "observe", "act", "control_media"]
         case .answer: return []
@@ -232,7 +232,7 @@ enum RequestCapability: String, CaseIterable {
         case .music: return ["find_music"]
         case .timer: return ["timer_start"]
         case .calendar: return ["calendar_create", "calendar_clarify"]
-        case .data: return ["query_api", "inspect_api", "reuse_saved_ui"]
+        case .data: return ["build_data_tool", "read_value", "inspect_api", "reuse_saved_ui"]
         case .workspace: return ["present_ui", "run_code", "reuse_saved_ui"]
         case .browser: return ["navigate", "observe", "act"]
         case .answer: return []
@@ -246,9 +246,9 @@ enum RequestCapability: String, CaseIterable {
         "music": "Find, replace or queue music, including a named song, genre or mood.",
         "timer": "Start or control a countdown with a requested duration.",
         "calendar": "Create a calendar event or clarify its details.",
-        "data": "Look up structured external facts or calculate from fresh public API data.",
+        "data": "Look up public records, structured facts, lists and comparisons using a public API, including when the human names the service. Prefer this for readings if the human does not require interacting with a specific webpage.",
         "workspace":
-            "Create or change the behavior or design of a local tool, calculation, clock, form or task interface. Existing input/control changes belong to control.",
+            "Create or transform a file, run a local calculation, or create or change the behavior or design of a tool, clock, form or task interface. Existing input/control changes belong to control.",
         "browser": "Browse or operate a website or video, including unfamiliar webpage tasks.",
         "answer": "Answer or explain without external lookup or changing any task.",
         "general": "Mixed, ambiguous or other requests needing a wider capability catalogue.",

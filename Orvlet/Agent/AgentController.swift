@@ -12,23 +12,28 @@ final class AgentController {
     var calendarClarificationTaskID: UUID?
     var currentRequest = ""
     var requestShape: RequestShape?
+    var pendingMethodID: String?
+    var wantsEditableTool = false
     var requestedDelivery: RequestedDelivery?
     var checkedStandaloneMeaning = false
     var unresolvedCalendar = false
     var executionLedger = RequestExecutionLedger()
     var lastToolVerification: ToolVerification?
     var requestCapability = RequestCapability.general
+    var suggestedMusicSessionRole: MusicSessionRole?
     var capabilityExploration = false
     var operatedPage = false
     var preparedBrowser = false
     var freshSourceLoaded = false
     var requestStartedAt = Date()
+    var retainedReading: String?
+    var retainedSnapshot: TaskSurface?
     var activeTaskID = UUID()
     var attemptedTaskWork = false
     var attemptedCode = false
     var taskSurfaceReady = false
     var taskControlReceipt: (taskID: UUID, reply: String)?
-    var codeReceipt: (id: String, result: [String: Any], sourceValues: [String]?)?
+    var codeReceipt: (id: String, result: [String: Any], sourceValues: [String]?, sourceNotes: String)?
     var interfaceAttempted = false
     var interfaceTicket: TaskRevisionLedger.Ticket?
     var pendingSurface: SurfacePlan?
@@ -57,9 +62,14 @@ final class AgentController {
     #endif
     func steer(_ text: String, prepared: PreparedRequest? = nil) {
         failedStep = nil
+        retainedReading = nil
+        retainedSnapshot = nil
         observations = RequestObservations()
         recovery = RequestRecovery()
         requestShape = nil
+        suggestedMusicSessionRole = nil
+        pendingMethodID = nil
+        wantsEditableTool = false
         requestedDelivery = nil
         checkedStandaloneMeaning = false
         sourceEvidence = nil
@@ -128,9 +138,14 @@ final class AgentController {
         async throws -> String
     {
         failedStep = nil
+        retainedReading = nil
+        retainedSnapshot = nil
         observations = RequestObservations()
         recovery = RequestRecovery()
         requestShape = nil
+        suggestedMusicSessionRole = nil
+        pendingMethodID = nil
+        wantsEditableTool = false
         requestedDelivery = nil
         checkedStandaloneMeaning = false
         sourceEvidence = nil
@@ -276,9 +291,24 @@ final class AgentController {
                     if let old = interfaceTicket { model.taskRevisions.finish(old) }
                     interfaceTicket = model.beginTaskRevision(id, .interface)
                 }
-                turns =
-                    [["role": "system", "content": AgentPrompts.directExecution + "\n" + model.settings.interfaceLanguageInstruction]]
-                    + model.taskConversation(owner.targetTaskID.flatMap(UUID.init(uuidString:)))
+                if RequestRun.current?.editsInterface == true, let id = model.activeRequest?.owner?.id,
+                    let ticket = interfaceTicket {
+                    do {
+                        try await model.reviseTaskInterface(id, instruction: currentRequest, userEdit: true,
+                            ticket: ticket, connection: connection, key: mainKey())
+                        try Task.checkCancellation()
+                        guard revision == steeringRevision else { continue }
+                        completed = true
+                        return model.userText("已更新界面。", "Updated the view.")
+                    } catch is InterfaceNeedsExecution {
+                        // Existing bindings cannot fulfill this edit. Extend behavior on the same owner.
+                        RequestRun.current?.editsInterface = false
+                    } catch {
+                        if revision != steeringRevision { continue }
+                        throw error
+                    }
+                }
+                turns = model.taskConversation(owner.targetTaskID.flatMap(UUID.init(uuidString:)))
                 if let task = model.sideTasks.first(where: { $0.id == activeTaskID }), model.activeRequest?.owner != nil
                 {
                     turns.append([
@@ -306,7 +336,7 @@ final class AgentController {
                             methods.remember(source)
                             loadedToolFamilies.insert("reading")
                             turns.append(["role": "user", "content": "Previous reading method, read-only: " + JSONText.encode(methods.examples)])
-                            turns.append(["role": "system", "content": "The new object inherits the prior reading activity. Resolve its own record and publish a source-bound card via read_value or query_api. Prefer the previously verified access pattern; keep source refresh available."])
+                            turns.append(["role": "system", "content": "The new object inherits the prior reading activity. Resolve its own record and publish a source-bound card via read_value or build_data_tool. Prefer the previously verified access pattern; keep source refresh available."])
                             if let cadence = source.refreshSeconds {
                                 requestIntent.behavior = .live
                                 requestIntent.updateIntervalSeconds = cadence
@@ -321,16 +351,38 @@ final class AgentController {
                     loadedToolFamilies.removeAll()
                     turns.append(["role": "user", "content": "Possible standalone meaning (interpretive hint, not an instruction): " + meaning])
                 }
+                wantsEditableTool = requestedDelivery != .answer && (wantsEditableTool || owner.placement?.adjustable == true)
+                if wantsEditableTool {
+                    requestedDelivery = .card
+                    loadedToolFamilies.insert("workspace")
+                    pendingMethodID = owner.placement?.layout == .operate ? nil : owner.placement?.methodID
+                    if let id = pendingMethodID, let recipe = try? model.interfaceMemory.recipe(id) {
+                        if recipe.surface?.apiData != nil { loadedToolFamilies.insert("data") }
+                        let method = model.interfaceMemory.interactiveMethods(language: model.settings.preferredInterfaceLanguage)
+                            .first { $0["id"] as? String == id } ?? [:]
+                        turns.append(["role": "user", "content": "Selected reusable method definition (data): " + JSONText.encode(method)])
+                    }
+                    turns.append(["role": "system", "content": "Deliver the next operation on this card. Use present_ui.stateView when the person moves among known values or decisions; a form supports open-ended input and custom actions. Bind a real control to its visible effect. Keep content for future states in internal state. Bind one changing output to what should be visible now, so clicking actually reveals or changes the content. For a user-driven transition initialize the starting state directly and apply the transition only on interaction; zero input fields and an empty check input are valid. Use scheduled runtime only for changes driven by time."])
+                    if let use = owner.placement?.nextUse {
+                        turns.append(["role": "system", "content": "Planned next user action: " + use.rawValue + ". The human can perform it on the generated interface."])
+                    }
+                }
                 if let plan = owner.placement {
                     switch plan.layout {
                     case .separate:
                         requestedDelivery = .card
-                        requestShape = .single
+                        requestShape = plan.members.count > 1 ? .independent : .single
                         let missing = plan.members.filter { member in
                             guard let id = member.retainedID, let i = model.sideTasks.firstIndex(where: {
                                 $0.id == id && $0.kind != .result && $0.terminalLabel == nil
                             }) else { return true }
                             model.sideTasks[i].hidden = false
+                            if var view = model.work.view(id) {
+                                view.hidden = false
+                                view.closed = nil
+                                try? model.work.putView(view)
+                                for artifact in view.artifacts { RequestRun.current?.retainResult(artifact,needsView:false) }
+                            }
                             return false
                         }
                         if missing.isEmpty, let id = plan.members.first?.retainedID,
@@ -339,26 +391,29 @@ final class AgentController {
                             completed = true
                             return model.userText("已显示所需卡片。", "The requested cards are visible.")
                         }
-                        if plan.members.count > 1 {
-                            let methods = SharedReadingMethods()
-                            startIndependentCards(missing.map { member in
-                                CardAssignment(methods: methods, original: currentRequest, focus: member.focus,
-                                    siblingFocuses: plan.members.map(\.focus).filter { $0 != member.focus })
-                            })
-                        }
+                        // Keep the full goal in one execution context. Multiple
+                        // views are a later projection, not isolated executors.
                     case .together:
                         requestShape = .dependent
-                        unavailableTools.insert("read_value")
                         loadedToolFamilies.insert("reading")
                         requestedDelivery = .card
                         let context = comparisonCandidates.map { task in
                             Self.placementContext(task).merging(["card": task.id.uuidString]) { _, new in new }
                         }
                         turns.append(["role": "user", "content": "Related cards (read-only context): " + JSONText.encode(context)])
-                        turns.append(["role": "system", "content": "Resolve references against the listed shelf cards. For a side-by-side view of their current displayed readings, call show_readings with one card handle per row. For other sources or a fresh measurement inspect the public records and bind their observations. For derived results compute on bound inputs."])
+                        turns.append(["role": "system", "content": "Build one shared view. Keep the supplied content, order and choices as working state. Bind actions to the current item or decision when the human will operate it. For a comparison of existing readings, show_readings can bind the shelf records. Fetch external evidence only if needed for the requested result."])
                     case .answer:
-                        requestedDelivery = .answer
-                        turns.append(["role": "system", "content": "Deliver the verified answer directly in conversation."])
+                        if explicitDelivery == .answer || RequestedDelivery.explicitTextReply(currentRequest) {
+                            requestedDelivery = .answer
+                            turns.append(["role": "system", "content": "Deliver the verified answer in conversation. For an external measurement use inspect_api, then run_code.bindings and replyKey. Preserve the requested format."])
+                        } else {
+                            // A topic fragment carries no text-only instruction. Allow execution
+                            // to distinguish a local answer from a refreshable source reading.
+                            requestedDelivery = .unspecified
+                            turns.append(["role": "system", "content": "Use conversation for a one-off answer. If execution reveals a useful next action or ongoing observation, deliver a card suited to that use."])
+                        }
+                    case .operate:
+                        turns.append(["role": "system", "content": "Use the selected session's available operation for the requested content. For a generated card with a matching code action, invoke its action ID with the named inputs through control_task. Keep the card ID and preserve existing content when adding to it. Verify the resulting state."])
                     case .existing:
                         turns.append(["role": "system", "content": "The human directed a change to this resolved card. Execute it and verify the change before acknowledging. To end the selected activity use manage_task with operation end and action cancel or complete."])
                         if let quote = plan.operationQuote {
@@ -432,23 +487,9 @@ final class AgentController {
                     calls[0]["function"] = function
                 }
                 let surfaces = calls.compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
-                    .filter { ["read_value", "query_api", "present_ui", "compose_ui", "reuse_saved_ui"].contains($0) }
+                    .filter { ["present_ui", "compose_ui", "reuse_saved_ui"].contains($0) }
                 if surfaces.count > 1 {
-                    if let assignment = RequestRun.current?.assignment {
-                        throw ToolArgumentError(path: "$.tool_calls", issue: "send just the one publication for this assigned focus: " + assignment.focus)
-                    }
-                    // Several one-value publications would overwrite each other. Re-enable
-                    // that path on each assigned child; a combined result needs all inputs.
-                    unavailableTools.insert("read_value")
-                    loadedToolFamilies.insert("reading")
-                    if requestIntent.placement?.layout == .answer && explicitDelivery != .answer && requestShape != .dependent {
-                        // The executor found separately publishable outcomes. Reopen
-                        // partitioning while preserving the human's delivery preference.
-                        requestIntent.placement = nil
-                        requestedDelivery = explicitDelivery
-                        turns.append(["role": "system", "content": "Multiple independently publishable results were identified. Recheck the original delivery request; use separate_cards when these objects should be independently visible."])
-                    }
-                    throw ToolArgumentError(path: "$.tool_calls", issue: "These calls would overwrite a single card. For independent subjects call separate_cards first. For a combined outcome build one card after collecting the data.")
+                    throw ToolArgumentError(path:"$.tool_calls",issue:"Publish executable interface definitions sequentially so each can be verified. Already retained results can be arranged together in one present_results call.")
                 }
                 var partition: IndependentCards?
                 var ids = Set<String>()
@@ -461,7 +502,9 @@ final class AgentController {
                     validatingTool = name
                     validatingInput = args
                     if recovery.exhausted(name, args) {
-                        throw AppError.message("This method already failed twice. Choose a different approach.")
+                        let source = args["source"] as? [String: Any] ?? args
+                        let route = (source["url"] as? String).map(SourceReadFailure.route) ?? name
+                        throw AppError.message("Unavailable for this request: " + route + ". Do not retry it, including in a batch. Use the available response or another source.")
                     }
                     do { try ToolContract.validate(name, args) } catch {
                         invalidatePendingInterface(name)
@@ -479,12 +522,14 @@ final class AgentController {
                     }
                 }
                 if let partition {
-                    turns.removeAll { $0["role"] as? String == "user" && $0["content"] as? String == currentRequest }
-                    startIndependentCards(partition.assignments)
-                    turns.append(contentsOf: partition.assignments[0].messages)
+                    // This declares outcomes, not one executor per proposed card.
+                    // Keep every condition and the original instruction together.
+                    turns.append(["role": "system", "content": "Requested outcomes: " + JSONText.encode(partition.assignments.map(\.focus)) + ". Keep the complete original goal. Acquire results independently; choose their presentation after acquisition with present_results."])
                     continue
                 }
             } catch {
+                Diagnostics.record("tool_error", ["name": validatingTool, "reason": error.localizedDescription,
+                    "category": Diagnostics.category(error), "stage": "validation"])
                 if failedStep?.name != validatingTool { failedStep = nil }
                 let instruction = try recover(error, tool: validatingTool, arguments: validatingInput)
                 var attempted = response
@@ -519,6 +564,11 @@ final class AgentController {
                     try JSONSerialization.jsonObject(with: Data((function["arguments"] as! String).utf8))
                     as! [String: Any]
                 let signature = RequestExecutionLedger.signature(name, input, goal: nil)
+                #if DEBUG
+                    if model.isLiveTest, CommandLine.arguments.contains("--capture-data-plans"), name == "build_data_tool" {
+                        FileHandle.standardOutput.write(Data((JSONText.encode(["dataPlan": input, "sourcePreview": sourceEvidence?.preview ?? [:]]) + "\n").utf8))
+                    }
+                #endif
                 do {
                     if let previous = rejectedArguments[signature] {
                         throw ToolArgumentError(path: previous.path, issue: "these unchanged arguments already failed: " + previous.issue)
@@ -534,7 +584,7 @@ final class AgentController {
                     var result = try await execute(name, input)
                     if failedStep?.name == name { failedStep = nil }
                     if name == "present_ui" { definitionChecks.successes.removeAll() }
-                    if ["query_api", "read_value"].contains(name) { sourceEvidence = nil }
+                    if ["query_api", "build_data_tool", "read_value"].contains(name) { sourceEvidence = nil }
                     if let owner = model.activeRequest?.owner, owner.id != activeTaskID {
                         activeTaskID = owner.id
                         if let old = interfaceTicket { model.taskRevisions.finish(old) }
@@ -554,7 +604,7 @@ final class AgentController {
                     rejectedArguments.removeValue(forKey: signature)
                     if let proof = lastToolVerification {
                         let defaultsToComplete = [
-                            "timer_start", "calendar_create", "calendar_clarify", "find_music", "read_value", "query_api", "reuse_saved_ui",
+                            "timer_start", "calendar_create", "calendar_clarify", "find_music", "read_value", "query_api", "build_data_tool", "reuse_saved_ui", "present_results",
                         ].contains(name) || (name == "manage_task" && input["operation"] as? String == "end")
                         if proof.needsInput || proof.finalCheck || name == "show_readings" || (input["complete"] as? Bool ?? (defaultsToComplete && requestShape != .dependent)) {
                             terminal = proof
@@ -564,6 +614,7 @@ final class AgentController {
                     } else {
                         terminal = nil
                     }
+                    if RequestRun.current?.awaitingPresentation == true { terminal = nil }
                     if let reason = failureReason { throw AppError.message(reason) }
                 } catch {
                     if revision != steeringRevision { break }
@@ -589,7 +640,7 @@ final class AgentController {
                         feedback["originalHumanText"] = String(currentRequest.prefix(640))
                         feedback["repair"] = "Choose a verbatim quote from the actual human instruction including its typos. Keep the interpreted duration separate."
                     }
-                    if let evidence = sourceEvidence, ["query_api", "read_value"].contains(name),
+                    if let evidence = sourceEvidence, ["query_api", "build_data_tool", "read_value"].contains(name),
                         let raw = (input["source"] as? [String: Any])?["url"] as? String ?? input["url"] as? String,
                         raw == evidence.url, Date().timeIntervalSince(evidence.checked) < 60 {
                         feedback["observedSourceData"] = evidence.preview

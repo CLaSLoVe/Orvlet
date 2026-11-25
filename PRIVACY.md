@@ -8,7 +8,7 @@
 
 **按习惯排序会发送什么？** 打开、操作、隐藏及拖动的衰减统计保存在本机；手动排序优先。已配置 Jev 时，后台排序可向 api.typesafe.ai 发送匿名任务类别、播放／计时／完成状态和汇总习惯分数。排序不发送任务标题、网页内容、网址或聊天记录。没有可用密钥或网络时使用本地排序，直接控制无需等待模型。
 
-**网页和日历呢？** 原网页仍会正常联网并使用自己的 Cookie。广告过滤不能阻止所有追踪。日程只在获得系统授权后写入 Apple 日历，关闭结果卡片不会删除事件。
+**网页和日历呢？** 原网页会正常联网并使用 Cookie。内置 Chromium 默认使用临时会话，退出后清除该会话的网站登录。主动开启“记住网站登录”后，Chromium 才使用受 macOS 钥匙串保护的持久配置。广告过滤不能阻止所有追踪。日程只在获得系统授权后写入 Apple 日历，关闭结果卡片不会删除事件。
 
 **故障诊断保存什么？** 本机保留最近 150 条请求阶段、耗时、错误类别与任务标识，可在设置中复制。它们不包含对话内容、网页地址、生成代码、输入值或密钥。
 
@@ -24,7 +24,7 @@
 
 **What does habit-based ordering send?** Decaying aggregates of opens, controls, hides, and reorders stay on this Mac; manual ordering takes precedence. With Jev configured, background ordering may send anonymous task categories, playback/timer/completion state, and aggregate habit scores to api.typesafe.ai. Ranking sends no task titles, page content, URLs, or conversations. Without an available key or network it uses local ordering; direct controls never wait for a model.
 
-**What about websites and Calendar?** Original webpages make their own network requests and use their own cookies. Ad filtering does not block all tracking. Calendar writes require macOS permission; closing a result card does not delete the event.
+**What about websites and Calendar?** Original webpages make their own network requests and use cookies. Built-in Chromium uses a guest session by default and discards its website logins on quit. Enabling **Remember website logins** selects a persistent Chromium profile protected by macOS Keychain. Ad filtering does not block all tracking. Calendar writes require macOS permission; closing a result card does not delete the event.
 
 **What do diagnostics store?** The latest 150 stage, timing, error-category and task-identity events stay locally and can be copied in Settings. They contain no conversation text, page URLs, generated code, input values or keys.
 

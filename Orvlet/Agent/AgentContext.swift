@@ -53,6 +53,7 @@ enum AgentContext {
             "status": task.status, "playing": task.playing, "state": task.state,
             "purpose": String((task.intent ?? "").prefix(800)),
         ]
+        if let ids = task.artifactIDs { result["resultIDs"] = ids.map(\.uuidString) }
         if let surface = task.taskSurface {
             result["inputs"] = surface.fields
             result["state"] = displayState(task.liveValues ?? surface.state, source: surface.apiData)
@@ -63,8 +64,13 @@ enum AgentContext {
             }
             result["hasDefinition"] = true
             if let spec = surface.apiData {
+                let choices = spec.inputControls.filter { $0.kind == "select" }
+                if !choices.isEmpty {
+                    result["existingChoices"] = choices.map { ["key": $0.key, "label": $0.label, "current": task.state[$0.key] ?? ""] }
+                    result["choiceEdits"] = "These choices already have working bindings. For a visual edit that keeps or exposes them, use manage_task(revise_view)."
+                }
                 result["dataSource"] = ["kind": "publicAPI", "refreshSeconds": spec.refreshSeconds as Any? ?? NSNull()]
-                result["methodChanges"] = "To change the reading or background cadence, inspect the existing API definition, then load_tools(data) and query_api with its revised source. The host schedules source.refreshSeconds."
+                result["methodChanges"] = "To change the reading or background cadence, inspect the existing API definition, then load_tools(advanced_data) and query_api with its revised source. The host schedules source.refreshSeconds."
             }
         }
         if let queue = task.musicQueue {

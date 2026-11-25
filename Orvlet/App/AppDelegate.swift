@@ -4,22 +4,24 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    let model: AppModel = {
+    let model: AppModel
+    override convenience init() {
         #if DEBUG
-            if let isolated = DebugHarness.pipelineModel() { return isolated }
+            if let isolated = DebugHarness.pipelineModel() { self.init(model: isolated); return }
         #endif
-        return AppModel()
-    }()
+        self.init(model: AppModel())
+    }
+    init(model: AppModel) { self.model = model; super.init() }
     var panel: ShellPanel!
     // Task details stay attached to the compact shell; command input is a separate panel.
-    private var detailEdge: DetailEdge?
     private var lastOrientation: CompactLayout?
+    private var wasPinned = false
     private var lastContentSize: NSSize?
     var ambientFrame: NSRect { model.shellLayout.compact }
-    private var compactAnchor: NSPoint?
     // The compact strip's parking position is independent of expanded geometry.
     // Only an intentional window move (not resizing or fitting details) moves it.
-    private var compactHome: NSPoint?
+    private var compactHome: NSRect?
+    private var lastShowingWeb = false
     private var outsideMonitor: Any?
     private var localMonitor: Any?
     var statusItem: NSStatusItem!
@@ -42,11 +44,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let settingsFade = CalmMotionDriver()
     private var targetShellLayout: ShellLayout?
     private var targetCommandFrame: NSRect?
+    private var finishedLaunching = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        guard !finishedLaunching else { return }
+        finishedLaunching = true
         #if DEBUG
+            NSApp.setActivationPolicy(CommandLine.arguments.contains("--background-checks") ? .prohibited : .accessory)
             if DebugHarness.beforeWindows(self) { return }
+        #else
+            NSApp.setActivationPolicy(.accessory)
         #endif
         let size = model.compactSize
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
@@ -65,20 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.isMovableByWindowBackground = false
         panel.isReleasedWhenClosed = false
         panel.delegate = self
-        panel.onMoveInteraction = { [weak self] active in
-            guard let self else { return }
-            self.userMoveActive = active
-            if active {
-                self.moveInterruptedAnimation = self.shellMotion.isRunning
-                self.shellMotion.cancel()
-                if self.moveInterruptedAnimation { self.targetShellLayout = nil }
-            }
-            self.model.controlInteraction(active)
-            if !active {
-                self.moveInterruptedAnimation = false
-                self.resize(to: self.model.windowSize)
-            }
-        }
+        panel.onMoveInteraction = { [weak self] in self?.windowMoveChanged($0) }
         let hosting = NSHostingView(rootView: ContentView(model: model))
         // The panel owns its size. Intrinsic hosting constraints otherwise fight animated shrinking.
         hosting.sizingOptions = []
@@ -92,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         container.addSubview(hosting)
         panel.contentView = container
         installDismissalMonitors()
+        model.onParkCapsule = { [weak self] in self?.parkCapsuleInCorner() }
         model.onResize = { [weak self] size in self?.resize(to: size) }
         model.onStackOpacity = { [weak self] value in
             guard let self, !self.panel.ignoresMouseEvents else { return }
@@ -156,93 +151,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !model.visibleTasks.isEmpty { showShell(true) }
     }
 
-    func resize(to size: NSSize) {
+    func parkCapsuleInCorner(in visibleFrame: NSRect? = nil) {
+        guard let panel, let screen = visibleFrame ?? panel.screen?.visibleFrame else { return }
+        let corner = DockCorner(anchor: compactHome ?? panel.frame, screen: screen)
+        compactHome = corner.align(model.compactSize, to: screen.insetBy(dx: 8, dy: 8))
+    }
+
+    func resize(to size: NSSize, in visibleFrame: NSRect? = nil) {
         guard let panel, !userResizeActive, !userMoveActive else { return }
         programmaticResizeCount += 1
         defer { programmaticResizeCount -= 1 }
         let compact = model.compactSize
-        let origin =
-            (!model.shellExpanded ? compactHome : nil)
-            ?? compactAnchor ?? NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
-        if compactHome == nil { compactHome = origin }
-        // Initial expansion belongs to the compact entry point. After a user
-        // move/resize, the actual visible shell owns the display, including when
-        // the hidden full strip would lie across a display boundary.
-        let placedFrame =
-            model.shellExpanded
-            ? targetShellLayout.flatMap { $0.edge == nil ? nil : $0.frame } : nil
-        let anchorCenter =
-            placedFrame.map { NSPoint(x: $0.midX, y: $0.midY) }
-            ?? (model.compactRailTucked
-                ? NSPoint(x: panel.frame.midX, y: panel.frame.midY)
-                : NSPoint(x: origin.x + compact.width / 2, y: origin.y - compact.height / 2))
-        let screen =
-            NSScreen.screens.first(where: { $0.frame.contains(anchorCenter) })?.visibleFrame
+        let home = compactHome ?? panel.frame
+        let reference = model.compactRailTucked && model.shellLayout.edge != nil ? model.shellLayout.content : home
+        let center = NSPoint(x: reference.midX, y: reference.midY)
+        let screen = visibleFrame ?? NSScreen.screens.first(where: { $0.frame.contains(center) })?.visibleFrame
             ?? panel.screen?.visibleFrame ?? NSScreen.main!.visibleFrame
-        compactAnchor = origin
-        let rawAnchor = NSRect(x: origin.x, y: origin.y - compact.height, width: compact.width, height: compact.height)
-        let anchor = NSRect(
-            x: model.compactRailTucked
-                ? rawAnchor.minX : min(max(screen.minX + 8, origin.x), screen.maxX - compact.width - 8),
-            y: model.compactRailTucked
-                ? rawAnchor.minY
-                : min(max(screen.minY + 8, origin.y - compact.height), screen.maxY - compact.height - 8),
-            width: compact.width, height: compact.height)
-        if !model.shellExpanded || lastOrientation != model.settings.compactLayout { detailEdge = nil }
-        lastOrientation = model.settings.compactLayout
+        let anchor = DockCorner(anchor: home, screen: screen).align(compact, to: home)
+        if compactHome == nil { compactHome = anchor }
         let requested = model.shellContentSize
-        var layout = ShellLayout.place(
-            anchor: anchor, content: requested, orientation: model.settings.compactLayout, screen: screen,
-            edge: detailEdge)
-        if let target = targetShellLayout, model.shellExpanded, requested == lastContentSize,
-            target.compact == rawAnchor,
-            target.edge == detailEdge
-        {
-            // Moving the whole shell also moves its internal anchor; a data refresh must not realign it.
-            layout = ShellLayout(
-                frame: rawAnchor.union(target.content), compact: rawAnchor, content: target.content, edge: target.edge)
+        var layout = ShellLayout.place(anchor: anchor, content: requested,
+                                       orientation: model.settings.compactLayout, screen: screen)
+        if model.compactRailTucked, let requested {
+            let previous = targetShellLayout ?? model.shellLayout
+            let card = previous.edge == nil ? layout.content : previous.content
+            layout = ShellLayout.pinned(anchor: anchor, detail: card, size: requested, screen: screen,
+                alignToCapsule: !wasPinned)
+        } else if let target = targetShellLayout, model.shellExpanded, requested == lastContentSize,
+           lastShowingWeb == model.showingWeb, lastOrientation == model.settings.compactLayout,
+           target.edge == layout.edge, target.corner == layout.corner,
+           target.frame.width <= screen.width - 16, target.frame.height <= screen.height - 16,
+           target.compact.size == compact, (target.compactViewport != nil) == model.compactRailTucked {
+            // A refresh after live resize must keep the exact frame the person released.
+            layout = target.fitting(screen)
         }
-        if model.compactRailTucked { layout = layout.tuckingCompact() }
-        layout = layout.fitting(screen)
-        compactAnchor = NSPoint(x: layout.compact.minX, y: layout.compact.maxY)
+        let stayingPinned = wasPinned && model.compactRailTucked
+        wasPinned = model.compactRailTucked
+        lastShowingWeb = model.showingWeb
+        lastOrientation = model.settings.compactLayout
         lastContentSize = requested
-        detailEdge = layout.edge
+        let minimum: NSSize
         if model.showingWeb && !model.taskShelfVisible {
             panel.styleMask.insert(.resizable)
             let chrome = layout.chromeSize
-            panel.minSize = NSSize(
-                width: max(AppModel.minimumWebSize.width + chrome.width, layout.presentedCompact.width),
+            minimum = NSSize(
+                width: max(min(AppModel.minimumWebSize.width, layout.content.width) + chrome.width, layout.presentedCompact.width),
                 height: max(
-                    AppModel.minimumWebSize.height + chrome.height
+                    min(AppModel.minimumWebSize.height, model.windowSize.height) + chrome.height
                         + (model.feedback == nil ? 0 : model.feedbackSize.height), layout.presentedCompact.height))
         } else {
             panel.styleMask.remove(.resizable)
-            panel.minSize = NSSize(width: 44, height: 30)
+            minimum = NSSize(width: 44, height: 30)
         }
         if targetShellLayout != layout || (!shellMotion.isRunning && panel.frame != layout.frame) {
             let start = model.shellLayout
             targetShellLayout = layout
-            let visibleContent = layout.edge != nil ? layout.content : start.content
-            let visibleEdge = layout.edge ?? start.edge
             let duration =
-                model.motionReduced || !panel.isVisible
+                model.motionReduced || !panel.isVisible || (stayingPinned && !shellMotion.isRunning)
                 ? 0 : (layout.edge == nil ? CalmMotion.collapse : CalmMotion.expand)
+            // AppKit enforces minSize immediately. Install the webpage minimum once the
+            // transition lands so opening from a small card has no initial size jump.
+            panel.minSize = NSSize(width: 44, height: 30)
+            if duration > 0 { applyShellLayout(layout.transitioning(from: start, progress: 0)) }
             shellMotion.run(
                 duration: duration, window: panel,
                 update: { [weak self] t in
-                    guard let self else { return }
-                    // Content is laid out once at its real size and revealed by the
-                    // native window clip. Never squeeze/reflow a live webpage per frame.
-                    let presentation =
-                        t >= 1
-                        ? layout
-                        : ShellLayout(
-                            frame: CalmMotion.blend(start.frame, layout.frame, t),
-                            compact: CalmMotion.blend(start.compact, layout.compact, t),
-                            content: visibleContent, edge: visibleEdge,
-                            compactViewport: CalmMotion.blend(start.presentedCompact, layout.presentedCompact, t))
-                    self.applyShellLayout(presentation)
-                })
+                    self?.applyShellLayout(layout.transitioning(from: start, progress: t))
+                }, completion: { [weak panel] in panel?.minSize = minimum })
+        } else if !shellMotion.isRunning {
+            panel.minSize = minimum
         }
         panel.hasShadow = true
         panel.contentView?.layer?.cornerRadius = 16
@@ -296,28 +273,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if notification.object as? NSWindow === panel { model.stackHasKeyboardFocus = false }
     }
 
+    func windowMoveChanged(_ active: Bool) {
+        userMoveActive = active
+        if active {
+            moveInterruptedAnimation = shellMotion.isRunning
+            shellMotion.cancel()
+            if moveInterruptedAnimation { targetShellLayout = nil }
+        } else {
+            // AppKit may deliver the last move notification after mouse-up.
+            synchronizeWindowMove()
+            moveInterruptedAnimation = false
+        }
+        model.controlInteraction(active)
+        if !active { model.onResize?(model.windowSize) }
+    }
+
     func windowDidMove(_ notification: Notification) {
         guard notification.object as? NSWindow === panel, programmaticResizeCount == 0, !userResizeActive else {
             return
         }
-        let wasAnimating = shellMotion.isRunning
-        shellMotion.cancel()
+        synchronizeWindowMove()
+    }
+
+    private func synchronizeWindowMove() {
         let delta = NSPoint(
             x: panel.frame.minX - model.shellLayout.frame.minX, y: panel.frame.minY - model.shellLayout.frame.minY)
+        guard delta != .zero else { return }
+        let wasAnimating = shellMotion.isRunning
+        shellMotion.cancel()
         if model.shellExpanded, let home = compactHome {
-            compactHome = NSPoint(x: home.x + delta.x, y: home.y + delta.y)
+            compactHome = home.offsetBy(dx: delta.x, dy: delta.y)
         }
         var layout = model.shellLayout.translated(x: delta.x, y: delta.y)
         layout.frame = panel.frame
         model.shellLayout = layout
         targetShellLayout = wasAnimating || moveInterruptedAnimation ? nil : layout
-        compactAnchor = NSPoint(x: layout.compact.minX, y: layout.compact.maxY)
-        if !model.shellExpanded { compactHome = compactAnchor }
+        if !model.shellExpanded { compactHome = layout.compact }
         if wasAnimating { resize(to: model.windowSize) }
     }
 
     func dismissDetails(at point: NSPoint) {
-        guard !model.menuTracking else { return }
+        guard !model.menuTracking, !model.sourceIsFullscreen else { return }
         if model.commandPanelVisible {
             if commandPanel?.frame.contains(point) == true { return }
             model.selectChat(false, restoreFocus: false)
@@ -354,6 +350,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // the next interaction; never replay a delayed click after it.
             WindowDragArea.DragView.cancelPendingClicks()
             if event.type == .keyDown {
+                if event.window === self.panel && event.keyCode == 53 {
+                    if self.model.sourceIsFullscreen { self.model.activeWindowPlayer?.exit(); return nil }
+                    if self.model.editingWebAddress { return event }
+                }
                 if let input = self.commandPanel, event.window === input,
                     event.keyCode == 36 || event.keyCode == 76,
                     event.modifierFlags.intersection([.command, .control, .option, .shift]) == .option,
@@ -409,8 +409,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowWillStartLiveResize(_ notification: Notification) {
-        guard notification.object as? NSWindow === panel, programmaticResizeCount == 0 else { return }
-        shellMotion.cancel()
+        guard notification.object as? NSWindow === panel, programmaticResizeCount == 0,
+              model.showingWeb, !model.taskShelfVisible else { return }
+        if shellMotion.isRunning, let target = targetShellLayout {
+            shellMotion.cancel()
+            model.shellLayout = target.resized(to: panel.frame)
+        }
         targetShellLayout = nil
         userResizeActive = true
         model.controlInteraction(true)
@@ -425,6 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         lastContentSize = model.shellContentSize
         userResizeActive = false
         model.controlInteraction(false)
+        model.onResize?(model.windowSize)
     }
     func windowDidResize(_ notification: Notification) {
         guard notification.object as? NSWindow === panel, userResizeActive, programmaticResizeCount == 0 else { return }
@@ -434,9 +439,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let layout = model.shellLayout.resized(to: panel.frame)
         model.shellLayout = layout
         targetShellLayout = layout
-        compactAnchor = NSPoint(x: layout.compact.minX, y: layout.compact.maxY)
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard model.systemBrowserHost.isRunning || NativeChromium.running else { return .terminateNow }
+        Task {
+            await model.systemBrowserHost.shutdown()
+            await model.nativeBrowserHost.shutdown()
+            NativeChromium.shutdown()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
     func applicationWillTerminate(_ notification: Notification) {
         if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
@@ -444,6 +458,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.connectionCheckTask?.cancel()
         model.saveSession(force: true)
         model.persistSideTasks()
+        model.handoffSource?.close()
+        for browser in model.liveBrowsers { browser.dispose() }
+        model.systemBrowserHost.stop()
+        model.nativeBrowserHost.stop()
         shortcut.unregister()
     }
     func registerShortcut() {
@@ -451,6 +469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             shortcut.register(model.settings.shortcut) ? "Ready" : "Shortcut is in use. Choose another combination."
     }
     @objc func askOrvlet() { model.selectChat(true) }
+    @objc func openNativeAddress() { model.requestAddress() }
     private func makeCommandPanel() -> ShellPanel {
         let window = ShellPanel(
             contentRect: NSRect(x: 0, y: 0, width: 440, height: model.commandWindowHeight),

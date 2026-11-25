@@ -3,11 +3,30 @@ import WebKit
 
 @MainActor
 extension AppModel {
+    var visibleSourceBrowser: BrowserController? {
+        if let handoff = visibleHandoff { return handoff.systemBrowser }
+        return liveBrowsers.first { $0.id == selectedSideTask?.id }
+    }
+    var visibleWindowPlayer: WindowPlayer? {
+        guard showingWeb, !taskShelfVisible else { return nil }
+        if let source = visibleHandoff { return source.systemBrowser?.windowPlayer ?? source.windowPlayer }
+        return visibleSourceBrowser?.windowPlayer
+    }
+    var sourceIsFullscreen: Bool { activeWindowPlayer != nil && activeWindowPlayer === visibleWindowPlayer }
+
+    func trackSourcePointer(y: CGFloat?) {
+        let controlsExposed = pointerNearSourceControls || (!floatingSourceControls && !sourceIsFullscreen)
+        let controlsHeight: CGFloat = sourceIsFullscreen ? 46 : 60
+        let revealDepth: CGFloat = controlsExposed ? controlsHeight : 8
+        let inside = y.map { $0 >= 0 && $0 <= revealDepth } ?? false
+        if inside != pointerNearSourceControls { pointerNearSourceControls = inside }
+    }
+
     func pointerChanged(_ inside: Bool) {
         guard pointerInside != inside else { return }
         pointerInside = inside
         refreshStackAttention()
-        if !inside { previewHovered = false }
+        if !inside { previewHovered = false; trackSourcePointer(y: nil) }
         refreshHover()
     }
     func previewHoverChanged(_ inside: Bool) {
@@ -28,7 +47,7 @@ extension AppModel {
     func refreshHover() {
         hoverTask?.cancel()
         hoverTask = nil
-        guard !taskShelfVisible, !pinned, !chatVisible, !clickExpanded else { return }
+        guard !taskShelfVisible, !pinned, !chatVisible, !clickExpanded, !editingWebAddress else { return }
         let entering = pointerInside
         if entering {
             guard settings.expandOnHover, previewHovered, collapsed, !webURL.isEmpty, activeInteractions == 0 else {
@@ -46,7 +65,7 @@ extension AppModel {
                 }
                 try Task.checkCancellation()
                 guard !self.taskShelfVisible, !self.pinned, !self.chatVisible,
-                    self.pointerInside == entering
+                    !self.editingWebAddress, self.pointerInside == entering
                 else { return }
                 if entering {
                     guard self.settings.expandOnHover, self.previewHovered, self.activeInteractions == 0,
@@ -54,7 +73,7 @@ extension AppModel {
                     else { return }
                     self.reveal(preview: true)
                 } else {
-                    self.collapse()
+                    if !self.sourceIsFullscreen { self.collapse() }
                 }
             } catch {}
         }
@@ -67,14 +86,22 @@ extension AppModel {
         onResize?(windowSize)
         onShow?()
     }
-    func collapse() {
+    func collapse(keepingSource: Bool = false) {
+        if !keepingSource { handoffSource = nil }
         taskShelfVisible = false
-        pinned = false
         clickExpanded = false
         hoverTask?.cancel()
         collapsed = true
         webExpanded = false
+        pinned = false
         onResize?(windowSize)
+    }
+    func openComposerOrUnreadReply() {
+        if let owner = latestUnreadReply?.taskID {
+            openTaskConversation(owner)
+        } else {
+            selectChat(!commandPanelVisible)
+        }
     }
     func selectChat(_ value: Bool, restoreFocus: Bool = true, editingInterface: UUID? = nil, conversation: UUID? = nil)
     {
@@ -95,7 +122,9 @@ extension AppModel {
         commandPanelVisible = value
         chatVisible = value
         if value {
-            hasUnreadReply = false
+            if let conversationTaskID {
+                unreadReplyIDs.subtract(messages.lazy.filter { $0.taskID == conversationTaskID }.map(\.id))
+            }
             dismissFeedback()
             commandFocusRequest += 1
         }

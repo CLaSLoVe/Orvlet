@@ -121,7 +121,8 @@ class CheckRunnerReports(unittest.TestCase):
                 self.assertEqual(runner.verify_report(path, 0), 1)
 
     def test_default_runner_never_selects_live_scenarios(self):
-        self.assertEqual(set(runner.SUITES), {'model-api', 'local-data', 'builtin-cards', 'setup', 'task-history', 'self', 'consistency', 'side-screen', 'command-window', 'listening', 'music', 'motion', 'protection'})
+        self.assertEqual(set(runner.BACKGROUND_SUITES), {'state-machines', 'model-api'})
+        self.assertTrue(set(runner.BACKGROUND_SUITES).issubset(runner.SUITES))
 
 
 class MCPInterface(unittest.TestCase):

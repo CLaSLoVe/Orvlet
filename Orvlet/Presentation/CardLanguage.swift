@@ -2,7 +2,7 @@ import Foundation
 import NaturalLanguage
 
 extension CardMarkup {
-    static func localeIdentifier(for preference: String) -> String? {
+    nonisolated static func localeIdentifier(for preference: String) -> String? {
         let name = preference.trimmingCharacters(in: .whitespacesAndNewlines)
         let english = Locale(identifier: "en")
         if name.caseInsensitiveCompare("English") == .orderedSame { return "en" }

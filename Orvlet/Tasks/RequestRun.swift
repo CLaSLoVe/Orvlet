@@ -5,14 +5,33 @@ import Foundation
 final class RequestRun {
     @TaskLocal static var current: RequestRun?
     unowned let model: AppModel
+    let goalID = UUID()
+    let runID = UUID()
+    private(set) var resultIDs: [UUID] = []
+    var publishedViewIDs = Set<UUID>()
+    private(set) var awaitingPresentation = false
+    func retainResult(_ id: UUID, needsView: Bool = false) {
+        if !resultIDs.contains(id) { resultIDs.append(id) }
+        model.work.link(id,to:goalID)
+        if needsView { awaitingPresentation = true }
+    }
+    func markPresented(_ ids: [UUID]) {
+        for id in ids { retainResult(id, needsView: false) }
+        // Delivery belongs to the goal. An interactive tool can use several
+        // retained sources without exposing each source as a separate view.
+        awaitingPresentation = false
+    }
     lazy var agent = AgentController(model: model)
     var context: TaskRequestContext?
     var reviewedReadings = Set<String>()
+    var editsInterface = false
     var conversationReference: UUID?
     var assignment: CardAssignment?
+    var attachments: [String: String] = [:]
     var initialFamilies = Set<String>()
     let forceNewTask: Bool
     let initialCandidates: Set<UUID>
+    let initialResources: Set<UUID>
     var ambientID: UUID?
     var receivedAt = Date()
     var intent = ""
@@ -24,6 +43,7 @@ final class RequestRun {
     init(model: AppModel, forceNewTask: Bool = false) {
         self.model = model
         self.forceNewTask = forceNewTask
+        initialResources = Set((model.sideTasks + model.archivedTaskHistory).map(\.id))
         initialCandidates = forceNewTask ? [] : Set((model.sideTasks + model.archivedTaskHistory).map(\.id))
     }
     func owns(_ id: UUID) -> Bool {

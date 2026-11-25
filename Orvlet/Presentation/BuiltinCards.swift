@@ -100,7 +100,7 @@ struct DataCardPreset: Codable {
             "detailKeys": ["type": "array", "items": ["type": "string"], "description": "Only useful supporting readings, in display order. Omit identity proof, duplicate metadata and unformatted timestamps."],
             "primaryKey": [
                 "type": "string",
-                "description": "Source field or calculated output answering the request. Shared by the capsule and expanded hero.",
+                "description": "Source field or calculated output answering the request. For a quantitative comparison include the deciding measurement and unit or a labeled difference. Shared by the capsule and expanded hero.",
             ],
             "unitKey": [
                 "type": "string", "description": "Optional source field containing the unit or quote currency.",
@@ -161,26 +161,12 @@ enum BuiltinCards {
             let date = runtime.sources.first {
                 $0.format == .date && ($0.timeZone ?? TimeZone.current.identifier) == zone
             }
-            let zones = Array(
-                Set([
-                    zone, TimeZone.current.identifier, "UTC", "Asia/Hong_Kong", "Asia/Shanghai", "Asia/Tokyo",
-                    "Asia/Singapore", "Asia/Seoul", "Asia/Kolkata", "Asia/Dubai", "Europe/London", "Europe/Paris",
-                    "Europe/Berlin", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
-                    "America/Toronto", "America/Sao_Paulo", "Australia/Sydney", "Pacific/Auckland",
-                ])
-            ).sorted()
             let heading =
                 interactive
                 ? "<label class='clock-zone'><select aria-label='Time zone " + String(index + 1)
                     + "' data-field='clockZone" + String(index)
-                    + "' data-change='configureClock'>"
-                    + zones.map {
-                        "<option value='" + escape($0) + "'>"
-                            + escape(
-                                ($0.split(separator: "/").last.map(String.init) ?? $0).replacingOccurrences(
-                                    of: "_", with: " "))
-                            + "</option>"
-                    }.joined() + "</select></label>" : "<small class='clock-label'>" + escape(label) + "</small>"
+                    + "' data-change='configureClock' data-catalog='timeZone'><option value='" + escape(zone)
+                    + "'>" + escape(label) + "</option></select></label>" : "<small class='clock-label'>" + escape(label) + "</small>"
             return "<div class='clock-place'>" + heading + "<strong class='clock-time' data-bind='" + clock.key
                 + "'></strong>"
                 + (date.map { "<span class='calm-description' data-bind='" + $0.key + "'></span>" } ?? "") + "</div>"

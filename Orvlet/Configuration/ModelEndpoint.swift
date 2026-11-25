@@ -156,3 +156,31 @@ struct Endpoint: Codable, Equatable {
         return parts.url
     }
 }
+
+
+extension Endpoint {
+    /// Official GPT-6 tool workflows use Responses. Leave custom providers and
+    /// explicitly pinned URLs untouched; never downgrade reasoning to bypass a 400.
+    var toolCompatible: Endpoint {
+        guard completionURL?.host == "api.openai.com", (model.lowercased().hasPrefix("gpt-6-") || model.lowercased().hasPrefix("gpt-6.")),
+            options.api == .chatCompletions, !options.exactURL else { return self }
+        var endpoint = self
+        endpoint.options.api = .responses
+        if var overrides = try? options.object(options.parameters, label: "Request parameters"), !overrides.isEmpty {
+            if let effort = overrides.removeValue(forKey: "reasoning_effort") {
+                var reasoning = overrides["reasoning"] as? [String: Any] ?? [:]
+                if reasoning["effort"] == nil { reasoning["effort"] = effort }
+                overrides["reasoning"] = reasoning
+            }
+            for field in ["max_completion_tokens", "max_tokens"] {
+                if let value = overrides.removeValue(forKey: field), overrides["max_output_tokens"] == nil {
+                    overrides["max_output_tokens"] = value
+                }
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: overrides, options: .sortedKeys) {
+                endpoint.options.parameters = String(decoding: data, as: UTF8.self)
+            }
+        }
+        return endpoint
+    }
+}

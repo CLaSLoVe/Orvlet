@@ -63,3 +63,17 @@ docs/assets/generative-ui.zh-CN.svg
 # App-owned local credentials, including atomic-write files
 .credentials*
 credentials*
+
+# Local studies, generated deliverables, and publishing helpers
+/output/
+/tmp/
+/NativeChromium/*Probe.mm
+/docs/architecture/*-audit-*.md
+/docs/architecture/*-validation.md
+.githooks/pre-push
+/scripts/push*.sh
+/scripts/publish*.sh
+/scripts/*study.py
+/scripts/analyze-*.py
+/scripts/*-pilot.py
+*.crx

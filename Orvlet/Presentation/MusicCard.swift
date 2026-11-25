@@ -22,7 +22,7 @@ struct MusicCard: View {
                 Text(loading ? queue.current?.title ?? task.title : task.title)
                     .font(.system(size: 19, weight: .semibold, design: .rounded))
                     .lineLimit(2).frame(height: 48, alignment: .topLeading)
-                Text(loading ? "Opening on YouTube…" : state.ad ? "YouTube · Advertisement" : subtitle)
+                Text(loading ? "Opening…" : state.ad ? sourceName + " · Advertisement" : subtitle)
                     .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             VStack(spacing: 3) {
@@ -40,6 +40,7 @@ struct MusicCard: View {
                     )
                     .controlSize(.mini).tint(tint).disabled(loading)
                     .accessibilityLabel("Playback position").accessibilityIdentifier("music-seek")
+                    .windowDragControl()
                     HStack {
                         Text(MusicPlayback.time(seeking ? seekPosition : state.position))
                         Spacer()
@@ -49,6 +50,7 @@ struct MusicCard: View {
                     Text(
                         state.ad
                             ? "Playback will continue after the ad"
+                            : model.musicErrors[task.id] != nil ? "Playback unavailable"
                             : loading || !state.ready ? "Connecting…" : state.live ? "Live" : "Playback"
                     )
                     .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
@@ -60,10 +62,12 @@ struct MusicCard: View {
                     model.musicControl(task.id, operation: state.looping ? "unloop" : "loop")
                 }.disabled(loading || !state.seekable).accessibilityIdentifier("music-repeat")
                 Spacer(minLength: 0)
-                icon("Previous track", symbol: "backward.end.fill") {
-                    model.musicControl(task.id, operation: "previous")
+                if task.musicQueue != nil {
+                    icon("Previous track", symbol: "backward.end.fill") {
+                        model.musicControl(task.id, operation: "previous")
+                    }
+                    .disabled(loading || queue.previous.isEmpty).accessibilityIdentifier("music-previous")
                 }
-                .disabled(loading || queue.previous.isEmpty).accessibilityIdentifier("music-previous")
                 Button {
                     model.musicControl(task.id, operation: loading ? "pause" : "toggle")
                 } label: {
@@ -77,8 +81,11 @@ struct MusicCard: View {
                         loading ? "Stop loading" : task.playing ? "Pause" : "Play"
                     )
                     .accessibilityIdentifier("music-playback")
-                icon("Next track", symbol: "forward.end.fill") { model.musicControl(task.id, operation: "next") }
-                    .disabled(loading || queue.upcoming.isEmpty).accessibilityIdentifier("music-next")
+                    .windowDragControl()
+                if task.musicQueue != nil {
+                    icon("Next track", symbol: "forward.end.fill") { model.musicControl(task.id, operation: "next") }
+                        .disabled(loading || queue.upcoming.isEmpty).accessibilityIdentifier("music-next")
+                }
                 Spacer(minLength: 0)
                 icon("Volume", symbol: state.muted || state.volume == 0 ? "speaker.slash" : "speaker.wave.2") {
                     volume = state.volume
@@ -104,7 +111,7 @@ struct MusicCard: View {
                         }.padding(14)
                     }
             }
-            VStack(alignment: .leading, spacing: 4) {
+            if task.musicQueue != nil { VStack(alignment: .leading, spacing: 4) {
                 Button {
                     if expanded {
                         model.musicQueueExpanded.remove(task.id)
@@ -122,6 +129,7 @@ struct MusicCard: View {
                     }.frame(height: 24).contentShape(Rectangle())
                 }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
                     .accessibilityIdentifier("music-queue")
+                    .windowDragControl()
                 if expanded {
                     if queue.upcoming.isEmpty {
                         Text("Nothing queued yet").font(.system(size: 11)).foregroundStyle(.secondary).frame(height: 30)
@@ -161,15 +169,24 @@ struct MusicCard: View {
                                 }
                             }
                         }.frame(height: Double(min(queue.upcoming.count, 4)) * 42)
+                            .windowDragControl()
                     }
                 }
             }
+            }
             if let error = model.musicErrors[task.id] {
-                Text(error).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
-                    .accessibilityIdentifier("music-error")
+                HStack(spacing:8) {
+                    Text(error).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+                        .accessibilityIdentifier("music-error")
+                    Spacer(minLength:0)
+                    Button("Open page") { model.openTaskFromDoubleClick(task.id) }
+                        .buttonStyle(.plain).font(.system(size:11)).foregroundStyle(tint)
+                        .windowDragControl()
+                }
             }
         }.padding(.horizontal, 16).padding(.vertical, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .windowDraggableSurface()
             .onDisappear {
                 if seeking {
                     model.controlInteraction(false)
@@ -183,7 +200,11 @@ struct MusicCard: View {
     }
     private var subtitle: String {
         let text = state.subtitle.isEmpty ? queue.current?.subtitle ?? "" : state.subtitle
-        return text.isEmpty ? "YouTube" : text + " · YouTube"
+        return text.isEmpty ? sourceName : text + " · " + sourceName
+    }
+    private var sourceName: String {
+        let host = URL(string:task.sourceURL ?? "")?.host ?? "Player"
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
     }
     private func icon(_ label: String, symbol: String, active: Bool = false, action: @escaping () -> Void) -> some View
     {
@@ -192,5 +213,6 @@ struct MusicCard: View {
                 .foregroundStyle(active ? tint : .secondary)
                 .background(active ? model.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 8))
         }.buttonStyle(.plain).help(label).accessibilityLabel(label).accessibilityValue(active ? "On" : "")
+            .windowDragControl()
     }
 }

@@ -60,13 +60,17 @@ struct AppSettings: Codable {
     static let compactTaskLimits = 1...6
     var inactiveStackOpacity = 0.55
     var blockAds = true
+    var browserEngine = BrowserEngine.builtIn
     var shortcut = SummonShortcut.optionSpace
     var main = Endpoint()
     var profiles: [ModelProfile] = []
     var activeProfileID = "legacy"
+    var preferredModelProfiles: [String: String] = [:]
     var fastCredentialID: String? = nil
     var fast = Endpoint(baseURL: "https://api.typesafe.ai/v1", model: "jev-latest")
     var fastProtocol = "jev"
+    var fastKeyReference: String? = nil
+    var decisionConfigurations: [String: DecisionConfiguration] = [:]
     var useFast = true
     var autoAdapt = true
     var allowAgents = false
@@ -78,8 +82,9 @@ struct AppSettings: Codable {
     var resumePlaybackOnLaunch = false
     init() {}
     enum CodingKeys: String, CodingKey {
+        case fastKeyReference, decisionConfigurations, preferredModelProfiles
         case interfaceLanguage, profiles, activeProfileID, fastCredentialID, taskStartPolicy, compactLayout, compactTaskLimit,
-            inactiveStackOpacity, blockAds, shortcut, main, fast, fastProtocol, useFast, autoAdapt, allowAgents, theme,
+            inactiveStackOpacity, blockAds, browserEngine, shortcut, main, fast, fastProtocol, useFast, autoAdapt, allowAgents, theme,
             appearance, reduceMotion, expandOnHover, restoreLastSession, resumePlaybackOnLaunch
     }
     init(from decoder: Decoder) throws {
@@ -91,15 +96,19 @@ struct AppSettings: Codable {
         inactiveStackOpacity = min(
             1, max(0.1, try c.decodeIfPresent(Double.self, forKey: .inactiveStackOpacity) ?? 0.55))
         blockAds = try c.decodeIfPresent(Bool.self, forKey: .blockAds) ?? true
+        browserEngine = try c.decodeIfPresent(BrowserEngine.self, forKey: .browserEngine) ?? .builtIn
         shortcut = try c.decodeIfPresent(SummonShortcut.self, forKey: .shortcut) ?? .optionSpace
         main = try c.decodeIfPresent(Endpoint.self, forKey: .main) ?? Endpoint()
         profiles = try c.decodeIfPresent([ModelProfile].self, forKey: .profiles) ?? []
         activeProfileID = try c.decodeIfPresent(String.self, forKey: .activeProfileID) ?? "legacy"
+        preferredModelProfiles = try c.decodeIfPresent([String: String].self, forKey: .preferredModelProfiles) ?? [:]
         fastCredentialID = try c.decodeIfPresent(String.self, forKey: .fastCredentialID)
         fast =
             try c.decodeIfPresent(Endpoint.self, forKey: .fast)
             ?? Endpoint(baseURL: "https://api.typesafe.ai/v1", model: "jev-latest")
         fastProtocol = try c.decodeIfPresent(String.self, forKey: .fastProtocol) ?? "jev"
+        fastKeyReference = try c.decodeIfPresent(String.self, forKey: .fastKeyReference)
+        decisionConfigurations = try c.decodeIfPresent([String: DecisionConfiguration].self, forKey: .decisionConfigurations) ?? [:]
         useFast = true  // Migrate optional Jev configurations to the required dual-model setup.
         autoAdapt = try c.decodeIfPresent(Bool.self, forKey: .autoAdapt) ?? true
         allowAgents = try c.decodeIfPresent(Bool.self, forKey: .allowAgents) ?? false
@@ -136,6 +145,7 @@ extension AppSettings {
         inactiveStackOpacity = draft.inactiveStackOpacity
         taskStartPolicy = draft.taskStartPolicy
         blockAds = draft.blockAds
+        browserEngine = draft.browserEngine
         autoAdapt = draft.autoAdapt
         restoreLastSession = draft.restoreLastSession
         resumePlaybackOnLaunch = draft.resumePlaybackOnLaunch
@@ -143,10 +153,13 @@ extension AppSettings {
     mutating func applyModels(from draft: AppSettings) {
         profiles = draft.profiles
         activeProfileID = draft.activeProfileID
+        preferredModelProfiles = draft.preferredModelProfiles
         main = draft.main
         fast = draft.fast
         fastCredentialID = draft.fastCredentialID
         fastProtocol = draft.fastProtocol
+        fastKeyReference = draft.fastKeyReference
+        decisionConfigurations = draft.decisionConfigurations
         useFast = true
     }
 }

@@ -102,13 +102,18 @@ final class InterfaceMemory {
             ]
         }.prefix(8).map { $0 }
     }
+    func interactiveMethods(language: String) -> [[String: Any]] {
+        catalogue(language: language).filter { $0["interactive"] as? Bool == true }.prefix(8).map {
+            $0.filter { ["id", "purpose", "fields", "actions", "state_keys"].contains($0.key) }
+        }
+    }
     /// Semantic selection is made by the agent, never by title/keyword matching.
     var catalogue: [[String: Any]] { catalogue(language: nil) }
     func catalogue(language: String?) -> [[String: Any]] {
         recipes.filter { recipe in language.map { recipe.markup.matchesLanguage($0) } ?? true }.map {
             var entry: [String: Any] = [
                 "id": $0.id.uuidString, "purpose": $0.purpose, "kind": $0.kind.rawValue, "state_keys": $0.stateKeys,
-                "fields": $0.surface?.fields ?? [],
+                "fields": $0.surface?.fields ?? [], "interactive": $0.surface?.hasEditableOperation == true,
                 "actions": $0.surface?.actions.map(\.id) ?? $0.plan?.actions?.map(\.id) ?? [],
             ]
             if let spec = $0.surface?.apiData {

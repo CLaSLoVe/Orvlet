@@ -44,20 +44,23 @@ enum TaskVerification {
         guard checks.count <= 12 else { throw ToolArgumentError(path: "$.checks", issue: "use at most twelve representative action checks") }
         let actions = surface.actions.filter { $0.kind == .code }
         if required, !actions.isEmpty {
-            guard Set(actions.map(\.id)).isSubset(of: Set(checks.filter { $0.expectedError == nil }.map(\.action)))
-            else {
+            let missing = Set(actions.map(\.id)).subtracting(checks.filter { $0.expectedError == nil }.map(\.action))
+            guard missing.isEmpty else {
                 throw ToolArgumentError(path: "$.checks", issue:
-                    "An interactive tool needs checks for every code action: changed input and expected output. Do not test only the initial example."
+                    "Add a successful check for each missing action: \(missing.sorted().joined(separator: ", ")). Exercise a changed input, or for a state-only operation use empty input and expect the changed output."
                 )
             }
             for action in actions where !surface.fields.isEmpty && origin == .generated {
                 guard
                     checks.contains(where: { check in
                         check.action == action.id && check.expectedError == nil
-                            && check.input.contains(where: { surface.state[$0.key] != $0.value })
+                            && (check.input.contains(where: { surface.state[$0.key] != $0.value })
+                                || check.input.isEmpty && check.expected.contains(where: {
+                                    surface.markup.bindingKeys.contains($0.key) && surface.state[$0.key] != $0.value
+                                }))
                     })
                 else {
-                    throw ToolArgumentError(path: "$.checks", issue: "Exercise " + action.id + " with at least one input different from its initial state.")
+                    throw ToolArgumentError(path: "$.checks", issue: "Exercise " + action.id + " with changed input, or verify a visible state change with empty input.")
                 }
             }
         }
@@ -101,12 +104,16 @@ enum TaskVerification {
                 throw ToolArgumentError(
                     path: path, issue: "Handler returned successfully but this check expected an error.")
             }
-            guard check.expected.allSatisfy({ output[$0.key] == $0.value }) else {
+            // Buttons and control_task apply a state patch. An action check may also
+            // assert that other displayed values survived the operation.
+            let result = surface.state.merging(input) { _, new in new }.merging(output) { _, new in new }
+            guard output.keys.contains(where: { check.expected[$0] != nil }),
+                check.expected.allSatisfy({ result[$0.key] == $0.value }) else {
                 let actual = output.filter { check.expected[$0.key] != nil }
                 throw ToolArgumentError(
                     path: path,
                     issue:
-                        "Handler \(check.action) returned \(JSONText.encode(actual)); expected \(JSONText.encode(check.expected)). Input is an object with declared keys [\(surface.fields.joined(separator: ", "))]. Read input[fieldName]. Correct the logic or expected result without changing the user requirement."
+                        "Handler \(check.action) returned \(JSONText.encode(actual)); resulting checked values are \(JSONText.encode(result.filter { check.expected[$0.key] != nil })). Expected \(JSONText.encode(check.expected)). Verify at least one returned output. Input is an object with declared keys [\(surface.fields.joined(separator: ", "))]. Read input[fieldName]. Correct the logic or expected result without changing the user requirement."
                 )
             }
         }
@@ -122,6 +129,7 @@ enum TaskVerification {
             )
         }
         if let spec = surface.runtime {
+            let runtimeID = model.work.view(id)?.selected ?? id
             for zone in intent.timeZones {
                 guard
                     spec.sources.contains(where: { $0.kind == .clock && $0.timeZone == zone && $0.format != .seconds })
@@ -131,12 +139,12 @@ enum TaskVerification {
                     )
                 }
             }
-            try await model.taskRuntime.verify(id)
+            try await model.taskRuntime.verify(runtimeID)
             if intent.behavior == .advancing && (spec.refresh?.intervalSeconds ?? 1) <= 3 {
                 let bound = surface.markup.bindingKeys
-                let before = model.taskRuntime.receipts[id]
+                let before = model.taskRuntime.receipts[runtimeID]
                 try await Task.sleep(for: .seconds(max(2.1, (spec.refresh?.intervalSeconds ?? 1) + 0.4)))
-                let after = model.taskRuntime.receipts[id]
+                let after = model.taskRuntime.receipts[runtimeID]
                 guard before?.generation == after?.generation,
                     before?.values.filter({ bound.contains($0.key) })
                         != after?.values.filter({ bound.contains($0.key) })

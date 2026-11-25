@@ -3,18 +3,37 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 configuration="${1:-Release}"
-case "$configuration" in Debug|Release) ;; *) echo 'Usage: scripts/build.sh [Debug|Release]' >&2; exit 2 ;; esac
+variant="${2:-}"
+case "$configuration" in Debug|Release) ;; *) echo 'Usage: scripts/build.sh [Debug|Release] [--system-browser]' >&2; exit 2 ;; esac
+build_settings=(CODE_SIGNING_ALLOWED=NO)
+signing_entitlements=Orvlet/Orvlet.entitlements
+output_app=dist/Orvlet.app
+case "$variant" in
+  '')
+    if [[ -d "$output_app/Contents/Frameworks/Chromium Embedded Framework.framework" ]]; then
+      output_app=dist/Orvlet-WebKit.app
+    fi
+    ;;
+  --system-browser)
+    # Direct local distribution: launching an installed browser cannot inherit App Sandbox.
+    # Keep the standard sandboxed build and Chromium's own renderer sandbox unchanged.
+    signing_entitlements=Orvlet/OrvletBrowserHost.entitlements
+    build_settings=(CODE_SIGNING_ALLOWED=NO ENABLE_APP_SANDBOX=NO "CODE_SIGN_ENTITLEMENTS=$signing_entitlements")
+    output_app=dist/Orvlet-Browser.app
+    ;;
+  *) echo 'Usage: scripts/build.sh [Debug|Release] [--system-browser]' >&2; exit 2 ;;
+esac
 python3 scripts/credential_check.py
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 fi
 xcodebuild -project Orvlet.xcodeproj -scheme Orvlet \
   -configuration "$configuration" -destination 'platform=macOS' \
-  -derivedDataPath .build CODE_SIGNING_ALLOWED=NO build
+  -derivedDataPath .build "${build_settings[@]}" build
 if [[ "$configuration" == Release ]]; then
   mkdir -p dist
-  ditto '.build/Build/Products/Release/Orvlet.app' 'dist/Orvlet.app'
-  python3 scripts/credential_check.py --bundle dist/Orvlet.app
+  ditto '.build/Build/Products/Release/Orvlet.app' "$output_app"
+  python3 scripts/credential_check.py --bundle "$output_app"
   signing_identity="${ORVLET_SIGNING_IDENTITY:-}"
   if [[ -z "$signing_identity" ]]; then
     available_identities="$(security find-identity -v -p codesigning | awk '/Apple Development:|Developer ID Application:/ {print $2}')"
@@ -24,7 +43,7 @@ if [[ "$configuration" == Release ]]; then
       signing_identity="-"
     fi
   fi
-  codesign --force --deep --sign "$signing_identity" --entitlements Orvlet/Orvlet.entitlements dist/Orvlet.app
-  codesign --verify --deep --strict dist/Orvlet.app
-  echo 'Local app: dist/Orvlet.app (locally signed; not notarized)'
+  codesign --force --deep --sign "$signing_identity" --entitlements "$signing_entitlements" "$output_app"
+  codesign --verify --deep --strict "$output_app"
+  echo "Local app: $output_app (locally signed; not notarized)"
 fi

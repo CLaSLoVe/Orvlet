@@ -12,6 +12,12 @@ extension AgentController {
         }
     }
 
+    private func requireAvailableSource(_ url: String) throws {
+        if recovery.sourceUnavailable(url) {
+            throw AppError.message("This data endpoint already failed in this request. Keep the verified alternative response and use another source recipe; loading a saved method does not make this endpoint available.")
+        }
+    }
+
     private static func dataRecipe(_ object: [String: Any], language: String) throws -> (spec: APIDataSpec, omitted: Int) {
         var source = object
         let raw = source.removeValue(forKey: "visuals")
@@ -26,16 +32,42 @@ extension AgentController {
 
     func executeDataTool(_ name: String, _ input: [String: Any], revision: Int) async throws -> [String: Any] {
         switch name {
+        case "inspect_results": return inspectResults(input)
+        case "present_results": return try presentResults(input)
+        case "operate_result": return try await operateResult(input)
+        case "build_data_tool":
+            guard let reference = input["source"] as? String, let sample = observations.sample(reference) else {
+                throw ToolArgumentError(path:"$.source",issue:"inspect the source first and use its observation handle")
+            }
+            sourceEvidence = sample
+            let spec = try DataToolPlan.compile(input, sample:sample)
+            let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(spec)) as! [String:Any]
+            do {
+                return try await executeDataTool("query_api", ["title":input["title"] ?? "", "source":object], revision:revision)
+            } catch let issue as ToolArgumentError where issue.path == "$.source.calculation" {
+                let regex = try NSRegularExpression(pattern:#"results\[([0-9]+)\]\.expression"#)
+                let match = regex.firstMatch(in:issue.issue, range:NSRange(issue.issue.startIndex...,in:issue.issue))
+                let path = match.flatMap { Range($0.range,in:issue.issue) }.map { "$." + issue.issue[$0] } ?? "$.results"
+                throw ToolArgumentError(path:path,issue:issue.issue)
+            }
         case "inspect_api":
             guard let url = input["url"] as? String else { throw AppError.message("Provide a public JSON API URL.") }
+            try requireAvailableSource(url)
             let sample = try await model.apiData.sample(url: url, previous: sourceEvidence)
             try Task.checkCancellation()
             guard revision == steeringRevision else { return ["superseded": true] }
+            if requestedDelivery != .answer, !RequestedDelivery.hasAnswerCue(currentRequest),
+                requestIntent.placement?.layout == .answer || requestIntent.placement == nil,
+                model.activeRequest?.owner == nil {
+                requestedDelivery = .card
+            }
+            recovery.sourceSucceeded()
             sourceEvidence = sample
             var result: [String: Any] = ["observation": observations.retain(sample), "source": url,
                 "retrievedAt": ISO8601DateFormatter().string(from: sample.checked), "data": sample.preview]
+            result["next"] = "Use build_data_tool for an editable or derived result. Declare parameters and result expressions once; the host builds controls, state and both views."
             if observations.hasSeveralSources {
-                result["next"] = "If earlier sources only resolved a name, use read_value on the final identified record. For a result that combines measurements, bind each contributing observation in run_code, then present the receipt."
+                result["otherObservations"] = "Earlier observations remain available. Their count does not prescribe the interface: a parameterized tool may select one object at a time; a combined calculation must bind all contributing measurements."
             }
             return result
         case "show_readings":
@@ -43,6 +75,16 @@ extension AgentController {
                 (2...6).contains(rows.count) else { throw ToolArgumentError(path: "$.rows", issue: "supply two to six named readings") }
             var state: [String: String] = [:]
             var outputs: [TaskForm.Output] = []
+            var actions: [TaskSurfaceAction] = []
+            func appendRow(key: String, label: String, page: String?) {
+                var row = TaskForm.Output(key: key, label: String(label.prefix(80)))
+                if let page, let url = try? PublicDataClient.url(page) {
+                    let id = "open" + key
+                    actions.append(.init(id: id, kind: .openRecord, operation: url.absoluteString))
+                    row.sourceAction = id
+                }
+                outputs.append(row)
+            }
             var selected = Set<UUID>()
             for (index, row) in rows.enumerated() {
                 let key = "reading" + String(index)
@@ -57,7 +99,7 @@ extension AgentController {
                     let unit = (card.unitKey ?? primary.unitKey).flatMap { task.state[$0] } ?? primary.unit ?? ""
                     state[key] = value + (unit.isEmpty || value.hasSuffix(unit) ? "" : " " + unit)
                     let subject = card.displayNameKey.flatMap { task.state[$0] } ?? card.subject ?? task.title
-                    outputs.append(.init(key: key, label: String(subject.prefix(80))))
+                    appendRow(key: key, label: subject, page: spec.recordPagePointer == nil ? nil : task.state["recordPageURL"])
                     continue
                 }
                 guard let subject = row["subject"], let observation = row["observation"],
@@ -77,14 +119,25 @@ extension AgentController {
                 }
                 let unit = try row["unitPointer"].map(read) ?? row["unit"] ?? ""
                 state[key] = try read(pointer) + (unit.isEmpty ? "" : " " + unit)
-                outputs.append(.init(key: key, label: subject))
+                appendRow(key: key, label: subject, page: row["recordPagePointer"].flatMap { try? read($0) })
             }
-            // The capsule summarizes the entire comparison. Full labels and units
-            // stay next to their respective readings in the expanded rows.
-            let language = CardMarkup.localeIdentifier(for: model.settings.preferredInterfaceLanguage)
-            state["glance"] = language?.hasPrefix("zh") == true ? "\(outputs.count) 项" : "\(outputs.count) items"
-            let form = TaskForm(inputs: [], outputs: outputs, buttons: [], compactSubject: String(title.prefix(40)), compactKey: "glance")
-            let surface = TaskSurface(title: title, markup: try form.markup(), fields: [], actions: [], state: state)
+            // Use source order for both lines so each value stays with its label.
+            // When the pair cannot fit, show one labeled reading; all rows remain in the card.
+            let first = outputs[0]
+            var subject = first.label
+            var primary = first.key
+            if outputs.count == 2 {
+                let labels = outputs.map(\.label).joined(separator: " / ")
+                let readings = outputs.compactMap { state[$0.key] }.joined(separator: " / ")
+                if (labels as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 9, weight: .medium)]).width <= 80,
+                    (readings as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)]).width <= 80 {
+                    subject = labels
+                    primary = "glance"
+                    state[primary] = readings
+                }
+            }
+            let form = TaskForm(inputs: [], outputs: outputs, buttons: [], compactSubject: String(subject.prefix(40)), compactKey: primary)
+            let surface = TaskSurface(title: title, markup: try form.markup(), fields: [], actions: actions, state: state)
             try Task.checkCancellation()
             guard revision == steeringRevision else { return ["superseded": true] }
             try model.commitTaskSurface(surface, id: activeTaskID, ticket: interfaceTicket)
@@ -123,7 +176,7 @@ extension AgentController {
                 expectations[key] = expected
             }
             var source: [String: Any] = ["url": url, "fields": fields, "card": card, "expectations": expectations]
-            for key in ["updatedAtPointer", "updatedAtFormat", "refreshSeconds"] { source[key] = input[key] }
+            for key in ["recordPagePointer", "updatedAtPointer", "updatedAtFormat", "refreshSeconds"] { source[key] = input[key] }
             // read_value declares the identity roles explicitly. Bind a verified
             // identity/qualifier even when another name is an equally valid alias.
             let proofs = requestIntent.requirements.enumerated().compactMap { index, requirement -> [String: Any]? in
@@ -163,7 +216,9 @@ extension AgentController {
                 $0.id == activeTaskID && $0.taskSurface?.apiData != nil
             })?.taskSurface
             if retainedSurface?.apiData?.customLayout == true { spec.customLayout = true }
+            try requireAvailableSource(try spec.requestURL().absoluteString)
             let reading = try await model.apiData.acquire(spec, previous: sourceEvidence) { self.sourceEvidence = $0 }
+            recovery.sourceSucceeded()
             let state = reading.state
             let proofs = input["outcomeEvidence"] as? [[String: Any]] ?? []
             for (index, requirement) in requestIntent.requirements.enumerated() {
@@ -184,6 +239,18 @@ extension AgentController {
                 }
                 // Proof concerns actual extracted source fields, not an LLM's
                 // fragile ordinal mapping. Redundant echoes of the same actual value are not ambiguity.
+                // A map may report an identity as an object member name instead of
+                // repeating it as a scalar. Verify it in the actual response along a
+                // successfully extracted field path, never in a URL or generated label.
+                if let sample = sourceEvidence {
+                    let keys = spec.fields.flatMap { field -> [String] in
+                        guard let pointer = try? spec.expandedPointer(field.pointer) else { return [] }
+                        return APIDataSpec.reportedKeys(pointer, in: sample.response)
+                    }
+                    if keys.contains(where: { key in requirement.anyOf.contains { OutcomeEvidence.matches(key, expected:$0) } }) {
+                        continue
+                    }
+                }
                 let matches = spec.fields.filter { field in
                     state[field.key].map { value in
                         requirement.anyOf.contains { OutcomeEvidence.matches(value, expected: $0) }
@@ -219,8 +286,45 @@ extension AgentController {
                 try? JSONDecoder().decode(CardMarkup.self, from: JSONSerialization.data(withJSONObject: $0))
             }
             let retained = retainedSurface?.apiData?.customLayout == true && retainedSurface?.markup.matchesLanguage(model.settings.preferredInterfaceLanguage) == true ? retainedSurface?.markup : nil
-            let surface = try spec.surface(title: title, state: state, proposed: markup ?? retained, request: currentRequest)
-            try surface.markup.validateLanguage(model.settings.preferredInterfaceLanguage, path: markup == nil ? "$.source" : "$.markup")
+            try Task.checkCancellation()
+            guard revision == steeringRevision else { return ["superseded": true] }
+            retainedSnapshot = nil
+            retainedReading = spec.readingSummary(title: title, state: state)
+            // The result commits before rendering. A failed view cannot erase it,
+            // and later source operations never overwrite a sibling result.
+            if let run = RequestRun.current {
+                let replacement = resolvedResultView.flatMap { model.work.view($0)?.selected }
+                    .flatMap { model.work.artifact($0)?.native == nil ? $0 : nil }
+                let id = model.retainWorkResult(title: title, values: state, spec: spec, replacing: replacement, sample: sourceEvidence)
+                freshSourceLoaded = true
+                return ["verified":true, "result":id.uuidString, "title":title, "values":state,
+                    "retainedResults":run.resultIDs.map { result in
+                        ["id":result.uuidString, "title":model.work.artifact(result)?.title ?? ""]
+                    }, "next":"Continue the goal if needed. Use present_results to select separate, together or select views; no new execution is required."]
+            }
+            let surface: TaskSurface
+            do {
+                let candidate = try spec.surface(title: title, state: state, proposed: markup ?? retained, request: currentRequest)
+                if let layout = candidate.apiData?.card, layout.kind == .reading {
+                    let labels = spec.displayRows.filter { $0.key != layout.primaryKey }.map(\.label)
+                    try candidate.markup.validateMeasuredResult(primary: layout.primaryKey, subjects: [candidate.title] + labels, state: candidate.state, fieldPath: "$.source.card.primaryKey")
+                }
+                try candidate.markup.validateLanguage(model.settings.preferredInterfaceLanguage, path: markup == nil ? "$.source" : "$.markup")
+                #if DEBUG
+                if model.isLiveTest && CommandLine.arguments.contains("--reject-reading-layout") {
+                    throw ToolArgumentError(path: "$.markup", issue: "Injected presentation failure after verification")
+                }
+                #endif
+                surface = candidate
+            } catch {
+                guard retained == nil else { throw error }
+                var plain = spec
+                plain.visuals = nil
+                plain.customLayout = nil
+                // Keep the verified source, input contract, schedule and values in the same transaction.
+                surface = try plain.surface(title: title, state: state, request: currentRequest)
+                Diagnostics.record("verified_reading_fallback", ["taskID": activeTaskID.uuidString])
+            }
             try Task.checkCancellation()
             guard revision == steeringRevision else { return ["superseded": true] }
             // Commit on the main actor after verification. Concurrent or retried
@@ -239,6 +343,7 @@ extension AgentController {
                 verifyEffect(spec.readingSummary(title: model.sideTasks[i].title, state: state))
                 return ["verified": true, "task_id": id.uuidString, "retained": true]
             }
+            retainedSnapshot = surface
             let previousRecord = retainedSurface.flatMap { old in old.apiData?.readingIdentity(old.state) }
             try model.commitTaskSurface(surface, id: activeTaskID, ticket: interfaceTicket)
             if let i = model.sideTasks.firstIndex(where: { $0.id == activeTaskID }) {
@@ -271,11 +376,15 @@ extension AgentController {
 
 }
 
-private extension APIDataSpec {
+extension APIDataSpec {
     /// Semantic keys come from source bindings rather than generated labels.
     func readingIdentity(_ state: [String: String]) -> [String]? {
-        guard calculation == nil, (controls ?? []).isEmpty, (visuals ?? []).isEmpty,
-            let url = try? requestURL(), let key = card?.primaryKey,
+        guard (controls ?? []).isEmpty, (visuals ?? []).isEmpty, let url = try? requestURL() else { return nil }
+        if let pointer = primarySourcePointer {
+            return [url.absoluteString, pointer, (outputs ?? []).first?.unit ?? "",
+                (outputs ?? []).first?.unitKey.flatMap { state[$0] } ?? ""]
+        }
+        guard calculation == nil, let key = card?.primaryKey,
             let primary = fields.first(where: { $0.key == key && $0.itemPointer == nil }),
             let expectations, !expectations.isEmpty else { return nil }
         var result = [url.absoluteString, primary.pointer, primary.unit ?? "",

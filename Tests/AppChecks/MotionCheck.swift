@@ -441,18 +441,19 @@
                     "The window reaches its final layout after progressing through intermediate sizes")
                 try await SideScreenCheck.snapshot(delegate.panel, path: "/tmp/orvlet-motion-expanded.png")
                 let cardFrame = model.shellLayout.content
+                model.pointerChanged(true)
                 model.pinned = true
                 try await wait(70)
                 try check(
-                    model.shellLayout.content == cardFrame && delegate.panel.frame.width < expanded.width,
-                    "Pinning retracts the task rail while the card and its pin button stay anchored")
+                    model.shellLayout.content.size == cardFrame.size && delegate.panel.frame.width < expanded.width,
+                    "Pinning retracts the task rail as the card moves right")
                 model.pinned = false
                 try await wait(60)
                 model.pinned = true
                 try await wait()
                 try check(
-                    model.shellLayout.content == cardFrame && model.shellLayout.presentedCompact.width == 28,
-                    "Rapid pin-unpin-pin finishes at a narrow rail without moving card controls")
+                    model.shellLayout.frame.maxX == anchor.maxX && model.shellLayout.presentedCompact.isEmpty,
+                    "Rapid pin-unpin-pin finishes docked right with no extra rail")
                 try await SideScreenCheck.snapshot(delegate.panel, path: "/tmp/orvlet-motion-pinned.png")
                 model.pinned = false
                 try await wait()
@@ -541,12 +542,11 @@
                 let layout = ShellLayout.place(
                     anchor: NSRect(x: 600, y: 500, width: 136, height: 116),
                     content: NSSize(width: 328, height: 240), orientation: .vertical, screen: screen, edge: edge)
-                let tucked = layout.tuckingCompact()
-                try check(
-                    tucked.content == layout.content && tucked.compact == layout.compact
-                        && !tucked.presentedCompact.intersects(tucked.content)
-                        && tucked.frame == tucked.content.union(tucked.presentedCompact),
-                    "Pinning on \(edge) preserves the card position and canonical expansion anchor")
+                let pinned = ShellLayout.pinned(anchor: layout.compact, detail: layout.content,
+                                                size: layout.content.size, screen: screen, alignToCapsule: true)
+                try check(pinned.frame.maxX == layout.compact.maxX && pinned.content == pinned.frame
+                          && pinned.compact == layout.compact && pinned.presentedCompact.isEmpty,
+                          "Pin docks right from every expansion edge while retaining the parked strip")
             }
             return checks
         }

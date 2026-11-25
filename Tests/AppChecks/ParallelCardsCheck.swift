@@ -2,6 +2,7 @@
 import AppKit
 import SwiftUI
 import WebKit
+import os
 
 @MainActor
 enum ParallelCardsCheck {
@@ -223,7 +224,7 @@ enum ParallelCardsCheck {
         Diagnostics.storage = model.preferences
         Diagnostics.benchmarkEvents = []
         defer {
-            for event in Diagnostics.benchmarkEvents ?? [] where event["event"] as? String == "tool_error" {
+            for event in Diagnostics.benchmarkEvents ?? [] where ["tool_error", "round", "api", "model_request", "model_error", "decision_context"].contains(event["event"] as? String ?? "") {
                 print(JSONText.encode(event))
             }
             for event in model.preferences.array(forKey: "diagnostics.v1") as? [[String: Any]] ?? []
@@ -234,8 +235,8 @@ enum ParallelCardsCheck {
             Diagnostics.storage = .standard
         }
         let pair = "我要看微软和苹果的股价"
-        func submit(_ text: String, in conversation: UUID? = nil) async throws {
-            model.selectChat(true, conversation: conversation)
+        func submit(_ text: String, in conversation: UUID? = nil, editing id: UUID? = nil) async throws {
+            if let id { model.editInterface(id) } else { model.selectChat(true, conversation: conversation) }
             model.command = text
             let start = Date()
             model.sendCommand()
@@ -287,9 +288,19 @@ enum ParallelCardsCheck {
                                "GOOG": ["Alphabet Inc.", "Alphabet Inc. Class C"],
                                "GOOGL": ["Alphabet Inc.", "Alphabet Inc. Class A"]]
             for (index, task) in cards.enumerated() {
+                let evidence = model.work.view(task.id).flatMap { model.work.artifact($0.selected)?.evidence }
+                    .flatMap { try? JSONSerialization.jsonObject(with:$0) }
+                let specPointer = task.taskSurface?.apiData?.primarySourcePointer
+                let record = specPointer.flatMap { pointer -> [String:Any]? in
+                    let parent = pointer.split(separator:"/").dropLast().joined(separator:"/")
+                    return evidence.flatMap { APIDataSpec.value("/" + parent,in:$0) as? [String:Any] }
+                }
                 guard let spec = task.taskSurface?.apiData,
                     let symbol = symbols.keys.first(where: { symbol in
-                        spec.fields.contains { task.state[$0.key]?.caseInsensitiveCompare(symbol) == .orderedSame }
+                        (record?.values.compactMap(APIDataSpec.scalar).contains(where:{ value in
+                            ([symbol] + (issuerNames[symbol] ?? [])).contains { value.caseInsensitiveCompare($0) == .orderedSame }
+                        }) ?? false)
+                            || spec.fields.contains { task.state[$0.key]?.caseInsensitiveCompare(symbol) == .orderedSame }
                             || (spec.expectations ?? [:]).keys.contains { key in
                                 (issuerNames[symbol] ?? []).contains { task.state[key]?.caseInsensitiveCompare($0) == .orderedSame }
                             }
@@ -314,6 +325,126 @@ enum ParallelCardsCheck {
             return try await quotes(companies)
         }
         switch scenario {
+        case "local-document", "record-source":
+            let destination: URL
+            let card: SideTask
+            if scenario == "local-document" {
+                let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".csv")
+                defer { try? FileManager.default.removeItem(at: fixture) }
+                try "item,quantity\nInk,3\nPaper,5\n".write(to: fixture, atomically: true, encoding: .utf8)
+                model.command = "把这个 CSV 按数量从大到小排，给我 sorted.csv"
+                try model.attachWorkFiles([fixture])
+                try await submit(model.command)
+                guard let task = model.visibleTasks.first, let file = task.workFile,
+                    model.visibleTasks.count == 1 else { throw AppError.message("Missing file card") }
+                destination = try file.existingURL()
+                let contents = try String(contentsOf: destination, encoding: .utf8)
+                guard contents.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\r\n", with: "\n") == "item,quantity\nPaper,5\nInk,3",
+                    try await render(task, compact: true, index: 0).contains("sorted.csv"),
+                    try await render(task, compact: false, index: 0).contains("Paper,5"),
+                    !JSONText.encode(AgentContext.task(task)).contains("Paper,5") else { throw AppError.message("Wrong document or preview") }
+                card = task
+            } else {
+                try await submit("给我看 apple/swift-nio 的 star 数，双击能去仓库主页")
+                guard let task = model.visibleTasks.first, let raw = task.state["recordPageURL"],
+                    let url = URL(string: raw), url.host == "github.com", url.path == "/apple/swift-nio",
+                    task.taskSurface?.apiData != nil else { throw AppError.message("Missing verified record link") }
+                print(JSONText.encode(["compact": try await render(task, compact: true, index: 0),
+                    "expanded": try await render(task, compact: false, index: 0)]))
+                card = task
+                destination = url
+            }
+            guard model.handoffSource == nil else { throw AppError.message("Background execution opened a source") }
+            let workingBrowser = model.browser
+            model.openTaskFromDoubleClick(card.id)
+            guard let source = model.visibleHandoff, source.destination == destination, model.browser === workingBrowser,
+                source.taskID == card.id else { throw AppError.message("Handoff escaped the side screen") }
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 360), styleMask: .borderless, backing: .buffered, defer: false)
+            window.contentView = NSHostingView(rootView: HandoffSourceView(source: source))
+            window.contentView?.layoutSubtreeIfNeeded()
+            defer { window.orderOut(nil) }
+            if let web = source.webView {
+                for _ in 0..<250 {
+                    if let location = try? await web.evaluateJavaScript("document.readyState !== 'loading' && document.title ? location.href : ''") as? String,
+                        location == destination.absoluteString { break }
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                guard web.window === window, web.url == destination, !(web.title ?? "").isEmpty, !source.failed else { throw AppError.message("Orvlet browser did not load the source") }
+            } else {
+                guard source.document == (try String(contentsOf: destination, encoding: .utf8)) else { throw AppError.message("Incomplete document handoff") }
+            }
+            print(JSONText.encode(["openedInsideOrvlet": destination.lastPathComponent, "card": card.title]))
+            model.collapse()
+            guard model.visibleHandoff == nil, model.visibleTasks.contains(where: { $0.id == card.id }) else { throw AppError.message("Lost original card") }
+        case "player-placement", "player-queue", "player-change":
+            let track = MusicTrack(id: "abcdefghijk", title: "Study radio")
+            var player = SideTask(id: model.browser.id, kind: .web, title: track.title)
+            player.listening = true
+            player.sourceURL = track.url
+            player.intent = "放点适合工作的音乐"
+            player.musicQueue = MusicQueue(current: track, volume: 0, muted: true)
+            model.settings.taskStartPolicy = .interfaceFirst
+            model.sideTasks = [player]
+            if scenario == "player-change" {
+                let source = model.browser
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 480), styleMask: .borderless, backing: .buffered, defer: false)
+                window.contentView = source.webView
+                window.contentView?.layoutSubtreeIfNeeded()
+                defer { window.orderOut(nil) }
+                try await submit(ProcessInfo.processInfo.environment["ORVLET_PLAYER_CHANGE_REQUEST"] ?? "想听lofi")
+                guard model.visibleTasks.map(\.id) == [player.id], let task = model.visibleTasks.first,
+                    task.musicQueue?.current?.id != track.id, task.musicQueue?.previous.contains(track) == true,
+                    let browser = model.musicBrowser(player.id) else { throw AppError.message("Track change lost its player or history") }
+                let state = try await browser.observe()
+                print(JSONText.encode(state.filter { ["title","url","readyState","playing","muted","hasMedia","mediaError","adPlaying","currentTime"].contains($0.key) }))
+                guard state["playing"] as? Bool == true, state["muted"] as? Bool == true else { throw AppError.message("Unverified muted playback") }
+                print(JSONText.encode(["player": player.id.uuidString, "cards": 1, "nowPlaying": task.title, "muted": true]))
+            } else if scenario == "player-queue" {
+                try await submit("加一首爵士到待播")
+                guard model.visibleTasks.map(\.id) == [player.id],
+                    let queue = model.visibleTasks.first?.musicQueue, queue.current?.id == track.id,
+                    !queue.upcoming.isEmpty else { throw AppError.message("Queue request did not retain the original player and track") }
+                print(JSONText.encode(["player": player.id.uuidString, "cards": 1, "queued": queue.upcoming.count]))
+            } else {
+                for (request, reuse) in [("想听lofi", true), ("放点 bossa nova", true), ("再来一个轻快点的", true), ("另开一个播放器放爵士", false)] {
+                    let result = try await model.agent.understand(request, clarification: nil, key: nil)
+                    let reused = result.targetTaskID == player.id.uuidString
+                    print(JSONText.encode(["input": request, "layout": result.placement?.layout.rawValue ?? "", "owner": result.targetTaskID ?? "new"]))
+                    guard reused == reuse, result.clarificationQuestion == nil,
+                        result.placement?.members.contains(where: { $0.retainedID != nil }) != true else {
+                        throw AppError.message("Unexpected player destination for " + request)
+                    }
+                }
+                var other = SideTask(kind: .web, title: "Acoustic radio")
+                other.listening = true
+                player.playing = true
+                model.sideTasks = [other, player]
+                let choice = try await model.agent.understand("换点爵士听听", clarification: nil, key: nil)
+                guard choice.targetTaskID == player.id.uuidString else { throw AppError.message("Did not target the playing session") }
+                print(JSONText.encode(["input": "换点爵士听听", "players": 2, "usedPlayingPlayer": true]))
+            }
+        case "owned-browser":
+            let center = NSWorkspace.shared.notificationCenter
+            let activations = OSAllocatedUnfairLock(initialState: 0)
+            let token = center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { notification in
+                if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                    app.processIdentifier == ProcessInfo.processInfo.processIdentifier { activations.withLock { $0 += 1 } }
+            }
+            defer { center.removeObserver(token) }
+            try await submit("在 Orvlet 里打开 https://example.org，留着这一页")
+            guard model.visibleTasks.count == 1, let card = model.visibleTasks.first, card.kind == .web,
+                let source = model.liveBrowsers.first(where: { $0.id == card.id }),
+                source.webView.url?.host == "example.org", !model.showingWeb else {
+                throw AppError.message("Background work did not leave one collapsed internal page")
+            }
+            model.openTaskFromDoubleClick(card.id)
+            let title = try await source.webView.evaluateJavaScript("document.title") as? String
+            let activationCount = activations.withLock { $0 }
+            guard model.showingWeb, model.browser === source, title == "Example Domain",
+                activationCount == 0, NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+                throw AppError.message("Lost the original page or activated the test application")
+            }
+            print(JSONText.encode(["openedInsideOrvlet": title ?? "", "card": card.title, "testAppActivations": activationCount]))
         case "three":
             try await submit("看看微软、苹果和谷歌的股价")
             let symbol = model.visibleTasks.contains { $0.state.values.contains("GOOGL") } ? "GOOGL" : "GOOG"
@@ -375,6 +506,495 @@ enum ParallelCardsCheck {
         case "repeated":
             try await submit("看看微软和微软的股价")
             _ = try await quotes(["MSFT":"Microsoft"])
+        case "word-flip", "stage-cues", "proof-review", "proof-self":
+            let request: String
+            let actionPattern: String
+            let expected: String
+            switch scenario {
+            case "word-flip":
+                request = "背个词，正面 obscure，背面 晦涩"
+                actionPattern = "flip|reveal|show|turn|翻|看|显示"
+                expected = "晦涩"
+            case "stage-cues":
+                request = "排练提词，依次是落座、亮灯、谢幕"
+                actionPattern = "next|advance|forward|下一|继续"
+                expected = "亮灯|lights? (up|on)|light the"
+            default:
+                request = scenario == "proof-self" ? "海报校样，我来标通过或退回" : "海报校样，帮我标通过或退回"
+                actionPattern = "approve|accept|pass|通过"
+                expected = "approved|accepted|passed|已通过|通过"
+            }
+            try await submit(request)
+            guard model.visibleTasks.count == 1, let card = model.visibleTasks.first,
+                let surface = card.taskSurface else { throw AppError.message("Expected one generated card") }
+            let window = NSWindow(contentRect: NSRect(x: -16000, y: -16000, width: 300, height: 320),
+                styleMask: .borderless, backing: .buffered, defer: false)
+            window.orderBack(nil)
+            defer { window.orderOut(nil) }
+            let web = try await SimpleTaskPilot.expanded(model, task: card, window: window)
+            let controls = try await web.evaluateJavaScript("""
+                [...document.querySelectorAll('[data-action]')].filter(e=>e.getClientRects().length && !e.disabled)
+                    .map(e=>({id:e.dataset.action,label:e.innerText || e.getAttribute('aria-label') || ''}))
+                """) as? [[String: String]] ?? []
+            let valuesJS = """
+                [...document.querySelectorAll('[data-bind]')].filter(e=>e.getClientRects().length && !e.closest('button'))
+                    .map(e=>e.innerText).join(' | ')
+                """
+            let before = try await web.evaluateJavaScript(valuesJS) as? String ?? ""
+            SimpleTaskPilot.emit(["before": before, "controls": controls, "fields": surface.fields])
+            if scenario == "word-flip", (try await web.evaluateJavaScript("document.querySelector('#surface').innerText") as? String ?? "").contains(expected) {
+                throw AppError.message("The back is already visible before revealing it")
+            }
+            let options: String.CompareOptions = [.caseInsensitive, .regularExpression]
+            guard let control = controls.first(where: {
+                ($0["label"] ?? "").range(of: actionPattern, options: options) != nil
+                    || ($0["id"] ?? "").range(of: actionPattern, options: options) != nil
+            }), let action = control["id"] else { throw AppError.message("Requested control missing") }
+            try await SimpleTaskPilot.click(web, action: action)
+            for _ in 0..<100 {
+                let after = try await web.evaluateJavaScript(valuesJS) as? String ?? ""
+                if model.visibleTasks.count == 1, let current = model.visibleTasks.first, current.id == card.id,
+                    current.state != card.state, before != after, after.range(of: expected, options: options) != nil {
+                    let compact = try await render(current, compact: true, index: 0)
+                    let expanded = try await render(current, compact: false, index: 0)
+                    SimpleTaskPilot.emit(["clicked": control, "after": after, "compact": compact, "expanded": expanded,
+                                          "id": current.id.uuidString])
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(120))
+            }
+            throw AppError.message("Control did not produce the expected visible result: " +
+                ((try await web.evaluateJavaScript(valuesJS)) as? String ?? ""))
+        case "retained-observation":
+            // Replay the broken scheduled recipe, using real transport and worker results.
+            let url = "https://api.github.com/repos/apple/swift-nio"
+            let bindings = [["name":"count","observation":url,"pointer":"/stargazers_count"],
+                            ["name":"repo","observation":url,"pointer":"/full_name"]]
+            let steps: [(String, [String: Any])] = [
+                ("load_tools", ["family":"data"]),
+                ("inspect_api", ["url":url]),
+                ("run_code", ["bindings":bindings,"code":"return {state:{count:input.count}}"]),
+                ("query_api", ["title":"SwiftNIO","source":["url":url,"refreshSeconds":60,
+                    "fields":[["key":"repo","label":"Repository","pointer":"/full_name"],
+                              ["key":"count","label":"Stars","pointer":"/missingCount"]],
+                    "expectations":["repo":"apple/swift-nio"]]]),
+                ("present_ui", ["title":"SwiftNIO","form":["compactKey":"count","inputs":[],"buttons":[],
+                    "outputs":[["key":"count","label":"Stars"]]],"actions":[],"state":[:],"complete":true])
+            ]
+            var index = 0
+            model.agent.completionOverride = { _ in
+                guard steps.indices.contains(index) else { throw AppError.message("Injected end of repair attempts") }
+                let (tool, args) = steps[index]
+                index += 1
+                return ["tool_calls": [RequestStep(tool:tool, arguments:JSONText.encode(args)).call]]
+            }
+            try await submit("帮我跟踪 SwiftNIO 的星数")
+            guard model.visibleTasks.count == 1, let task = model.visibleTasks.first, let surface = task.taskSurface,
+                surface.apiData == nil, surface.runtime == nil, let count = task.state["count"], Int(count) != nil,
+                model.messages.last?.text.contains(count) == true, task.interfaceIssue != nil
+            else { throw AppError.message("Missing verified partial result after the schedule failed") }
+            let display = try await render(task, compact:false,index:0)
+            guard display.contains(count), display.contains("api.github.com") else { throw AppError.message("Missing observed result/source") }
+            SimpleTaskPilot.emit(["id":task.id.uuidString, "count":1,"value":count,"expanded":display,"issue":task.interfaceIssue ?? ""])
+        case "compiled-license-picker", "compiled-branch-picker":
+            let metric = scenario == "compiled-license-picker" ? "许可证" : "默认分支"
+            try await submit("看下 python/cpython 和 python/mypy 的" + metric + "，做成能切换项目的卡")
+            guard model.visibleTasks.count == 1, let first = model.visibleTasks.first, first.taskSurface != nil else {
+                throw AppError.message("Expected one executable project picker")
+            }
+            let view = model.work.view(first.id)
+            let switchingResults = view?.layout == .select
+            let initialResult = model.work.view(first.id).flatMap { model.work.artifact($0.selected) }
+            let before = try await render(first,compact:false,index:0)
+            let beforeCompact = try await render(first,compact:true,index:0)
+            let window = NSWindow(contentRect:NSRect(x:-16000,y:-16000,width:300,height:320),styleMask:.borderless,backing:.buffered,defer:false)
+            defer { window.orderOut(nil) }
+            window.orderBack(nil)
+            let web = try await SimpleTaskPilot.expanded(model,task:first,window:window)
+            let controls = try await web.evaluateJavaScript("[...document.querySelectorAll('select')].map(e=>({key:e.dataset.field,value:e.value,options:[...e.options].map(o=>({value:o.value,label:o.textContent}))}))") as? [[String:Any]] ?? []
+            let control = controls.first { control in
+                let labels = (control["options"] as? [[String:String]] ?? []).map { $0["label"] ?? "" }.joined(separator:" ")
+                return labels.localizedCaseInsensitiveContains("cpython") && labels.localizedCaseInsensitiveContains("mypy")
+            }
+            let controlKey = control?["key"] as? String
+            let choice = (control?["options"] as? [[String:String]])?.first { $0["value"] != control?["value"] as? String }
+            let target = choice?["value"]
+            let targetName = choice.map { ($0["label"] ?? "").localizedCaseInsensitiveContains("mypy") ? "mypy" : "cpython" }
+                ?? ((first.state["currentValue"] ?? before).localizedCaseInsensitiveContains("cpython") ? "mypy" : "cpython")
+            if let controlKey, let target {
+                _ = try await web.evaluateJavaScript("(()=>{const e=[...document.querySelectorAll('select')].find(e=>e.dataset.field===" + JSONText.encode(controlKey) + ");e.value=" + JSONText.encode(target) + ";e.dispatchEvent(new Event('change',{bubbles:true}));if(!e.dataset.change){const b=[...document.querySelectorAll('button[data-action]')].find(b=>!['refreshData','expand','dismiss'].includes(b.dataset.action));if(b)b.click()}return e.value})()")
+            } else {
+                let buttons = try await web.evaluateJavaScript("[...document.querySelectorAll('button[data-action]')].map(b=>({id:b.dataset.action,label:b.innerText}))") as? [[String:String]] ?? []
+                guard let action = buttons.first(where:{ ($0["label"] ?? "").localizedCaseInsensitiveContains(targetName) })?["id"] else {
+                    throw AppError.message("Missing project choice control: " + before)
+                }
+                try await SimpleTaskPilot.click(web,action:action)
+            }
+            var changed: SideTask?
+            for _ in 0..<200 {
+                if let task = model.visibleTasks.first, task.id == first.id, task.status == "Ready", task.dataIssue == nil, task.state != first.state,
+                    switchingResults ? model.work.view(first.id)?.selected.uuidString == target
+                        : ((controlKey == nil || task.state[controlKey!] == target) && model.work.view(first.id).flatMap { model.work.artifact($0.selected)?.revision } != initialResult?.revision) {
+                    changed = task; break
+                }
+                try await Task.sleep(for:.milliseconds(150))
+            }
+            guard let changed, model.visibleTasks.count == 1 else { throw AppError.message("Project selection did not update the same card") }
+            let afterCompact = try await render(changed,compact:true,index:1)
+            guard afterCompact.localizedCaseInsensitiveContains(targetName) else { throw AppError.message("Collapsed identity did not follow project selection: " + afterCompact) }
+            let after = try await render(changed,compact:false,index:1)
+            let sample = model.agent.observations.sample("https://api.github.com/repos/python/" + targetName)
+            let response = sample?.response
+                ?? model.work.view(changed.id).flatMap { model.work.artifact($0.selected)?.evidence }.flatMap { try? JSONSerialization.jsonObject(with:$0) }
+            let pointer = scenario == "compiled-branch-picker" ? "/default_branch" : "/license/spdx_id"
+            guard let response, let reported = APIDataSpec.scalar(APIDataSpec.value(pointer,in:response)),
+                after.contains(reported) else { throw AppError.message("Selection does not show the chosen project's observed value") }
+            print(JSONText.encode(["scenario":scenario,"id":first.id.uuidString,"count":1,"before":before,"beforeCompact":beforeCompact,
+                "after":after,"afterCompact":afterCompact,"observed":reported]))
+        case "source-recovery-currency", "source-recovery-repository", "cold-source-currency", "cold-source-repository", "source-definition-repair":
+            let trace = FileManager.default.temporaryDirectory.appendingPathComponent("orvlet-" + scenario + ".jsonl")
+            FileManager.default.createFile(atPath: trace.path, contents: Data())
+            Diagnostics.file = trace
+            defer { Diagnostics.file = nil }
+            FileHandle.standardOutput.write(Data(("TRACE " + trace.path + "\n").utf8))
+            let inject = scenario.hasPrefix("source-recovery")
+            let currency = scenario.hasSuffix("currency")
+            var failedHost: String?
+            var attempts: [[String: String]] = []
+            model.apiData = APIDataService(code: model.taskCode, fetch: { address in
+                let host = URL(string: address)?.host ?? ""
+                if inject && failedHost == nil { failedHost = host }
+                if inject && host == failedHost {
+                    attempts.append(["host": host, "status": "injected-unavailable"])
+                    throw URLError(.cannotConnectToHost)
+                }
+                do {
+                    let response = try await PublicDataClient().fetch(address)
+                    attempts.append(["host": host, "status": "received", "url": address])
+                    return response
+                } catch {
+                    attempts.append(["host": host, "status": "failed", "reason": error.localizedDescription])
+                    throw error
+                }
+            })
+            defer { print(JSONText.encode(["sourceAttempts": attempts])) }
+            if scenario == "source-definition-repair" {
+                var step = 0
+                model.agent.completionOverride = { turns in
+                    step += 1
+                    let call: RequestStep
+                    switch step {
+                    case 1: call = RequestStep(tool: "load_tools", arguments: JSONText.encode(["family":"data"]))
+                    case 2: call = RequestStep(tool: "inspect_api", arguments: JSONText.encode(["url":"https://api.github.com/repos/apple/swift-nio"]))
+                    case 3:
+                        let source: [String:Any] = ["url":"https://api.github.com/repos/apple/swift-nio",
+                            "fields":[["key":"entity","label":"Repository","pointer":"/full_name"],["key":"stars","label":"Stars","pointer":"/stargazers_count"]],
+                            "expectations":["entity":"apple/swift-nio"], "outputs":[["key":"count","label":"Stars","unitKey":"starsLiteral"]],
+                            "calculation":"return {state:{count:state.stars}};", "glance":["valueKey":"count"],
+                            "card":["kind":"reading","subject":"SwiftNIO","primaryKey":"count"]]
+                        call = RequestStep(tool: "query_api", arguments: JSONText.encode(["title":"SwiftNIO","source":source]))
+                    case 4: call = RequestStep(tool:"repair_step", arguments:JSONText.encode(["changes":["$.source.glance":NSNull()]]))
+                    default:
+                        guard let agent = RequestRun.current?.agent,
+                            !agent.recovery.exhausted("query_api",["source":["url":"https://api.github.com/repos/apple/swift-nio","calculation":"x"]]) else {
+                            throw AppError.message("Independent schema errors incorrectly exhausted a healthy source")
+                        }
+                        agent.completionOverride = nil
+                        return try await agent.decide(turns, key:model.loadModelKey(for:agent.requestConnection))
+                    }
+                    return ["tool_calls":[call.call]]
+                }
+            }
+            try await submit(currency ? "港币兑人民币，给我一个能改金额的卡" : "看看 apple/swift-nio 的 star 数")
+            guard model.visibleTasks.count == 1, let task = model.visibleTasks.first,
+                task.kind != .result, task.terminalLabel == nil else { throw AppError.message("Source recovery did not deliver one usable card") }
+            let compact = try await render(task, compact: true, index: 0)
+            let expanded = try await render(task, compact: false, index: 0)
+            guard compact.range(of: #"[0-9]+"#, options: .regularExpression) != nil else { throw AppError.message("No reading in recovered card: " + JSONText.encode(["compact":compact,"expanded":expanded,"state":task.state,"plan":task.plan?.readings?.map(\.key) ?? []])) }
+            if inject {
+                guard failedHost != nil, attempts.contains(where: { $0["status"] == "received" && $0["host"] != failedHost }) || task.taskSurface == nil else {
+                    throw AppError.message("No actual alternative source was used")
+                }
+            }
+            if currency {
+                guard let surface = task.taskSurface, surface.hasEditableOperation,
+                    let primary = surface.apiData?.card?.primaryKey, let initial = Double(task.state[primary] ?? "") else {
+                    throw AppError.message("Recovery lost the editable source tool")
+                }
+                let row = surface.apiData?.displayRows.first { $0.key == primary }
+                let unit = (surface.apiData?.card?.unitKey ?? row?.unitKey).flatMap { task.state[$0] } ?? row?.unit ?? ""
+                guard unit == "CNY" || unit == "人民币" || unit == "RMB" else {
+                    throw AppError.message("Recovered measurement has the wrong displayed unit: " + unit)
+                }
+                let window = NSWindow(contentRect: NSRect(x:-16000,y:-16000,width:300,height:320), styleMask:.borderless, backing:.buffered, defer:false)
+                defer { window.orderOut(nil) }
+                window.orderBack(nil)
+                let web = try await SimpleTaskPilot.expanded(model, task:task, window:window)
+                let field = try await web.evaluateJavaScript("Array.from(document.querySelectorAll('input[data-field]')).find(e=>['number','text'].includes(e.type) && !e.disabled && !e.readOnly && Number(e.value)>0)?.dataset.field ?? ''") as? String ?? ""
+                guard !field.isEmpty, let amount = Double(task.state[field] ?? "") else { throw AppError.message("No editable amount control: " + expanded) }
+                let inputType = try await web.evaluateJavaScript("[...document.querySelectorAll('input')].find(e=>e.dataset.field===" + JSONText.encode(field) + ")?.type ?? ''") as? String ?? ""
+                let newAmount = String(amount * 2)
+                let script = "(()=>{const e=[...document.querySelectorAll('input')].find(e=>e.dataset.field===" + JSONText.encode(field) + ");e.value=" + JSONText.encode(newAmount) + ";e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return e.value;})()"
+                _ = try await web.evaluateJavaScript(script)
+                if let action = surface.actions.first(where: { $0.kind == .code }) { try await SimpleTaskPilot.click(web, action: action.id) }
+                var changed: SideTask?
+                for _ in 0..<160 {
+                    if let current = model.visibleTasks.first, current.id == task.id, model.visibleTasks.count == 1,
+                        let actual = Double(current.state[primary] ?? ""), current.dataIssue == nil,
+                        abs(actual - initial * 2) < 0.03, actual != initial { changed = current; break }
+                    try await Task.sleep(for: .milliseconds(150))
+                }
+                guard let changed else { throw AppError.message("Input did not change the verified output on the same card") }
+                print(JSONText.encode(["interaction":"double amount","inputType":inputType,"id":changed.id.uuidString,"count":1,"before":initial,"after":changed.state[primary] ?? "",
+                    "rendered":try await render(changed, compact:false,index:1)]))
+            }
+            print(JSONText.encode(["scenario":scenario,"count":model.visibleTasks.count,"id":task.id.uuidString,
+                "title":task.title,"compact":compact,"expanded":expanded]))
+        case "verified-reading-retention":
+            try await submit("看看 z.ai 股价")
+            guard model.visibleTasks.count == 1, let task = model.visibleTasks.first, let surface = task.taskSurface,
+                let event = (model.preferences.array(forKey: "diagnostics.v1") as? [[String: Any]] ?? []).last(where: {
+                    ["verified_reading_fallback","verified_snapshot_retained"].contains($0["event"] as? String ?? "")
+                        && $0["taskID"] as? String == task.id.uuidString
+                })
+            else { throw AppError.message("Expected one verified reading from the fallback renderer") }
+            let display = try await render(task, compact: true, index: 0)
+            let expanded = try await render(task, compact: false, index: 0)
+            let key = surface.apiData?.card?.primaryKey ?? CardMarkup.bindingKeys(in: surface.markup.compactHTML).subtracting(["title","status"]).first
+            guard let key, let value = task.state[key], value.rangeOfCharacter(from:.decimalDigits) != nil,
+                display.contains(value), expanded.contains(value),
+                [display, expanded, task.title].contains(where: { $0.localizedCaseInsensitiveContains("Z.AI") || $0.contains("智谱") || $0.contains("2513") })
+            else { throw AppError.message("Verified subject or value missing: " + display) }
+            SimpleTaskPilot.emit(["id":task.id.uuidString,"count":1,"display":display,"source":surface.apiData?.url ?? expanded,"value":value,"recovery":event["event"] ?? ""])
+        case "revise-clock-picker", "revise-currency-picker", "extend-clock-picker", "fixed-source-edit":
+            let fixed = scenario == "fixed-source-edit"
+            let extend = scenario == "extend-clock-picker" || fixed
+            if fixed {
+                // Reproduce the API-backed original, irrespective of which method the planner prefers today.
+                var fetch = false
+                model.agent.completionOverride = { _ in
+                    if !fetch { fetch = true; return ["tool_calls": [RequestStep(tool:"load_tools", arguments:JSONText.encode(["family":"reading"])).call]] }
+                    return ["tool_calls": [RequestStep(tool:"read_value", arguments:JSONText.encode(["url":"https://timeapi.io/api/time/current/zone?timeZone=Europe%2FHelsinki",
+                        "subject":"Finland time", "valueLabel":"Local time", "valuePointer":"/time",
+                        "expectedIdentity":"Europe/Helsinki","identityPointer":"/timeZone"])).call]]
+                }
+            }
+            let clock = scenario != "revise-currency-picker"
+            try await submit(extend ? "放一张芬兰时间卡" : clock ? "给我一个芬兰的时钟，能换地区" : "给我个港币兑人民币的换算卡")
+            guard model.visibleTasks.count == 1, let first = model.visibleTasks.first, first.taskSurface != nil else {
+                throw AppError.message("Expected a single initial tool")
+            }
+            if fixed { model.agent.completionOverride = nil }
+            let before = try await render(first, compact: true, index: 0)
+            if extend { try await submit("把地区改成可以选的，时间数字放大一点", in: first.id) }
+            else { try await submit(clock ? "时间的数字放大一点，保留地区选择" : "结果的数字放大一点，保留币种选择", editing: first.id) }
+            guard model.visibleTasks.count == 1, let revised = model.visibleTasks.first, revised.id == first.id,
+                !first.presentation.hasSameDesign(as: revised.presentation), !model.taskFailed else {
+                throw AppError.message("The original card did not receive the requested edit")
+            }
+            if !extend, let prior = first.taskSurface?.apiData {
+                guard let next = revised.taskSurface?.apiData, prior.url == next.url, prior.inputs == next.inputs,
+                    prior.calculation == next.calculation else { throw AppError.message("Appearance edit changed the data method") }
+            }
+            let window = NSWindow(contentRect: NSRect(x:-16000,y:-16000,width:300,height:320), styleMask:.borderless, backing:.buffered, defer:false)
+            defer { window.orderOut(nil) }
+            window.orderBack(nil)
+            let web = try await SimpleTaskPilot.expanded(model, task:revised, window:window)
+            let selectInfo = try await web.evaluateJavaScript("Array.from(document.querySelectorAll('select[data-field]'),s=>({key:s.dataset.field,values:Array.from(s.options,o=>o.value)}))") as? [[String:Any]] ?? []
+            let chosen = selectInfo.first { row in
+                guard let key = row["key"] as? String, let options = row["values"] as? [String], options.count > 1 else { return false }
+                return clock ? options.contains("Asia/Hong_Kong") : revised.state[key] == "CNY" || selectInfo.count == 1
+            }
+            let key = chosen?["key"] as? String
+            guard let key else { throw AppError.message("No bound destination field: " + JSONText.encode(revised.taskSurface?.fields ?? [])) }
+            let options = chosen?["values"] as? [String] ?? []
+            guard let expected = clock ? "Asia/Hong_Kong" : options.contains("USD") ? "USD" : options.first(where: { $0 != revised.state[key] }) else { throw AppError.message("No alternative") }
+            let script = """
+                (()=>{const field=[...document.querySelectorAll('select')].find(s=>s.dataset.field===\(JSONText.encode(key)));
+                const open=field?.nextElementSibling;if(!open?.getClientRects().length)return 'missing picker';
+                open.click();const dialog=document.querySelector('dialog[open]'), search=dialog?.querySelector('input');if(!dialog || (!search && \(clock ? "true" : "false")))return 'missing picker dialog';
+                if(search){search.value=\(JSONText.encode(clock ? "HK" : expected));search.dispatchEvent(new Event('input',{bubbles:true}));}
+                const choice=[...dialog.querySelectorAll('button')].find(b=>b.value===\(JSONText.encode(expected)));
+                if(!choice?.getClientRects().length)return 'missing choice';choice.click();return choice.textContent;})()
+                """
+            let picked = try await web.evaluateJavaScript(script) as? String ?? ""
+            guard !picked.isEmpty, !picked.hasPrefix("missing") else { throw AppError.message(picked) }
+            if let local = revised.taskSurface?.actions.first(where: { $0.kind == .code }),
+                try await web.evaluateJavaScript("!!document.querySelector('button[data-action=" + JSONText.encode(local.id) + "]')") as? Bool == true {
+                try await SimpleTaskPilot.click(web, action: local.id)
+            }
+            for _ in 0..<180 {
+                if let current = model.visibleTasks.first, current.id == first.id, model.visibleTasks.count == 1,
+                    current.state[key] == expected, current.dataIssue == nil, model.taskActionJobs[first.id] == nil {
+                    let display = try await render(current, compact: false, index: 0)
+                    let compact = try await render(current, compact: true, index: 0)
+                    if clock, let source = current.taskSurface?.runtime?.sources.first(where: { $0.format == .time }) {
+                        guard source.timeZone == expected, [Date(), Date().addingTimeInterval(-1), Date().addingTimeInterval(-2)].contains(where: { display.contains(source.value(at: $0)) }) else { throw AppError.message("Clock display differs from selected zone: " + display) }
+                    } else if clock {
+                        let format = DateFormatter()
+                        format.timeZone = TimeZone(identifier: expected)
+                        format.dateFormat = "HH:mm"
+                        guard display.contains(format.string(from: Date())) else { throw AppError.message("Unexpected source time: " + display) }
+                    } else {
+                        let keys = CardMarkup.bindingKeys(in: current.presentation.html).subtracting(current.taskSurface?.fields ?? [])
+                        let numbers = keys.filter { key in
+                            let read = current.state[key] ?? ""
+                            return read.rangeOfCharacter(from: .decimalDigits) != nil && read != revised.state[key] && display.contains(read)
+                        }
+                        guard !numbers.isEmpty, compact != before else { throw AppError.message("Converted result did not change: " + display) }
+                    }
+                    SimpleTaskPilot.emit(["id":current.id.uuidString,"count":1,"title":current.title,"before":before,"selected":picked,"canonical":expected,"after":compact])
+                    return
+                }
+                try await Task.sleep(for:.milliseconds(160))
+            }
+            throw AppError.message("Choice did not commit on the original card")
+        case "temperature-tool", "editable-rate", "split-tool":
+            let currency = scenario == "editable-rate"
+            let split = scenario == "split-tool"
+            try await submit(currency ? "港币兑rmb" : split ? "120块三个人平摊，每人多少" : "30摄氏度是多少华氏度")
+            guard model.visibleTasks.count == 1, let card = model.visibleTasks.first,
+                let surface = card.taskSurface, surface.hasEditableOperation else { throw AppError.message("Expected one editable tool") }
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 320), styleMask: .borderless, backing: .buffered, defer: false)
+            defer { window.orderOut(nil) }
+            window.setFrameOrigin(NSPoint(x: -16000, y: -16000))
+            window.orderBack(nil)
+            let web = try await SimpleTaskPilot.expanded(model, task: card, window: window)
+            SimpleTaskPilot.emit(["cardLoaded": card.title, "fields": surface.fields])
+            let roles = surface.apiData?.currencyFields
+            let initialInput = split ? 3.0 : 30.0
+            let localField = surface.fields.first { Double(card.state[$0] ?? "") == initialInput }
+            guard let field = currency ? roles?.amount : localField else { throw AppError.message("No adjustable amount") }
+            func edit(_ key: String, _ value: String) async throws {
+                let js = "(()=>{const f=[...document.querySelectorAll('[data-field]')].find(e=>e.dataset.field===" + JSONText.encode(key) + ");if(!f||!f.getClientRects().length)return false;f.value=" + JSONText.encode(value) + ";for(const t of ['input','change'])f.dispatchEvent(new Event(t,{bubbles:true}));return f.value===" + JSONText.encode(value) + ";})()"
+                guard try await web.evaluateJavaScript(js) as? Bool == true else { throw AppError.message("Field unavailable: " + key) }
+                SimpleTaskPilot.emit(["edited": key, "value": value])
+                if let action = surface.actions.first(where: { $0.kind == .code }) {
+                    try await SimpleTaskPilot.click(web, action: action.id)
+                }
+            }
+            func waitForOutput(_ matches: (SideTask) -> Bool) async throws -> SideTask {
+                for _ in 0..<160 {
+                    if let current = model.visibleTasks.first, model.visibleTasks.count == 1,
+                        current.id == card.id, matches(current) { return current }
+                    try await Task.sleep(for: .milliseconds(150))
+                }
+                throw AppError.message("The card did not recalculate after input")
+            }
+            let newValue = currency ? "100" : split ? "4" : "0"
+            try await edit(field, newValue)
+            if currency, let roles, let primary = surface.apiData?.card?.primaryKey {
+                guard let initial = Double(card.state[primary] ?? "") else { throw AppError.message("Missing starting rate") }
+                let changed = try await waitForOutput { t in
+                    guard let v = Double(t.state[primary] ?? "") else { return false }
+                    return t.state[roles.amount] == "100" && abs(v - initial * 100) < 0.51
+                }
+                SimpleTaskPilot.emit(["amount": "100", "pair": changed.state["currencyPair"] ?? "", "result": changed.state[primary] ?? ""])
+                try await edit(roles.to, "USD")
+                let switched = try await waitForOutput { t in
+                    t.taskSurface?.state[roles.to] == "USD" && t.taskSurface?.state[roles.amount] == "100"
+                        && (Double(t.state[primary] ?? "") ?? 0) > 0 && t.state[primary] != changed.state[primary]
+                }
+                print(JSONText.encode(["id": switched.id.uuidString, "display": try await render(switched, compact: false, index: 0)]))
+            } else {
+                let expected = split ? "30" : "32"
+                let pattern = #"(?<![0-9.])"# + expected + #"(?:\.0+)?(?![0-9.])"#
+                let changed = try await waitForOutput { t in t.state[field] == newValue && t.state.contains { $0.key != field && $0.value.range(of: pattern, options: .regularExpression) != nil } }
+                print(JSONText.encode(["id": changed.id.uuidString, "display": try await render(changed, compact: false, index: 0)]))
+            }
+        case "chat-followup":
+            try await submit("17加26，只回复数字")
+            guard let receipt = model.feedback, receipt.kind == .information, receipt.text == "43",
+                let owner = receipt.taskID else { throw AppError.message("Expected conversational answer") }
+            let feedbackView = NSHostingView(rootView: RequestFeedbackView(model: model, feedback: receipt))
+            feedbackView.frame = NSRect(origin: .zero, size: model.feedbackSize)
+            let window = NSWindow(contentRect: feedbackView.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            window.contentView = feedbackView
+            feedbackView.layoutSubtreeIfNeeded()
+            if let bitmap = feedbackView.bitmapImageRepForCachingDisplay(in: feedbackView.bounds) {
+                feedbackView.cacheDisplay(in: feedbackView.bounds, to: bitmap)
+                if let png = bitmap.representation(using: .png, properties: [:]) { print("CHAT_PREVIEW " + png.base64EncodedString()) }
+            }
+            model.sendFeedbackReply("再乘以二，只回复数字", to: receipt)
+            for _ in 0..<1200 where model.busy { try await Task.sleep(for: .milliseconds(100)) }
+            guard model.commandPanelVisible, model.conversationTaskID == owner, model.visibleTasks.isEmpty,
+                model.messages.last?.taskID == owner, model.messages.last?.text == "86" else {
+                throw AppError.message("Follow-up lost the conversation: " + (model.messages.last?.text ?? ""))
+            }
+            print(JSONText.encode(["thread": owner.uuidString, "followup": "86"]))
+        case "terse-rate", "rate-answer":
+            var bossa = SideTask(kind: .web, title: "Bossa Nova")
+            var radio = SideTask(kind: .web, title: "Best of lofi")
+            bossa.listening = true
+            radio.listening = true
+            model.sideTasks = [bossa, radio]
+            let originalIDs = Set([bossa.id, radio.id])
+            if scenario == "rate-answer" {
+                try await submit("港币兑rmb，只回复汇率数字")
+                let reply = model.messages.last(where: { !$0.isUser })?.text ?? ""
+                guard let rate = Double(reply), rate > 0,
+                    Set(model.visibleTasks.map(\.id)) == originalIDs else {
+                    throw AppError.message("Text-only reading changed the shelf or returned no number")
+                }
+                break
+            }
+            try await submit("港币兑rmb")
+            let newCards = model.visibleTasks.filter { !originalIDs.contains($0.id) }
+            guard originalIDs.isSubset(of: Set(model.visibleTasks.map(\.id))),
+                newCards.count == 1, let card = newCards.first, card.taskSurface != nil else {
+                throw AppError.message("Expected one verified reading beside the two retained players")
+            }
+            let compact = try await render(card, compact: true, index: 0)
+            let expanded = try await render(card, compact: false, index: 0)
+            print(JSONText.encode(["compact": compact, "expanded": expanded, "id": card.id.uuidString]))
+            let display = compact + " " + expanded
+            guard ["HKD", "港币", "港元", "Hong Kong"].contains(where: display.localizedCaseInsensitiveContains),
+                ["CNY", "RMB", "人民币", "yuan", "renminbi"].contains(where: display.localizedCaseInsensitiveContains),
+                compact.range(of: #"[0-9]+[.,][0-9]+"#, options: .regularExpression) != nil else {
+                throw AppError.message("Missing currencies or compact rate")
+            }
+        case "measured-glance", "travel-glance":
+            let travel = scenario == "travel-glance"
+            try await submit(travel ? "做张通勤比较卡，东线32分钟，西线47分钟，看哪条更快" : "做张卡比较 Z.AI 和 Xiaomi 的近一月涨跌幅：Z.AI −29.2%，Xiaomi +6.2%，看谁领先")
+            guard model.visibleTasks.count == 1, let card = model.visibleTasks.first, card.taskSurface != nil else {
+                throw AppError.message("Missing the comparison card")
+            }
+            let expanded = try await render(card, compact: false, index: 0)
+            let compact = try await render(card, compact: true, index: 0)
+            print(JSONText.encode(["compact": compact, "expanded": expanded]))
+            let values = compact.replacingOccurrences(of: "％", with: "%")
+            if travel {
+                guard expanded.contains("32"), expanded.contains("47"),
+                    (values.contains("32") || values.contains("15")),
+                    ["East", "东"].contains(where: values.localizedCaseInsensitiveContains),
+                    ["min", "分钟", "分"].contains(where: values.localizedCaseInsensitiveContains) else {
+                    throw AppError.message("Missing commute reading or difference")
+                }
+                break
+            }
+            let hasSpread = values.contains("35.4") && ["pp", "p.p.", "pts", "percentage points", "百分点"].contains(where: values.localizedCaseInsensitiveContains)
+            guard expanded.contains("29.2"), expanded.contains("6.2"),
+                ["Xiaomi", "小米"].contains(where: values.localizedCaseInsensitiveContains),
+                (values.contains("6.2") && values.contains("%")) || hasSpread else {
+                throw AppError.message("No labeled deciding measurement in the capsule")
+            }
+        case "list-content":
+            try await submit("建个购物清单，先记牛奶")
+            guard model.visibleTasks.count == 1, let original = model.visibleTasks.first, original.taskSurface != nil, original.kind != .result else {
+                throw AppError.message("Expected one working shopping list")
+            }
+            let first = try await render(original, compact: false, index: 0)
+            let milk = ["牛奶", "milk"]
+            let eggs = ["鸡蛋", "egg"]
+            guard milk.contains(where: first.localizedCaseInsensitiveContains) else { throw AppError.message("Milk missing from original list: " + first) }
+            try await submit("再加鸡蛋")
+            guard model.visibleTasks.map(\.id) == [original.id], let updated = model.visibleTasks.first else {
+                throw AppError.message("Lost the original list instance")
+            }
+            let content = try await render(updated, compact: false, index: 0)
+            guard milk.contains(where: content.localizedCaseInsensitiveContains),
+                eggs.contains(where: content.localizedCaseInsensitiveContains) else { throw AppError.message("Missing list item: " + content) }
+            print(JSONText.encode(["listID": updated.id.uuidString, "expanded": content]))
         case "timer-global":
             try await submit("定个5分钟倒计时")
             guard let first = model.visibleTasks.first(where: { $0.duration == 300 }), let deadline = first.deadline else { throw AppError.message("First timer missing") }
@@ -528,7 +1148,7 @@ enum ParallelCardsCheck {
             if (try? await view.evaluateJavaScript("typeof updateCard === 'function'")) as? Bool == true { break }
             try await Task.sleep(for: .milliseconds(50))
         }
-        let state = HTMLCardView.renderState(task.state, compact: compact, appearance: .light, formMode: !compact)
+        let state = HTMLCardView.renderState(compact ? task.state : task.expandedDisplayState, compact: compact, appearance: .light, formMode: !compact)
         let text = try await view.evaluateJavaScript("updateCard(" + JSONText.encode(state) + ");document.querySelector('#surface').innerText") as? String ?? ""
         if compact, (try await view.evaluateJavaScript("Array.from(document.querySelectorAll('.calm-value')).some(e=>{const r=document.createRange();r.selectNodeContents(e);return r.getBoundingClientRect().right>document.querySelector('#surface').getBoundingClientRect().right+1})") as? Bool) == true {
             throw AppError.message("The compact primary reading was visibly clipped: " + text)

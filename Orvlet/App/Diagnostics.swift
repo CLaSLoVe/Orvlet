@@ -12,12 +12,12 @@ enum Diagnostics {
         #if DEBUG
             ContinuationStudy.record(event, fields)
             if benchmarkEvents != nil,
-                ["api", "round", "tool", "tool_error", "intent_invalid", "decision_context", "ui_spec"].contains(event)
+                ["api", "round", "tool", "tool_error", "model_request", "model_error", "intent_invalid", "decision_context", "ui_spec", "card_placement"].contains(event)
             {
                 var entry = fields.filter {
                     [
                         "seconds", "model", "usage", "tools", "name", "category", "reason", "promptBytes", "toolBytes",
-                        "toolCount", "route", "form", "fields",
+                        "toolCount", "route", "form", "fields", "stage", "reasonCode", "timeoutSeconds", "layout", "requested", "nextUse", "sharedContent",
                     ].contains($0.key)
                 }
                 entry["event"] = event
@@ -29,7 +29,7 @@ enum Diagnostics {
             // responses, generated code, field values or credentials.
             let allowed: Set<String> = [
                 "behavior", "fieldPath", "requestID", "taskID", "stage", "seconds", "name", "tools", "attempt", "kind",
-                "format", "failed",
+                "format", "failed", "status",
                 "cancelled", "type", "category", "argumentKeys", "contentLength", "paused", "origin", "held",
                 "waitingForInterface", "restoringPlayback", "revision", "playing", "currentTime", "promptBytes",
                 "toolBytes", "toolCount", "route",
@@ -65,6 +65,7 @@ enum Diagnostics {
         if error is ToolArgumentError || error is DecodingError { return "schema" }
         if error is ModelAccessError { return "credentials" }
         if error is TaskCodeError { return "calculation" }
+        if error is SourceReadFailure { return "source" }
         if error is URLError { return "network" }
         let text = error.localizedDescription.lowercased()
         if text.contains("runtime") || text.contains("scheduled") || text.contains("continuing") { return "runtime" }

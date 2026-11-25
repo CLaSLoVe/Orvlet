@@ -24,11 +24,69 @@ enum TaskActivity: Equatable {
 
 struct TaskActivityReceipt {
     let id = UUID()
-    let created = Date()
+    let created: Date
     let activity: TaskActivity
+    init(activity: TaskActivity, created: Date = Date()) {
+        self.activity = activity
+        self.created = created
+    }
+    var visibleActivity: TaskActivity? {
+        activity == .needsInput || Date().timeIntervalSince(created) < 8 ? activity : nil
+    }
+}
+
+enum TaskIssueSource: String {
+    case browser, readings, playback, interface, data, runtime
+    var title: String {
+        switch self {
+        case .browser: "Page connection"
+        case .readings: "Page data"
+        case .playback: "Playback control"
+        case .interface: "View update"
+        case .data: "Data update"
+        case .runtime: "Task update"
+        }
+    }
 }
 
 extension AppModel {
+    /// Background failures belong in the owning conversation. Never open a
+    /// window, steal focus, or repeat the same incident on every retry.
+    func reportTaskIssue(_ id: UUID, source: TaskIssueSource, detail: String) {
+        let owners = taskIssueOwners(id)
+        var changed = false
+        for owner in owners {
+            let text = source.title + ": " + String(detail.prefix(2000))
+            if messages.last(where: { $0.taskID == owner && ($0.issueResource ?? $0.taskID) == id
+                && $0.issueSource == source.rawValue && $0.issueResolved != true })?.text == text {
+                continue
+            }
+            let messageID = appendMessage(text, isUser: false, taskID: owner)
+            if let i = messages.firstIndex(where: { $0.id == messageID }) {
+                messages[i].issueSource = source.rawValue
+                messages[i].issueResource = id
+            }
+            changed = true
+            if !commandPanelVisible || conversationTaskID != owner { unreadReplyIDs.insert(messageID) }
+        }
+        if changed { persistConversation() }
+    }
+    func resolveTaskIssue(_ id: UUID, source: TaskIssueSource) {
+        let owners = Set(taskIssueOwners(id))
+        var changed = false
+        for i in messages.indices where messages[i].taskID.map(owners.contains) == true
+            && (messages[i].issueResource ?? messages[i].taskID) == id
+            && messages[i].issueSource == source.rawValue && messages[i].issueResolved != true {
+            unreadReplyIDs.remove(messages[i].id)
+            messages[i].issueResolved = true
+            changed = true
+        }
+        if changed { persistConversation() }
+    }
+    private func taskIssueOwners(_ id: UUID) -> [UUID] {
+        if sideTasks.contains(where: { $0.id == id }) { return [id] }
+        return work.snapshot.views.values.filter { $0.artifacts.contains(id) && $0.closed != true }.map(\.id)
+    }
     func loadModelKey(for connection: ModelConnection? = nil) async throws -> String {
         let selected = connection ?? settings.mainConnection
         let key = try await selected.loadKey()
@@ -58,9 +116,22 @@ extension AppModel {
         if buildingSurface && task.id == browser.id { return .working("Preparing view…") }
         if queuedTaskRequests.contains(where: { $0.taskID == task.id }) { return .queued }
         if task.dataIssue != nil { return .stale }
-        if let receipt = taskActivityReceipts[task.id] { return receipt.activity }
+        if let activity = taskActivityReceipts[task.id]?.visibleActivity,
+            !(activity == .succeeded && task.isMediaTask && task.terminalLabel == nil) {
+            return activity
+        }
         if ["Needs attention", "Task failed", "Interrupted · retry"].contains(task.status) { return .failed }
         return nil
+    }
+    /// A recovered resource is not a failed task. Keep the failed request in its
+    /// conversation, while removing its obsolete overlay from working controls.
+    func clearPlaybackFailure(_ id: UUID, playing: Bool) {
+        guard let i = sideTasks.firstIndex(where: { $0.id == id && $0.isMediaTask }),
+            sideTasks[i].terminalLabel == nil else { return }
+        if taskActivityReceipts[id]?.activity == .failed { taskActivityReceipts[id] = nil }
+        if ["Needs attention", "Task failed", "Interrupted · retry"].contains(sideTasks[i].status) {
+            sideTasks[i].status = playing ? "Playing" : "Paused"
+        }
     }
     func recordInterfaceFailure(_ id: UUID, _ error: Error) {
         guard let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
@@ -72,6 +143,7 @@ extension AppModel {
             persistSideTasks()
             return
         }
+        reportTaskIssue(id, source: .interface, detail: error.localizedDescription)
         recordTaskOutcome(id, .interfaceFailed)
         persistSideTasks()
     }
@@ -82,7 +154,7 @@ extension AppModel {
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(8))
             guard let self, taskActivityReceipts[id]?.id == receipt.id else { return }
-            if outcome == .failed || outcome == .needsInput {
+            if outcome == .needsInput {
                 refreshStackAttention()
             } else {
                 taskActivityReceipts[id] = nil
@@ -130,6 +202,7 @@ extension AppModel {
         connectionCheckTask?.cancel()
         let connection = settings.mainConnection
         let fast = settings.fast
+        let decisionAPI = settings.decisionAPI
         let fastAccount = settings.fastKeyAccount
         let fastEnabled = settings.useFast
         mainServiceState = connection.endpoint.isConfigured ? "checking" : "unconfigured"
@@ -169,18 +242,18 @@ extension AppModel {
                 fastServiceState = "checking"
                 do {
                     let key = try await SecretStore.load(fastAccount)
-                    let response = try await JevClient.judge(
-                        endpoint: fast, key: key, state: ["category": "audio", "playing": true],
+                    let response = try await DecisionClient.judge(
+                        endpoint: fast, api: decisionAPI, key: key, state: ["category": "audio", "playing": true],
                         questions: ["audio": "Is audio playing?"], timeout: 4)
                     try Task.checkCancellation()
-                    guard response["audio"] != nil else { throw AppError.message("Unexpected Jev response.") }
+                    guard response["audio"] != nil else { throw AppError.message("Unexpected decision response.") }
                     fastServiceState = "ready"
                 } catch {
                     guard !Task.isCancelled else { return }
                     fastServiceState = "unavailable"
                     if notify && mainServiceState == "ready" {
                         showConnectionNotice(
-                            "Jev isn't available. Orvlet will use its default model flow and local task ordering.")
+                            "The decision service isn't available. Orvlet will use its default model flow and local task ordering.")
                     }
                 }
             } else {

@@ -8,6 +8,18 @@ final class APIDataService {
         let checked: Date
         let response: Any
 
+        /// inspect_api presents the response in its own `data` envelope. Accept
+        /// either coordinate system, retaining a real source `/data` member.
+        /// Never search by leaf name or silently bind a different record.
+        func sourcePointer(_ pointer: String) -> String {
+            if APIDataSpec.value(pointer, in: response) != nil { return pointer }
+            if pointer.hasPrefix("/data/") {
+                let relative = String(pointer.dropFirst(5))
+                if APIDataSpec.value(relative, in: response) != nil { return relative }
+            }
+            return pointer
+        }
+
         /// Keep small responses intact. For large payloads show real paths and representative
         /// values without copying whole time series into every subsequent decision.
         var preview: Any {
@@ -93,8 +105,20 @@ final class APIDataService {
     func sample(url: String, previous: Sample?, maxAge: TimeInterval = 60) async throws -> Sample {
         let address = try PublicDataClient.url(url).absoluteString
         if let previous, previous.url == address, (0..<maxAge).contains(now().timeIntervalSince(previous.checked)) { return previous }
-        let response = try await fetch(address)
-        return Sample(url: address, checked: now(), response: response)
+        do {
+            let response = try await fetch(address)
+            return Sample(url: address, checked: now(), response: response)
+        } catch {
+            if error is CancellationError || Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                throw CancellationError()
+            }
+            let hostUnavailable = (error as? URLError).map {
+                [URLError.cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .secureConnectionFailed,
+                    .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot].contains($0.code)
+            } ?? false
+            throw SourceReadFailure(url: address, reason: error.localizedDescription,
+                allowsCorrection: error is PublicDataRequestIssue, hostUnavailable: hostUnavailable)
+        }
     }
     func acquire(_ proposed: APIDataSpec, previous: Sample? = nil, observed: ((Sample) -> Void)? = nil) async throws -> Reading {
         let spec = try proposed.validated()
@@ -104,7 +128,7 @@ final class APIDataService {
         let json = sample.response
         var state: [String: String] = [:]
         for (index, field) in spec.fields.enumerated() {
-            let value = APIDataSpec.value(try spec.expanded(field.pointer), in: json)
+            let value = APIDataSpec.value(try spec.expandedPointer(field.pointer), in: json)
             if let pointer = field.itemPointer {
                 state[field.key] = try Self.column(value, pointer: pointer, index: index)
                 continue
@@ -144,7 +168,7 @@ final class APIDataService {
             }
         }
         let updated = try spec.updatedAtPointer.flatMap {
-            APIDataSpec.scalar(APIDataSpec.value(try spec.expanded($0), in: json))
+            APIDataSpec.scalar(APIDataSpec.value(try spec.expandedPointer($0), in: json))
         }
         func timeFailure(_ code: String, _ issue: String, argument: Bool) throws -> Never {
             Diagnostics.record("api_validation", ["stage": "source_time", "reasonCode": code])
@@ -184,13 +208,18 @@ final class APIDataService {
                     return parts.count > 4 && parts[2] == "hourly" ? "/" + parts.prefix(4).joined(separator: "/") : nil
                 })
             if periods.count == 1, let prefix = periods.first,
-                let raw = APIDataSpec.scalar(APIDataSpec.value(try spec.expanded(prefix + "/time"), in: json)),
+                let raw = APIDataSpec.scalar(APIDataSpec.value(try spec.expandedPointer(prefix + "/time"), in: json)),
                 let time = Int(raw), (0...2359).contains(time)
             {
                 state["weatherSampleTime"] = String(format: "At %02d:%02d", time / 100, time % 100)
             }
         }
         state = try await calculateValidated(spec, state: state)
+        if let pointer = spec.recordPagePointer,
+            let raw = APIDataSpec.value(try spec.expandedPointer(pointer), in: json) as? String,
+            let url = try? PublicDataClient.url(raw) {
+            state["recordPageURL"] = url.absoluteString
+        }
         state["sourceRequest"] = requestURL
         state["resultStatus"] = ""
         state["sourceHost"] = URL(string: requestURL)?.host ?? "Data source"
@@ -295,7 +324,8 @@ final class APIDataService {
         }
         for key in (spec.inputs ?? [:]).keys
         where spec.fields.contains(where: { $0.key == key || $0.pointer.contains("{" + key + "}") })
-            || spec.updatedAtPointer?.contains("{" + key + "}") == true {
+            || spec.updatedAtPointer?.contains("{" + key + "}") == true
+            || spec.recordPagePointer?.contains("{" + key + "}") == true {
             if spec.inputs?[key] != state[key] { return false }
         }
         return true

@@ -28,16 +28,17 @@ wires services; feature extensions implement task, browser and storage behavior.
 `TaskRuntimeEngine` depends on `RuntimeTaskStore` and `TaskCodeExecuting`, not
 `AppModel` or `SideTask`. Its store contract exposes a runtime snapshot and
 synchronous edits to runtime-owned fields. `RuntimeTaskAdapter` maps those edits
-back to an existing observable task in one update. A missing task is never
-recreated. The engine cannot select windows, create tasks, read credentials,
+into a retained result, then projects its referencing views. A missing result
+is never recreated by a runtime sample. The engine cannot select windows, create tasks, read credentials,
 route messages or operate a browser through this interface. A failure callback
 lets the app record diagnostics without the engine writing application preferences.
 
 `APIDataService` accepts a public JSON fetch operation, a pure-code executor and
 a clock. It owns extraction, source checks, freshness and calculation. Fresh
 responses and cached input edits pass through the same output contract.
-`DataTaskController` retains UI task ownership, cancellation, revision checks and
-user feedback. Fixture tests inject a service at the composition root instead of
+`WorkRepository` retains result identity and execution revisions; `WorkViews`
+projects it into the UI. `DataTaskController` schedules source refreshes independently
+of view visibility. Fixture tests inject a service at the composition root instead of
 adding a test-only branch to the production acquisition path.
 
 The `Core` helpers do not import app or agent types. Serialization, scalar result
@@ -56,9 +57,12 @@ this is not a claim that all feature folders are isolated packages. Keep new
 service dependencies explicit, and put the mapping to observable application
 state in an adapter rather than widening a service's access to the entire model.
 
-## One request, one owner
+## Work and presentation
 
-`RequestDispatch` records a request and resolves its task. `RequestInterpreter`
+See [Work, execution, results, and views](work-model.md) for the durable model.
+
+`RequestDispatch` records the complete goal and starts an execution attempt.
+A conversation destination is separate from result and view identities. `RequestInterpreter`
 produces a typed intent, reusing eligible prepared routing decisions. Optional
 Jev advice can replace an expensive decision; unavailable advice falls back to
 the normal path. `AgentController` owns the execution loop and request revision.
@@ -83,10 +87,15 @@ receives the reply even if the user has selected another card meanwhile.
 
 ## State and lifetime
 
-- `SideTask` is the persisted task model. Compact and expanded views use the same
-  task; opening a view does not regenerate its behavior.
-- `TaskRevisionLedger` and runtime generations reject stale asynchronous writes.
-  Cancellation and Close dispose active work; Hide preserves task execution.
+See [the state-machine audit](state-machines.md) for transition ownership, cancellation, restart invariants and regression evidence, and [browser extensions](../browser-extensions.md) for the WebKit extension boundary.
+
+
+- `WorkRepository` persists goals, attempts, result definitions/state, and views.
+  `SideTask` projects these into the existing shell and adapts native resources.
+  Opening or regrouping a view does not regenerate its behavior.
+- Result revisions and runtime generations reject stale asynchronous writes.
+  Explicit stop cancels work; closing or hiding a view preserves its result and
+  executor. Input drafts and layout revisions belong to views.
 - `TaskRuntimeEngine` owns clocks and scheduled local work. View rendering never
   starts an independent timer or duplicates a recurring calculation.
 - `SessionRestoration` reconstructs source tasks. `ConversationStore` owns their

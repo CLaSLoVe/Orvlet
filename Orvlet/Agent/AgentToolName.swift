@@ -9,6 +9,11 @@ enum AgentToolName: String, CaseIterable {
     case showReadings = "show_readings"
     case inspectApi = "inspect_api"
     case queryApi = "query_api"
+    case buildDataTool = "build_data_tool"
+    case inspectResults = "inspect_results"
+    case presentResults = "present_results"
+    case operateResult = "operate_result"
+    case writeDocument = "write_document"
     case runCode = "run_code"
     case presentUi = "present_ui"
     case controlTask = "control_task"
@@ -31,14 +36,14 @@ enum AgentToolName: String, CaseIterable {
     /// Inspection and final verification may always be repeated. Effects use request-scoped receipts.
     var changesState: Bool {
         switch self {
-        case .loadTools, .observe, .screenshot, .history, .inspectApi, .calendarClarify, .finish: return false
+        case .loadTools, .observe, .screenshot, .history, .inspectApi, .inspectResults, .calendarClarify, .finish: return false
         default: return true
         }
     }
     var domain: Domain {
         switch self {
-        case .inspectApi, .readValue, .queryApi, .showReadings: return .data
-        case .loadTools, .manageTask, .runCode, .presentUi, .controlTask, .reuseSavedUi: return .workspace
+        case .inspectApi, .readValue, .queryApi, .buildDataTool, .showReadings, .inspectResults, .presentResults, .operateResult: return .data
+        case .loadTools, .manageTask, .runCode, .writeDocument, .presentUi, .controlTask, .reuseSavedUi: return .workspace
         case .timerStart, .calendarClarify, .calendarCreate: return .native
         case .findMusic, .observe, .reuseUi, .navigate, .act, .composeUi, .visibility, .history, .restore, .screenshot,
             .controlMedia:

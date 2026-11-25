@@ -31,6 +31,55 @@
                 (dirAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700
                     && (fileAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600,
                 "Local credential directory and file are owner-only")
+            // Hold the writer lock in a different process. Reads must see the last
+            // atomic snapshot immediately; a writer must wait and then preserve it.
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+            let ready = root.appendingPathComponent("ready")
+            child.arguments = ["-e", "open(my $gate, '>>', $ARGV[0]) or die; flock($gate,2) or die; open(my $ready, '>', $ARGV[1]) or die; close($ready); select(undef,undef,undef,0.6);",
+                directory.appendingPathComponent(".credentials.lock").path, ready.path]
+            try child.run()
+            defer { if child.isRunning { child.terminate() } }
+            let deadline = Date().addingTimeInterval(5)
+            while !FileManager.default.fileExists(atPath: ready.path) {
+                guard child.isRunning, Date() < deadline else { throw AppError.message("Credential lock fixture failed") }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let began = Date()
+            try check(try reopened.load("profile-one") == "replacement" && Date().timeIntervalSince(began) < 0.2,
+                "A separate process holding the writer lock does not block credential reads")
+            try reopened.save("synthetic-three", account: "profile-three")
+            child.waitUntilExit()
+            try check(try store.load("profile-one") == "replacement" && store.load("profile-three") == "synthetic-three",
+                "A concurrent credential writer waits for the lock without losing other profiles")
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for index in 0..<12 {
+                    group.addTask {
+                        let independent = LocalCredentials(directory: directory)
+                        try independent.save("synthetic", account: "concurrent-" + String(index))
+                        guard try independent.load("profile-one") == "replacement" else { throw ModelAccessError.authorizationRequired }
+                    }
+                }
+                try await group.waitForAll()
+            }
+            for index in 0..<12 {
+                guard try store.load("concurrent-" + String(index)) == "synthetic" else { throw AppError.message("Lost concurrent credential write") }
+            }
+            checks.append("Independent readers and writers preserve complete snapshots and all profiles")
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    for index in 0..<60 { try LocalCredentials(directory: directory).save(String(index), account: "rotating") }
+                }
+                for _ in 0..<4 {
+                    group.addTask {
+                        for _ in 0..<100 {
+                            guard try LocalCredentials(directory: directory).load("profile-one") == "replacement" else { throw ModelAccessError.authorizationRequired }
+                        }
+                    }
+                }
+                try await group.waitForAll()
+            }
+            checks.append("Readers accept complete opened snapshots while writers atomically replace their directory entries")
             let corrupt = Data("invalid synthetic data".utf8)
             try corrupt.write(to: file)
             var rejected = false

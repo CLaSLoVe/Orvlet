@@ -120,11 +120,12 @@ extension AgentController {
     /// For a number calculated from the user's own scoped instructions, a quick
     /// independent review can catch a missed condition before the card is visible.
     func reviewAssignedReading(_ surface: TaskSurface) async throws {
+        let decision = model.settings
         guard let run = RequestRun.current, let assignment = run.assignment, !observations.hasSamples,
-            !operatedPage, model.settings.useFast, Date() >= model.fastTriageRetryAfter,
+            !operatedPage, decision.useFast, Date() >= model.fastTriageRetryAfter,
             !model.isLiveTest || CommandLine.arguments.contains("--allow-live-services"),
             JevRequestTriage.eligible(assignment.original),
-            let url = URL(string: model.settings.fast.baseURL), url.scheme == "https", url.host == "api.typesafe.ai",
+            decision.decisionAPI.allowsBackground(decision.fast),
             let primary = CardMarkup.bindingKeys(in: surface.markup.compactHTML).subtracting(["title", "status"]).first,
             let reading = surface.state[primary],
             let range = reading.range(of: #"[+−-]?[0-9]+(?:[.,][0-9]+)*"#, options: .regularExpression)
@@ -132,8 +133,8 @@ extension AgentController {
         // Only the numeric part travels alongside the already eligible human instruction.
         let number = String(reading[range])
         guard run.reviewedReadings.insert(assignment.focus + "|" + number).inserted,
-            let key = try? await SecretStore.loadAvailable(model.settings.fastKeyAccount), !key.isEmpty else { return }
-        let scores = try? await JevClient.judge(endpoint: model.settings.fast, key: key,
+            let key = try? await SecretStore.loadAvailable(decision.fastKeyAccount), !key.isEmpty else { return }
+        let scores = try? await DecisionClient.judge(endpoint: decision.fast, api: decision.decisionAPI, key: key,
             state: ["request": assignment.original, "focus": assignment.focus, "visibleNumber": number],
             questions: ["contradiction": "Independently derive the requested primary result for the assigned focus using the human's numbers, shared conditions and exceptions. Is the displayed number demonstrably wrong? An unknown value or a reasonable interpretation is not a contradiction."],
             timeout: 1.5)

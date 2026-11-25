@@ -300,7 +300,7 @@ struct RequestIntent: Codable {
                     tool)
             }
             if route == .api {
-                return ["query_api", "inspect_api", "reuse_saved_ui", "finish"].contains(tool)
+                return ["query_api", "build_data_tool", "read_value", "inspect_api", "reuse_saved_ui", "finish"].contains(tool)
             }
             return true
         }

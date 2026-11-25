@@ -55,6 +55,7 @@ extension APIDataSpec {
     }
     func presentationState(_ state: [String: String]) -> [String: String] {
         var result = state
+        if let subject = choiceSubject(state) { result["orvletChoiceSubject"] = subject }
         if card?.kind == .weather {
             result["weatherSampleTime"] = state["weatherSampleTime"] ?? ""
             if let key = card?.contextKey, result[key] == nil { result[key] = "" }

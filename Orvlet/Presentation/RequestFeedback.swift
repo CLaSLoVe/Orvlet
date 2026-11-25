@@ -35,13 +35,13 @@ extension AppModel {
             with: NSSize(width: 272, height: 1000), options: .usesLineFragmentOrigin,
             attributes: [.font: NSFont.systemFont(ofSize: 12)]
         ).height
-        return NSSize(width: 300, height: ceil(min(60, max(16, height))) + 86)
+        return NSSize(width: 300, height: ceil(min(60, max(16, height))) + (feedback?.kind == .information ? 104 : 86))
     }
     /// One quiet receipt on the existing shell. Full text stays in conversation;
     /// arriving results never focus the composer or interrupt playback.
     func deliverReply(_ text: String, kind: RequestFeedback.Kind = .success, taskID: UUID? = nil) {
         let owner = taskID ?? activeRequest?.owner?.id ?? activeRequest?.placeholderID ?? UUID()
-        appendMessage(
+        let messageID = appendMessage(
             text, isUser: false, taskID: owner,
             requestID: taskID == nil || taskID == activeRequest?.owner?.id ? activeRequest?.id : nil)
         if let index = sideTasks.firstIndex(where: { $0.id == owner && $0.kind == .result }) {
@@ -51,8 +51,8 @@ extension AppModel {
                 ? "Task failed"
                 : kind == .needsInput ? "Input needed" : kind == .authorization ? "Waiting for model" : "Ready"
         }
-        hasUnreadReply = !commandPanelVisible || conversationTaskID != owner
         guard !commandPanelVisible || conversationTaskID != owner else { return }
+        unreadReplyIDs.insert(messageID)
         feedbackTask?.cancel()
         // A ready interactive task is already its own receipt. Reserve larger
         // notices for answers, calendar outcomes, errors and required input.
@@ -73,6 +73,7 @@ extension AppModel {
         if !taskShelfVisible { onResize?(windowSize) }
         onShow?()
         refreshStackAttention()
+        if kind == .information { return } // Keep the conversation available for a follow-up.
         // Problems remain available until read or dismissed, without blinking or sound.
         feedbackTask = Task { [weak self] in
             do {
@@ -81,7 +82,7 @@ extension AppModel {
                     try await Task.sleep(for: .seconds(1))
                 }
                 guard let self, self.feedback?.id == receipt.id else { return }
-                if kind == .success || kind == .information {
+                if kind == .success {
                     self.dismissFeedback()
                 } else {
                     self.feedbackWakesStack = false
@@ -89,6 +90,14 @@ extension AppModel {
                 }
             } catch {}
         }
+    }
+    func sendFeedbackReply(_ text: String, to receipt: RequestFeedback) {
+        guard receipt.id == feedback?.id, let owner = receipt.taskID,
+            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        conversationDrafts[owner] = nil
+        openTaskConversation(owner)
+        command = text
+        sendCommand()
     }
     func dismissFeedback() {
         guard feedback != nil else { return }
@@ -104,11 +113,13 @@ extension AppModel {
 struct RequestFeedbackView: View {
     @ObservedObject var model: AppModel
     let feedback: RequestFeedback
+    @State private var reply = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 7) {
                 Image(systemName: feedback.icon).foregroundStyle(model.accent)
-                Text(feedback.title).fontWeight(.semibold)
+                Text(feedback.kind == .information ? (model.messages.last { $0.taskID == feedback.taskID && $0.isUser }?.text ?? feedback.title) : feedback.title)
+                    .fontWeight(.semibold).lineLimit(1)
                 Spacer(minLength: 0)
                 Button {
                     model.dismissFeedback()
@@ -120,18 +131,37 @@ struct RequestFeedbackView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityLabel(feedback.text)
             Spacer(minLength: 0)
-            Button(
-                feedback.kind == .authorization
-                    ? "Open Settings…" : feedback.kind == .needsInput ? "Reply…" : "Chat"
-            ) {
-                if feedback.kind == .authorization {
-                    model.onSettings?()
-                    return
+            if feedback.kind == .information {
+                HStack(spacing: 6) {
+                    TextField(model.userText("继续问…", "Ask a follow-up…"), text: $reply)
+                        .textFieldStyle(.plain).onSubmit { model.sendFeedbackReply(reply, to: feedback) }
+                        .onAppear { reply = feedback.taskID.flatMap { model.conversationDrafts[$0] } ?? "" }
+                        .onChange(of: reply) { _, value in
+                            if let id = feedback.taskID { model.conversationDrafts[id] = value }
+                        }
+                    Button {
+                        model.sendFeedbackReply(reply, to: feedback)
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill").font(.system(size: 16))
+                    }.buttonStyle(.plain).foregroundStyle(model.accent)
+                        .disabled(reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityLabel(model.userText("发送", "Send"))
+                }.padding(.horizontal, 9).frame(height: 28)
+                    .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+            } else {
+                Button(
+                    feedback.kind == .authorization
+                        ? "Open Settings…" : feedback.kind == .needsInput ? "Reply…" : "Chat"
+                ) {
+                    if feedback.kind == .authorization {
+                        model.onSettings?()
+                        return
+                    }
+                    if model.command.isEmpty, let prefix = feedback.replyPrefix { model.command = prefix }
+                    if let id = feedback.taskID { model.openTaskConversation(id) } else { model.openTaskHistory() }
                 }
-                if model.command.isEmpty, let prefix = feedback.replyPrefix { model.command = prefix }
-                if let id = feedback.taskID { model.openTaskConversation(id) } else { model.openTaskHistory() }
+                .buttonStyle(.plain).foregroundStyle(model.accent).font(.system(size: 11, weight: .medium))
             }
-            .buttonStyle(.plain).foregroundStyle(model.accent).font(.system(size: 11, weight: .medium))
         }
         .font(.system(size: 12)).padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

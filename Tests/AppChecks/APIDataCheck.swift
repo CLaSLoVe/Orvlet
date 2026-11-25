@@ -56,6 +56,61 @@
             model.isLiveTest = true
             model.persistHistory = false
             model.settings.autoAdapt = false
+            let inventory: [String:Any] = ["depots":["north":["count":24],"south":["count":40]],"unit":"pieces","updated":1795046551]
+            let inventorySample = APIDataService.Sample(url:"https://example.org/inventory",checked:Date(),response:inventory)
+            let intent: [String:Any] = ["source":inventorySample.url,"title":"Inventory","subject":"{depot} stock",
+                "parameters":["depot":["label":"Depot","value":"north","choicesFrom":"/depots"],"group":["label":"Group size","value":6]],
+                "bindings":["count":"/depots/{depot}/count","unit":"/unit"],
+                "results":[["label":"Groups","expression":"Number(data.count) / Number(input.group)","unit":"groups"],
+                           ["label":"Available","value":"count","unit":"{unit}"]],"updatedAt":"/updated"]
+            try ToolContract.validate("build_data_tool",intent)
+            var compiled = try DataToolPlan.compile(intent,sample:inventorySample)
+            let nestedSource = APIDataService.Sample(url:"https://example.org/items/group/north",checked:Date(),response:["name":"group/north","count":24])
+            var nestedPlan: [String:Any] = ["source":nestedSource.url,"title":"Inventory","url":"https://example.org/items/{item}",
+                "parameters":["item":["label":"Item","value":"group/north","options":["group/north","group/south"],"verifyAt":"/name"]],
+                "bindings":["count":"/count"],"results":[["label":"Count","value":"count"]]]
+            nestedPlan["verify"] = ["count":"24"]
+            var nested = try DataToolPlan.compile(nestedPlan,sample:nestedSource)
+            try check(try nested.requestURL().absoluteString == nestedSource.url,"The compiled path reproduces the observed hierarchical identifier")
+            nested.inputs?[nested.controls!.first!.key] = "group/south"
+            try check(try nested.requestURL().absoluteString == "https://example.org/items/group/south","Changing a hierarchical identifier preserves path separators without changing the host")
+            let variedSource = APIDataService(code:model.taskCode,fetch:{ _ in ["name":"group/south","count":40] })
+            let varied = try await variedSource.read(nested)
+            try check(varied["result0"] == "40" && nested.expectations?.count == 1,
+                "Switching records verifies their identities without pinning the first measured value")
+            var inventoryFetches = 0
+            let inventoryService = APIDataService(code:model.taskCode,fetch:{ _ in inventoryFetches += 1; return inventory })
+            let firstInventory = try await inventoryService.acquire(compiled,previous:inventorySample)
+            try check(firstInventory.state["result0"] == "4" && firstInventory.state["toolSubject"] == "north stock" && inventoryFetches == 0,
+                      "The host compiler reuses acquired evidence and assembles calculation state without a second fetch")
+            let depotKey = compiled.controls!.first { $0.label == "Depot" }!.key
+            let groupKey = compiled.controls!.first { $0.label == "Group size" }!.key
+            compiled.inputs?[depotKey] = "south"; compiled.inputs?[groupKey] = "8"
+            let nextInventory = try await inventoryService.acquire(compiled,previous:inventorySample)
+            let inventorySurface = try compiled.surface(title:"Inventory",state:nextInventory.state)
+            try check(nextInventory.state["result0"] == "5" && nextInventory.state["toolSubject"] == "south stock"
+                && compiled.controls?.first?.options == ["north","south"] && inventorySurface.fields.count == 2
+                && inventorySurface.markup.html.contains("data-change='updateData'"),
+                "The same domain-independent plan binds a changed object, numeric input, choice control and visible result")
+            try check(APIDataSpec.timestamp("1795046551") == APIDataSpec.timestamp("1795046551000"),
+                "Standard publication timestamp encodings are decoded by the host")
+            var enveloped = intent
+            enveloped["bindings"] = ["count":"/data/depots/{depot}/count","unit":"/data/unit"]
+            enveloped["updatedAt"] = "/data/updated"
+            enveloped["verify"] = ["unit":"pieces"]
+            let envelopedSpec = try DataToolPlan.compile(enveloped,sample:inventorySample)
+            let envelopedReading = try await inventoryService.acquire(envelopedSpec,previous:inventorySample)
+            let ambiguous = APIDataService.Sample(url:inventorySample.url,checked:Date(),response:["data":["unit":"nested"],"unit":"root"])
+            try check(envelopedReading.state["result0"] == "4" && envelopedSpec.updatedAtPointer == "/updated"
+                && ambiguous.sourcePointer("/data/unit") == "/data/unit",
+                "Observation envelopes resolve at the boundary without overriding an actual source data member")
+            let keyed = APIDataService.Sample(url:inventorySample.url,checked:Date(),response:["depots":["east/west~1":["count":30]],"unit":"pieces"])
+            var keyedIntent = intent
+            keyedIntent["parameters"] = ["depot":["label":"Depot","value":"east/west~1","choicesFrom":"/depots"],"group":["label":"Group size","value":6]]
+            keyedIntent.removeValue(forKey:"updatedAt")
+            let keyedSpec = try DataToolPlan.compile(keyedIntent,sample:keyed)
+            let keyedReading = try await inventoryService.acquire(keyedSpec,previous:keyed)
+            try check(keyedReading.state["result0"] == "5", "Parameter keys use JSON pointer escaping rather than URL encoding")
             defer {
                 for task in model.sideTasks { model.stopTaskActions(task.id) }
                 model.adaptive.invalidate()
@@ -99,7 +154,7 @@
             let owner = UUID()
             model.publishTaskSurface(surface, id: owner)
             model.refreshAPIData(owner, fields: ["amount": "100"], force: false)
-            await model.taskActionJobs[owner]?.value
+            await (model.work.view(owner).flatMap { model.workJobs[$0.selected] } ?? model.taskActionJobs[owner])?.value
             try check(
                 model.sideTasks.first?.liveValues?["converted"] == "85.00" && fetches == 1,
                 "Editing a local parameter recalculates immediately without a model or API request")
@@ -108,28 +163,28 @@
                 model.sideTasks.first?.liveValues?["converted"] == "—" && model.sideTasks.first?.dataIssue == nil,
                 "An incomplete input clears the answer and asks for a value without a task failure")
             model.refreshAPIData(owner, fields: ["amount": "56"], force: false)
-            await model.taskActionJobs[owner]?.value
+            await (model.work.view(owner).flatMap { model.workJobs[$0.selected] } ?? model.taskActionJobs[owner])?.value
             payload["rate"] = 0.9
             model.refreshAPIData(owner)
-            await model.taskActionJobs[owner]?.value
+            await (model.work.view(owner).flatMap { model.workJobs[$0.selected] } ?? model.taskActionJobs[owner])?.value
             try check(
                 model.sideTasks.first?.liveValues?["converted"] == "50.40" && fetches == 2,
                 "Refreshing a card fetches and recalculates directly without the model or a browser")
             payload["base"] = "USD"
             payload["rate"] = 7
             model.refreshAPIData(owner, fields: ["fromCurrency": "USD"], force: false)
-            await model.taskActionJobs[owner]?.value
+            await (model.work.view(owner).flatMap { model.workJobs[$0.selected] } ?? model.taskActionJobs[owner])?.value
             try check(
                 model.sideTasks.first?.liveValues?["converted"] == "392.00" && fetches == 3
                     && model.sideTasks.first?.liveValues?["sourceRequest"]?.hasSuffix("USD/CNY") == true,
                 "Changing a source parameter requests the new API URL and verifies its actual returned identity")
             model.refreshAPIData(owner, fields: ["fromCurrency": "HKD"], force: false)
-            await model.taskActionJobs[owner]?.value
+            await (model.work.view(owner).flatMap { model.workJobs[$0.selected] } ?? model.taskActionJobs[owner])?.value
             model.refreshAPIData(owner)
-            await model.taskActionJobs[owner]?.value
+            await (model.work.view(owner).flatMap { model.workJobs[$0.selected] } ?? model.taskActionJobs[owner])?.value
             try check(
                 model.sideTasks.first?.liveValues?["converted"] == "—" && model.sideTasks.first?.dataIssue != nil
-                    && model.sideTasks.first?.taskSurface?.state["converted"] == "392.00",
+                    && model.work.view(owner).flatMap { model.work.artifact($0.selected) }?.values["converted"] == "392.00",
                 "A changed source identity cannot label the previous verified reading as the new result"
             )
             payload["base"] = "HKD"
@@ -260,7 +315,7 @@
                     return ["current": ["time": today + "T12:00:00Z", "temperature_2m": 18.2]]
                 })
             model.refreshAPIData(weatherID, fields: ["latitude": "35.6"], force: false)
-            await model.taskActionJobs[weatherID]?.value
+            await (model.work.view(weatherID).flatMap { model.workJobs[$0.selected] } ?? model.taskActionJobs[weatherID])?.value
             try check(
                 weatherURL.contains("latitude=35.6")
                     && model.sideTasks.first(where: { $0.id == weatherID })?.liveValues?["temperature"] == "18.2",
@@ -296,7 +351,7 @@
             model.agent.completionOverride = { turns in
                 rounds += 1
                 if rounds == 1 {
-                    return ["tool_calls": [RequestStep(tool: "load_tools", arguments: JSONText.encode(["family": "data"])).call]]
+                    return ["tool_calls": [RequestStep(tool: "load_tools", arguments: JSONText.encode(["family": "advanced_data"])).call]]
                 }
                 if rounds == 3 {
                     let feedback = turns.last(where: { $0["role"] as? String == "tool" })?["content"] as? String ?? ""
@@ -333,6 +388,12 @@
                     && model.webURL.isEmpty,
                 "API execution repairs a source binding using same-response hints, accepts duplicate echoes and never opens a webpage"
             )
+            let mapped: [String:Any] = ["warehouses":["north":["count":12]], "rows":[["count":2]]]
+            try check(APIDataSpec.reportedKeys("/warehouses/north/count", in:mapped).contains("north")
+                && APIDataSpec.reportedKeys("/warehouses/south/count", in:mapped).isEmpty
+                && APIDataSpec.reportedKeys("/warehouses/north/missing", in:mapped).isEmpty
+                && !APIDataSpec.reportedKeys("/rows/0/count", in:mapped).contains("0"),
+                "Source identity can come from a real record key; missing records, invented paths and array positions cannot prove identity")
             // Generic webpage fallback: actual values in inputs/selects, not XE-specific selectors.
             let web = AppModel()
             web.isLiveTest = true
@@ -468,7 +529,10 @@
             let readingID = UUID()
             model.publishTaskSurface(readingSurface, id: readingID)
             let readingIndex = model.sideTasks.firstIndex { $0.id == readingID }!
-            model.sideTasks[readingIndex].dataUpdatedAt = Date().addingTimeInterval(-61)
+            if let id = model.work.view(readingID)?.selected, let artifact = model.work.artifact(id) {
+                model.work.update(id,expecting:artifact.revision) { $0.checked = Date().addingTimeInterval(-61) }
+                model.projectWorkResult(id)
+            }
             model.collapsed = true
             model.selectedTaskID = nil
             model.scheduleDataRefresh()
@@ -553,7 +617,7 @@
                 "A station capsule binds the fetched display name independently of its lookup key")
             await model.refreshAPIData(stationID, fields: ["station": "South"], force: false)?.value
             let wrong = model.sideTasks.first { $0.id == stationID }
-            try check(stationReads == 2 && wrong?.state["rate"] == "—" && wrong?.taskSurface?.state["rate"] == "12",
+            try check(stationReads == 2 && wrong?.state["rate"] == "—" && model.work.view(stationID).flatMap { model.work.artifact($0.selected) }?.values["rate"] == "12",
                 "An identity edit on the same URL refetches and keeps the previous station out of the new view")
             station = "South"
             await model.refreshAPIData(stationID)?.value
@@ -582,7 +646,11 @@
             try await CardVisualCheck.run()
             checks.append("A non-financial card renders and refreshes a real WebKit chart and table")
             model.closeTask(readingID)
-            try check(model.dataRefreshTimer == nil, "Closing the last scheduled reading releases the timer")
+            try check(model.dataRefreshTimer != nil, "Closing a reading view does not silently stop its retained schedule")
+            for artifact in model.work.snapshot.artifacts.values where artifact.definition.apiData?.refreshSeconds != nil {
+                await model.performWorkOperation(artifact.id,action:"stopUpdates",fields:[:])?.value
+            }
+            try check(model.dataRefreshTimer == nil, "Explicitly stopping retained schedules releases the timer without requiring cards")
             return checks
         }
         static func live(_ model: AppModel, delegate: AppDelegate) async {

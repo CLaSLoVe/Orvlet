@@ -13,6 +13,7 @@
             model.persistHistory = false
             model.settings.autoAdapt = false
             defer { model.taskRuntime.stopAll() }
+            func resource(_ id: UUID) -> UUID { model.work.view(id)?.selected ?? id }
             let markup = CardMarkup(
                 html: "<strong data-bind='value'></strong>", compactHTML: "<span data-bind='value'></span>", css: "")
             let epochID = UUID()
@@ -37,24 +38,24 @@
             surface = try surface.validated()
             let id = UUID()
             model.publishTaskSurface(surface, id: id)
-            try await model.taskRuntime.verify(id)
+            try await model.taskRuntime.verify(resource(id))
             let first = model.sideTasks.first(where: { $0.id == id })?.state["value"]
             model.dismissTask(id)
             try await Task.sleep(for: .milliseconds(1200))
             try check(
                 model.sideTasks.first(where: { $0.id == id })?.state["value"] != first,
                 "Hidden tasks continue sampling independently of the visible card")
-            model.taskRuntime.control(id, operation: "pause")
+            model.taskRuntime.control(resource(id), operation: "pause")
             let paused = model.sideTasks.first(where: { $0.id == id })?.state["value"]
             try await Task.sleep(for: .milliseconds(1200))
             try check(
                 model.sideTasks.first(where: { $0.id == id })?.state["value"] == paused,
                 "Pausing freezes the elapsed source")
-            model.taskRuntime.control(id, operation: "resume")
+            model.taskRuntime.control(resource(id), operation: "resume")
             try check(
                 model.sideTasks.first(where: { $0.id == id })?.state["value"] == paused,
                 "Resume excludes paused wall time instead of jumping forward")
-            try await model.taskRuntime.verify(id)
+            try await model.taskRuntime.verify(resource(id))
             try check(
                 model.sideTasks.first(where: { $0.id == id })?.state["value"] != paused,
                 "Resumed source produces new scheduled samples")
@@ -73,7 +74,7 @@
                 "Restored tasks reconstruct fresh data from saved sources")
             restored.taskRuntime.stopAll()
             model.closeTask(id)
-            try check(model.taskRuntime.receipts[id] == nil, "Closing cancels sampling and discards its generation")
+            try check(model.taskRuntime.receipts[resource(id)] != nil && model.sideTasks.allSatisfy { $0.id != id }, "Closing a view retains its independently running resource")
             let failed = SideTask(kind: .result, title: "Failed")
             model.sideTasks = [failed]
             model.decorateTask(failed.id)
@@ -88,17 +89,17 @@
                         code: "return {state:{value:String(Number(state.value)+1)}}", intervalSeconds: 1,
                         outputKeys: ["value"])))
             model.publishTaskSurface(try surface.validated(), id: counterID)
-            try await model.taskRuntime.verify(counterID)
+            try await model.taskRuntime.verify(resource(counterID))
             try check(
                 Int(model.sideTasks.first(where: { $0.id == counterID })!.state["value"]!)! >= 2,
                 "Scheduled code actually executes repeatedly through bounded workers")
-            model.taskRuntime.control(counterID, operation: "stop")
+            model.taskRuntime.control(resource(counterID), operation: "stop")
             let stopped = model.sideTasks.first(where: { $0.id == counterID })!.state["value"]
             try await Task.sleep(for: .milliseconds(1200))
             try check(
                 model.sideTasks.first(where: { $0.id == counterID })!.state["value"] == stopped,
                 "Stopped recurring calculations never apply late results")
-            model.taskRuntime.control(counterID, operation: "restart")
+            model.taskRuntime.control(resource(counterID), operation: "restart")
             try check(
                 model.sideTasks.first(where: { $0.id == counterID })?.state["value"] == "0",
                 "Restart resets scheduled output to its original value before the next interval")
@@ -123,22 +124,23 @@
             var scheduled = surface
             scheduled.runtime?.refresh?.intervalSeconds = 30
             model.publishTaskSurface(try scheduled.validated(), id: scheduledID)
-            try await model.taskRuntime.verify(scheduledID)
+            try await model.taskRuntime.verify(resource(scheduledID))
             try check(
                 model.sideTasks.first(where: { $0.id == scheduledID })?.state["value"] == "0",
                 "Long-interval preparation does not apply a reducer before its due time")
             try check(
                 model.sideTasks.first(where: { $0.id == scheduledID })?.status == "Scheduled",
                 "A prepared future callback is described as scheduled, not fresh data")
-            model.taskRuntime.control(scheduledID, operation: "pause")
-            model.taskRuntime.attach(scheduledID)
+            model.taskRuntime.control(resource(scheduledID), operation: "pause")
+            model.taskRuntime.attach(resource(scheduledID))
             try await Task.sleep(for: .milliseconds(400))
             try check(
-                model.taskRuntime.receipts[scheduledID]?.prepared == false,
+                model.taskRuntime.receipts[resource(scheduledID)]?.prepared == false,
                 "Restoring a paused task never prepares or executes its reducer")
             var mixed = scheduled
             mixed.runtime?.sources = [TaskDataSource(key: "clock", kind: .clock, format: .seconds)]
             model.publishTaskSurface(try mixed.validated(), id: scheduledID)
+            model.taskRuntime.control(resource(scheduledID), operation: "resume")
             try await Task.sleep(for: .milliseconds(300))
             let clockValue = model.sideTasks.first(where: { $0.id == scheduledID })?.state["clock"]
             try await Task.sleep(for: .milliseconds(1200))

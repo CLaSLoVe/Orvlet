@@ -34,6 +34,7 @@ extension AgentController {
                     ticket: ticket, connection: requestConnection ?? model.settings.mainConnection, key: key)
                 guard revision == steeringRevision else { throw CancellationError() }
                 verifyEffect(model.userText("已更新界面。", "Updated the view."))
+                if requestShape != .dependent { ToolExecutionScope.current?.verification?.finalCheck = true }
             } else {
                 guard let raw = input["action"] as? String, let action = RequestIntent.TaskAction(rawValue: raw),
                     action != .perform
@@ -46,6 +47,29 @@ extension AgentController {
                 verifyEffect(reply)
             }
             return ["verified": true, "task_id": owner.id.uuidString]
+        case "write_document":
+            guard nativeRequestActive, let filename = input["filename"] as? String, let code = input["code"] as? String else {
+                throw AppError.message("Supply a document filename and a script.")
+            }
+            var values = try observations.inputs(input)
+            values["files"] = RequestRun.current?.attachments ?? [:]
+            let result: [String: Any]
+            do { result = try await model.taskCode.run(code: code, input: values, state: [:]) }
+            catch is CancellationError { throw CancellationError() }
+            catch {
+                // Script errors can quote user-selected file contents.
+                throw ToolArgumentError(path: "$.code", issue: "read the attached text from input.files and return {content: string}")
+            }
+            guard let content = result["content"] as? String else {
+                throw ToolArgumentError(path: "$.code", issue: "return {content: string} with the complete document")
+            }
+            try Task.checkCancellation()
+            guard revision == steeringRevision else { throw CancellationError() }
+            let file = try model.publishWorkFile(name: filename, content: content, id: activeTaskID, ticket: interfaceTicket)
+            taskSurfaceReady = true
+            verifyEffect(model.userText("文件已生成：", "Created ") + file.name)
+            ToolExecutionScope.current?.verification?.finalCheck = true
+            return ["verified": true, "filename": file.name]
         case "run_code":
             guard nativeRequestActive, let code = input["code"] as? String else {
                 throw AppError.message("Code execution requires an active task and a function body.")
@@ -80,7 +104,16 @@ extension AgentController {
             }
             guard revision == steeringRevision else { return ["superseded": true] }
             let id = UUID().uuidString
-            codeReceipt = (id, result, bindings.isEmpty ? nil : sourceValues)
+            codeReceipt = (id, result, bindings.isEmpty ? nil : sourceValues, observations.sourceNotes(for: bindings))
+            if let run = RequestRun.current, let values = try? TaskValues.decode(result), !values.isEmpty {
+                let artifact = model.work.retain(title: String(currentRequest.prefix(80)), values: values,
+                    definition: WorkDefinition(), design: WorkDesign(), goalID: run.goalID,
+                    source: observations.sourceNotes(for: bindings))
+                run.retainResult(artifact, needsView: false)
+            }
+            if let key = input["replyKey"] as? String, !bindings.isEmpty {
+                _ = retainObservedSnapshot(["title": String(currentRequest.prefix(100)), "form": ["compactKey": key]])
+            }
             if let key = replyKey {
                 guard let raw = (result["state"] as? [String: Any] ?? result)[key],
                     let answer = APIDataSpec.scalar(raw), !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -91,10 +124,11 @@ extension AgentController {
             }
             var receipt: [String: Any] = ["verified": true, "run_id": id, "result": result]
             if input["replyKey"] != nil && !mayReply {
-                receipt["next"] = "The calculation is verified. Use this receipt with present_ui for the requested card or continue the outstanding work. If the human explicitly requests text only, include verbatim answerEvidence for replyKey."
+                receipt["next"] = wantsEditableTool ? "Use the verified result on the card and bind the next useful operation to a visible control." : "The calculation is verified. Use this receipt with present_ui for the requested card or continue the outstanding work. If the human explicitly requests text only, include verbatim answerEvidence for replyKey."
             }
             return receipt
         case "present_ui":
+            let verifiedSnapshot = retainObservedSnapshot(input)
             if recovery.needsSourceReading && !freshSourceLoaded {
                 guard requestIntent.behavior == .snapshot, let values = codeReceipt?.sourceValues, input["initialize"] == nil else {
                     throw AppError.message("The external reading is still unverified. Bind a live source or verify the observed page before presenting its values.")
@@ -103,7 +137,39 @@ extension AgentController {
             } else if let values = codeReceipt?.sourceValues, input["initialize"] == nil {
                 try recovery.validateSnapshot(values, requirements: requestIntent.requirements)
             }
-            return try await presentWorkspace(input, revision: revision, origin: .generated)
+            let specification = try TaskForm.expandingStateView(input)
+            if let view = input["stateView"] as? [String: Any] {
+                try await reviewLocalChoices(view)
+                try Task.checkCancellation()
+                guard revision == steeringRevision else { throw CancellationError() }
+            }
+            do {
+                #if DEBUG
+                if verifiedSnapshot != nil && model.isLiveTest && CommandLine.arguments.contains("--reject-reading-layout") {
+                    throw ToolArgumentError(path: "$.markup", issue: "Injected presentation failure after verification")
+                }
+                #endif
+                return try await presentWorkspace(specification, revision: revision, origin: .generated)
+            } catch {
+                try Task.checkCancellation()
+                guard revision == steeringRevision, let snapshot = verifiedSnapshot, let summary = retainedReading,
+                    requestIntent.behavior == .snapshot, requestShape != .dependent, !wantsEditableTool,
+                    model.activeRequest?.owner == nil, model.requestPageID == nil,
+                    (input["actions"] as? [[String: Any]] ?? []).isEmpty, input["runtime"] == nil,
+                    input["stateView"] == nil, input["complete"] as? Bool == true,
+                    let form = input["form"] as? [String: Any], (form["inputs"] as? [[String: Any]] ?? []).isEmpty,
+                    (form["visuals"] as? [[String: Any]] ?? []).isEmpty, (form["buttons"] as? [[String: Any]] ?? []).isEmpty,
+                    (form["outputs"] as? [[String: Any]] ?? []).allSatisfy({ row in
+                        (row["key"] as? String).flatMap { snapshot.state[$0] } != nil && row["sourceAction"] == nil
+                    })
+                else { throw error }
+                try model.commitTaskSurface(snapshot, id: activeTaskID, ticket: interfaceTicket)
+                taskSurfaceReady = true
+                freshSourceLoaded = true
+                verifyEffect(summary)
+                Diagnostics.record("verified_reading_fallback", ["taskID": activeTaskID.uuidString])
+                return ["verified": true, "task_id": activeTaskID.uuidString]
+            }
         case "control_task":
             guard nativeRequestActive, let owner = model.activeRequest?.owner,
                 let task = model.sideTasks.first(where: { $0.id == owner.id }),
@@ -194,8 +260,9 @@ extension AgentController {
                         "The control succeeded. If all requested work is complete, use finish(task_ready); do not repeat it.",
                 ]
             }
-            model.taskRuntime.control(owner.id, operation: operation)
-            if ["resume", "restart", "refresh"].contains(operation) { try await model.taskRuntime.verify(owner.id) }
+            let runtimeID = model.work.view(owner.id)?.selected ?? owner.id
+            model.taskRuntime.control(runtimeID, operation: operation)
+            if ["resume", "restart", "refresh"].contains(operation) { try await model.taskRuntime.verify(runtimeID) }
             guard revision == steeringRevision else { return ["superseded": true] }
             verifyEffect(model.sideTasks.first(where: { $0.id == owner.id })?.status ?? "Updated.")
             taskControlReceipt = (owner.id, effectReply)
@@ -246,9 +313,7 @@ extension AgentController {
                 ownCurrentPage()
                 return ["ok": true, "reused": true, "pending": "Verify the webpage outcome with finish."]
             }
-            guard model.requestPageID == nil else {
-                throw AppError.message("Keep this webpage request in its existing live card.")
-            }
+            // A saved method is reusable regardless of which source resource was inspected.
             var state = input["state"] as? [String: String] ?? [:]
             if var spec = recipe.surface?.apiData {
                 let inputKeys = Set((spec.inputs ?? [:]).keys)
@@ -288,7 +353,7 @@ extension AgentController {
                 throw AppError.message("Refresh an API-backed recipe with query_api and current source evidence.")
             }
             let handlers = surface.actions.filter { $0.kind == .code }
-            let initialize = input["initialize"] as? String ?? (handlers.count == 1 ? handlers[0].id : nil)
+            let initialize = input["initialize"] as? String ?? (!surface.fields.isEmpty && handlers.count == 1 ? handlers[0].id : nil)
             if initialize != nil {
                 guard Set(surface.fields).isSubset(of: Set(state.keys)) else {
                     throw AppError.message("Supply fresh values for every saved input field before recalculating.")
@@ -332,17 +397,82 @@ extension AgentController {
         }
     }
 
+    /// A source-backed observation can survive a broken layout or schedule.
+    /// Only a fully verified recipe may advertise continuing updates.
+    private func retainObservedSnapshot(_ input: [String: Any]) -> TaskSurface? {
+        guard let receipt = codeReceipt, let values = receipt.sourceValues, !receipt.sourceNotes.isEmpty,
+            input["initialize"] == nil, input["run_id"] == nil || input["run_id"] as? String == receipt.id,
+            (try? recovery.validateIdentity(values, requirements: requestIntent.requirements)) != nil,
+            let verified = try? TaskValues.decode(receipt.result), let title = input["title"] as? String else { return nil }
+        let form = input["form"] as? [String: Any]
+        let markup = input["markup"] as? [String: Any]
+        let glance = markup?["glance"] as? [String: Any]
+        let bound = CardMarkup.bindingKeys(in: markup?["compactHTML"] as? String ?? "").intersection(verified.keys)
+        guard let key = form?["compactKey"] as? String ?? glance?["valueKey"] as? String ?? (bound.count == 1 ? bound.first : nil),
+            let value = verified[key], !value.isEmpty, value.count <= 120 else { return nil }
+        let unit = form?["compactUnit"] as? String ?? glance?["unit"] as? String
+        let summary = title + " · " + value + (unit.flatMap { value.hasSuffix($0) ? nil : " " + $0 } ?? "")
+        retainedReading = summary + "\n" + receipt.sourceNotes
+        let subject = String(title.prefix(100))
+        // A broken generated form may have invalid keys, duplicate rows or oversized labels.
+        // Keep a small, host-owned snapshot even if none of its proposed markup is usable.
+        let basic = TaskForm(inputs: [], outputs: [.init(key: "observedValue",label: "")], buttons: [],
+            compactUnit: unit, compactSubject: subject, compactKey: "observedValue")
+        if var markup = try? basic.markup() {
+            markup.html += "<footer><small data-bind='observedSource'></small></footer>"
+            retainedSnapshot = try? TaskSurface(title: subject, markup: markup, fields: [], actions: [],
+                state: ["observedValue":value, "observedSource":receipt.sourceNotes], runID:receipt.id).validated()
+        }
+        var rows = (form?["outputs"] as? [[String: Any]] ?? []).compactMap { item -> TaskForm.Output? in
+            guard let k = item["key"] as? String, verified[k] != nil, let label = item["label"] as? String else { return nil }
+            return .init(key: k, label: label)
+        }
+        if !rows.contains(where: { $0.key == key }) { rows.insert(.init(key: key, label: title), at: 0) }
+        let standard = TaskForm(inputs: [], outputs: rows, buttons: [], compactUnit: unit, compactSubject: title, compactKey: key)
+        guard var layout = try? standard.markup() else { return nil }
+        let displayed = Set(rows.map(\.key))
+        var state = verified.filter { displayed.contains($0.key) }
+        var noteKey = "verifiedSource"
+        while state[noteKey] != nil { noteKey += "_" }
+        state[noteKey] = receipt.sourceNotes
+        layout.html += "<footer><small data-bind='" + noteKey + "'></small></footer>"
+        guard let surface = try? TaskSurface(title: title, markup: layout, fields: [], actions: [],
+            state: state, runID: receipt.id).validated() else { return nil }
+        retainedSnapshot = surface
+        return surface
+    }
+
+    /// Verify meaning independently of the mechanical reachability and action checks.
+    private func reviewLocalChoices(_ view: [String: Any]) async throws {
+        let decision = model.settings
+        guard decision.useFast, Date() >= model.fastTriageRetryAfter,
+            !model.isLiveTest || CommandLine.arguments.contains("--allow-live-services"),
+            let values = view["values"] as? [String], let buttons = view["buttons"] as? [[String: Any]],
+            JevRequestTriage.eligible(currentRequest), values.allSatisfy(JevRequestTriage.eligible),
+            decision.decisionAPI.allowsBackground(decision.fast)
+        else { return }
+        let controls = buttons.map { $0.filter { ["label", "to", "move", "targets"].contains($0.key) } }
+        guard controls.flatMap({ $0.values.compactMap { $0 as? String } }).allSatisfy(JevRequestTriage.eligible),
+            let key = try? await SecretStore.loadAvailable(decision.fastKeyAccount), !key.isEmpty else { return }
+        let scores = try? await DecisionClient.judge(endpoint: decision.fast, api: decision.decisionAPI, key: key,
+            state: ["request": currentRequest, "valuesInOrder": values, "buttons": controls] as [String: Any],
+            questions: ["contradiction": "Do the offered values or transitions clearly contradict the human's goal? Check that pressing a button visibly achieves its named effect, and that the workflow uses the human's supplied content. Differences in interface language alone are fine."], timeout: 2)
+        if let score = scores?["contradiction"], (0.9...1).contains(score) {
+            throw ToolArgumentError(path: "$.stateView", issue: "Rebuild the values around the actual requested result. Include a visible destination for each outcome. Map each button directly to what its label promises. Keep the human's supplied items and order.")
+        }
+    }
+
     private func presentWorkspace(_ input: [String: Any], revision: Int, origin: TaskVerification.DefinitionOrigin)
         async throws -> [String: Any]
     {
         guard nativeRequestActive else { throw AppError.message("A task interface requires an active user request.") }
-        guard model.requestPageID == nil else {
-            throw AppError.message(
-                "This request already owns a live webpage. Use compose_ui with readings from observation.readables, then finish(page_ready). Do not copy changing webpage values into a separate static present_ui task."
-            )
-        }
+        // A browser is an execution resource, not the mandatory destination of
+        // every result produced after visiting it. Evidence checks still apply.
         attemptedTaskWork = true
         var specification = input
+        if (specification["actions"] as? [[String: Any]])?.contains(where: { $0["kind"] as? String == "openRecord" }) == true {
+            throw ToolArgumentError(path: "$.actions", issue: "bind source destinations from observed records with read_value or show_readings")
+        }
         if specification["preset"] as? String == "clock" {
             guard let runtime = specification["runtime"],
                 (specification["actions"] as? [[String: Any]] ?? []).allSatisfy({
@@ -364,10 +494,15 @@ extension AgentController {
             specification["fields"] = [String]()
             specification["actions"] = [[String: Any]]()
         }
+        let formProposal = input["form"] as? [String: Any]
+        let tableProposed = (formProposal?["visuals"] as? [[String: Any]])?.contains { $0["kind"] as? String == "table" } == true
+        let joint = requestIntent.placement?.layout == .together || requestShape == .dependent || tableProposed
         func supportedSubject(_ subject: String) -> Bool {
             guard let title = specification["title"] as? String else { return true }
             let name = subject.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { return false }
+            // A joint result may identify a winner or a pair in a different order from the full title.
+            if joint { return true }
             // A result or an individual row can share words with the task title. Only the
             // complete instance name can shorten that title on the collapsed card.
             return title.range(of: name, options: [.anchored, .caseInsensitive]) != nil
@@ -388,7 +523,7 @@ extension AgentController {
                 composition.compactSubject = nil
             }
             specification["markup"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(composition.markup()))
-            if proposed.count > 0 { formVisuals = (composition, proposed.blocks, proposed.count) }
+            if proposed.count > 0 || joint { formVisuals = (composition, proposed.blocks, proposed.count) }
             specification["fields"] = composition.inputs.map(\.key)
         }
         var surface = try JSONDecoder().decode(
@@ -460,6 +595,13 @@ extension AgentController {
                 throw AppError.message("Initialization did not produce usable results.")
             }
             surface.state.merge(output) { _, verified in verified }
+            if let run = RequestRun.current {
+                // A successful initialization is evidence even if the proposed
+                // interface or a different action later fails validation.
+                let result = model.work.retain(title:surface.title,values:surface.state,definition:WorkDefinition(),
+                    design:WorkDesign(),goalID:run.goalID)
+                run.retainResult(result,needsView:false)
+            }
         }
         var omittedVisuals = 0
         if let proposal = formVisuals {
@@ -471,7 +613,25 @@ extension AgentController {
             }
             form.visuals = Array(proposal.blocks.compactMap { $0.bound(to: columns) }.prefix(3))
             omittedVisuals = proposal.count - (form.visuals?.count ?? 0)
+            if joint, omittedVisuals > 0, (form.visuals ?? []).isEmpty {
+                throw ToolArgumentError(path: "$.form.visuals", issue: "The comparison layout has no usable data columns. Bind the table to existing array columns, or remove the visual and put every compared subject and measurement in form.outputs.")
+            }
+            if joint, let result = form.outputs.first(where: { $0.key == form.compactKey }),
+                let value = surface.state[result.key], value.contains(where: \.isNumber) {
+                // A numeric row labeled with a verified option carries its own identity.
+                // A generic compact title would detach the number from that option.
+                let names = surface.state.values.filter { name in
+                    name.count >= 2 && name.count <= 32 && name.contains(where: \.isLetter)
+                        && !value.localizedCaseInsensitiveContains(name)
+                        && (result.label.caseInsensitiveCompare(name) == .orderedSame ||
+                            result.label.range(of: NSRegularExpression.escapedPattern(for: name) + #"(?=[\s(（·—:])"#,
+                                options: [.anchored, .regularExpression, .caseInsensitive]) != nil)
+                }
+                if let name = names.max(by: { $0.count < $1.count }),
+                    form.compactSubject?.localizedCaseInsensitiveContains(name) != true { form.compactSubject = name }
+            }
             surface.markup = try form.markup()
+            formVisuals = (form, proposal.blocks, proposal.count)
         }
         try surface.markup.validateLanguage(model.settings.preferredInterfaceLanguage, path: input["form"] == nil ? "$.markup" : "$.form")
         surface.markup.interfaceLanguage = model.settings.preferredInterfaceLanguage
@@ -482,7 +642,27 @@ extension AgentController {
             let markup = input["markup"] as? [String: Any]
             let field = markup == nil && input["form"] != nil ? "$.form.compactKey"
                 : markup?["glance"] == nil ? "$.markup.compactHTML" : "$.markup.glance.valueKey"
+            try surface.markup.validateExpandedPurpose(state: surface.state, subject: surface.title, hasActions: !surface.actions.isEmpty || !surface.fields.isEmpty)
             try surface.markup.validateGlance(state: surface.state, fieldPath: field, runtimeKeys: Set(surface.runtime?.sources.map(\.key) ?? []))
+            if let key = CardMarkup.bindingKeys(in: surface.markup.compactHTML).subtracting(["title", "status"]).first {
+                let form = input["form"] as? [String: Any]
+                let glance = (input["markup"] as? [String: Any])?["glance"] as? [String: Any]
+                if joint {
+                    let label = formVisuals?.form.compactSubject ?? glance?["subject"] as? String ?? surface.title
+                    let labelWidth = (label as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 9, weight: .medium)])
+                    if labelWidth.width > 82 {
+                        throw ToolArgumentError(path: form != nil ? "$.form.compactSubject" : "$.markup.glance.subject", issue: "Use a short identifiable subject or leader that fits 82px. Put the identifying words first.")
+                    }
+                    if let value = surface.state[key], Double(value) != nil,
+                        !surface.markup.compactHTML.contains("raw-value-unit"),
+                        surface.state.values.contains(where: { $0.range(of: #"(?<![\d.])"# + NSRegularExpression.escapedPattern(for: value) + #"\s*(?:[%‰°]|[\p{L}]+)"#, options: .regularExpression) != nil }) {
+                        throw ToolArgumentError(path: field, issue: "This result shows a bare number while the same measurement has a unit in state. Include the unit in the compact value or supply form.compactUnit / markup.glance.unit.")
+                    }
+                }
+                let outputs = form?["outputs"] as? [[String: Any]] ?? []
+                let labels = outputs.filter { $0["key"] as? String != key }.compactMap { $0["label"] as? String }
+                try surface.markup.validateMeasuredResult(primary: key, subjects: [surface.title] + labels, state: surface.state, fieldPath: field)
+            }
         }
         surface = try surface.validated()
         if let interval = requestIntent.updateIntervalSeconds, surface.runtime?.refresh?.intervalSeconds != interval {
@@ -510,7 +690,18 @@ extension AgentController {
         try await reviewAssignedReading(surface)
         try Task.checkCancellation()
         guard revision == steeringRevision else { return ["superseded": true] }
-        let previous = model.sideTasks.first(where: { $0.id == activeTaskID })
+        // Keep the original destination even after borrowing a page to do work.
+        let destination = presentationDestination()
+        if let destination, destination != activeTaskID {
+            if let ticket = interfaceTicket { model.taskRevisions.finish(ticket) }
+            activeTaskID = destination
+            interfaceTicket = model.beginTaskRevision(destination,.interface)
+        } else if destination == nil && (activeTaskID == model.activeRequest?.browserResourceID
+            || resolvedResultView != nil || RequestRun.current?.publishedViewIDs.contains(activeTaskID) == true) {
+            if let ticket = interfaceTicket { model.taskRevisions.finish(ticket) }
+            activeTaskID = UUID()
+            interfaceTicket = nil
+        }
         try model.commitTaskSurface(surface, id: activeTaskID, ticket: interfaceTicket)
         if initializes && input["run_id"] == nil {
             attemptedCode = false
@@ -519,20 +710,12 @@ extension AgentController {
         taskSurfaceReady = true
         if input["complete"] as? Bool == true {
             model.transitionRequest(to: .verifying)
-            let generation = model.taskRuntime.receipts[activeTaskID]?.generation
             do { try await TaskVerification.verify(activeTaskID, intent: requestIntent, model: model) } catch {
-                // Roll back this candidate only. A direct user action or a
-                // newer request must keep its own state and generation.
+                // Verification failure does not roll back observed values. Keep the
+                // durable result and repair the execution or presentation separately.
                 if !(error is CancellationError), revision == steeringRevision,
-                    model.taskRuntime.receipts[activeTaskID]?.generation == generation
-                {
-                    model.taskRuntime.detach(activeTaskID)
-                    if let previous, let i = model.sideTasks.firstIndex(where: { $0.id == activeTaskID }) {
-                        model.sideTasks[i] = previous
-                        if previous.taskSurface?.runtime != nil { model.taskRuntime.attach(activeTaskID) }
-                    } else {
-                        model.sideTasks.removeAll { $0.id == activeTaskID }
-                    }
+                    let i = model.sideTasks.firstIndex(where: { $0.id == activeTaskID }) {
+                    model.sideTasks[i].interfaceIssue = error.localizedDescription
                     model.persistSideTasks()
                     taskSurfaceReady = false
                 }
@@ -548,6 +731,7 @@ extension AgentController {
             }
             verifyEffect(reply)
         }
+        finishWorkPresentation(keeping:[activeTaskID])
         return ["verified": true, "task_id": activeTaskID.uuidString, "actions": surface.actions.map(\.id)]
     }
 }

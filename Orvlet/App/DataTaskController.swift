@@ -35,9 +35,14 @@ extension AppModel {
         dataRefreshTimer?.invalidate()
         dataRefreshTimer = nil
         let now = Date()
-        let ids = Set(sideTasks.map(\.id))
+        let ids = Set(sideTasks.map(\.id)).union(work.snapshot.artifacts.keys)
         dataRefreshAttempts = dataRefreshAttempts.filter { ids.contains($0.key) }
-        guard let next = sideTasks.compactMap({ nextDataRefresh($0, now: now) }).min() else { return }
+        let workDeadlines = work.snapshot.artifacts.values.compactMap { artifact -> Date? in
+            guard let interval = artifact.definition.apiData?.refreshSeconds, workJobs[artifact.id] == nil,
+                artifact.status != "Stopped" else { return nil }
+            return max(artifact.checked, dataRefreshAttempts[artifact.id] ?? .distantPast).addingTimeInterval(interval)
+        }
+        guard let next = (sideTasks.compactMap({ nextDataRefresh($0, now: now) }) + workDeadlines).min() else { return }
         let timer = Timer(timeInterval: max(0.1, next.timeIntervalSinceNow), repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshDueData() }
         }
@@ -46,6 +51,7 @@ extension AppModel {
     }
 
     private func nextDataRefresh(_ task: SideTask, now: Date) -> Date? {
+        guard work.view(task.id) == nil else { return nil }
         guard let interval = task.taskSurface?.apiData?.refreshSeconds, task.terminalLabel == nil,
             task.status != "Input needed", taskActionJobs[task.id] == nil else { return nil }
         let last = max(task.dataUpdatedAt ?? task.created, dataRefreshAttempts[task.id] ?? .distantPast)
@@ -55,6 +61,13 @@ extension AppModel {
 
     private func refreshDueData() {
         let now = Date()
+        for artifact in work.snapshot.artifacts.values {
+            guard let interval = artifact.definition.apiData?.refreshSeconds, workJobs[artifact.id] == nil,
+                artifact.status != "Stopped", max(artifact.checked, dataRefreshAttempts[artifact.id] ?? .distantPast).addingTimeInterval(interval) <= now,
+                let action = artifact.definition.actions.first(where: { $0.operation == "refresh" }) else { continue }
+            dataRefreshAttempts[artifact.id] = now
+            performWorkOperation(artifact.id, action: action.id, fields: [:])
+        }
         for task in sideTasks {
             if let due = nextDataRefresh(task, now: now), due <= now {
                 refreshAPIData(task.id, scheduled: true)
@@ -83,24 +96,17 @@ extension AppModel {
     @discardableResult
     func refreshAPIData(_ id: UUID, fields: [String: String] = [:], force: Bool = true, scheduled: Bool = false,
                         requestID: UUID? = nil) -> Task<Void, Never>? {
+        if let view = work.view(id), let artifact = work.artifact(view.selected),
+            let operation = artifact.definition.actions.first(where: { $0.operation == (force ? "refresh" : "update") }) {
+            if let requestID, activeRequest?.id != requestID { return nil }
+            return performWorkAction(viewID: id, action: operation.id, fields: fields)
+        }
         guard let task = sideTasks.first(where: { $0.id == id }), var spec = task.taskSurface?.apiData else { return nil }
         if let requestID {
             guard activeRequest?.id == requestID, activeRequest?.owner?.id == id else { return nil }
         } else if busy && ownsRequest(id) { return nil }
         guard Set(fields.keys).isSubset(of: Set((spec.inputs ?? [:]).keys)) else { return nil }
-        if spec.isWttrWeather {
-            if let day = fields["weatherDay"], day != spec.inputs?["weatherDay"], let key = spec.weatherDateKey {
-                spec.expectations?[key] = nil
-            }
-            if let place = fields["weatherLocation"], place != spec.inputs?["weatherLocation"] {
-                // A deliberate location edit supersedes the original request's geographic constraints.
-                // Display the returned nearest city instead of relabelling old readings with the typed name.
-                for field in spec.fields where field.pointer.contains("/nearest_area/") {
-                    spec.expectations?[field.key] = nil
-                }
-            }
-        }
-        spec.inputs = (spec.inputs ?? [:]).merging(fields) { _, new in new }
+        spec = spec.updatingInputs(fields)
         dataRefreshAttempts[id] = Date()
         // Only a successful read/calculation updates the verified snapshot. The editable
         // live values can contain an invalid draft or belong to a superseded refresh.
@@ -113,7 +119,9 @@ extension AppModel {
         let changed = inputs.contains { previous[$0.key] != $0.value }
         var display = previous
         if changed {
-            for key in spec.keys { display[key] = "—" }
+            // Keep the last verified identity recognizable while new values are
+            // pending. Commit the new identity and its result together below.
+            for key in spec.keys where key != spec.card?.displayNameKey { display[key] = "—" }
             for key in ["sourceDate", "sourceDateDisplay", "sourceChecked", "weatherSampleTime"] { display[key] = "" }
         }
         sideTasks[index].liveValues = display.merging(inputs) { _, new in new }
@@ -121,7 +129,7 @@ extension AppModel {
             let value = inputs[control.key] ?? ""
             return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || (control.kind == "number" && !(Double(value)?.isFinite ?? false))
-                || (control.kind == "select" && !(control.options ?? []).contains(value))
+                || (control.kind == "select" && !control.accepts(value))
         }
         if let invalid {
             for output in spec.outputs ?? [] { sideTasks[index].liveValues?[output.key] = "—" }
@@ -154,6 +162,12 @@ extension AppModel {
                 values["resultStatus"] = ""
                 try Task.checkCancellation()
                 guard accepts(ticket), let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
+                if let subject = spec.choiceSubject(values), subject != spec.choiceSubject(previous) {
+                    let label = spec.displayRows.first(where: { $0.key == spec.card?.primaryKey })?.label
+                    let title = [subject, label].compactMap { $0 }.joined(separator: " · ")
+                    sideTasks[i].title = title
+                    sideTasks[i].taskSurface?.title = title
+                }
                 sideTasks[i].liveValues = values
                 sideTasks[i].taskSurface?.state = values
                 if !cached {
@@ -162,9 +176,11 @@ extension AppModel {
                 }
                 sideTasks[i].dataIssue = nil
                 sideTasks[i].status = "Ready"
+                resolveTaskIssue(id, source: .data)
                 persistSideTasks()
             } catch is CancellationError {} catch {
                 guard accepts(ticket), let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
+                reportTaskIssue(id, source: .data, detail: error.localizedDescription)
                 if cached {
                     for output in spec.outputs ?? [] { sideTasks[i].liveValues?[output.key] = "—" }
                     sideTasks[i].liveValues?["resultStatus"] = "Check the entered values."

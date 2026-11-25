@@ -15,6 +15,9 @@ class Handler(BaseHTTPRequestHandler):
  fresh_reads=0
  def log_message(self,*args): pass
  def do_GET(self):
+  if self.path.startswith('/blocked-source'):
+   self.send_response(403);self.send_header('Content-Type','text/html');self.end_headers()
+   self.wfile.write(b'<html><head><title>Access denied</title></head><body>Access denied</body></html>');return
   if self.path.startswith('/deferred-reading'):
    value='second' if 'second' in self.path else 'first'
    data=('<html><body><output id="reading"></output><img src="/slow-image?'+value+'"><script>setTimeout(()=>document.querySelector("#reading").textContent="'+value+'",150)</script></body></html>').encode();kind='text/html'
@@ -50,6 +53,27 @@ class Handler(BaseHTTPRequestHandler):
   self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
  def do_POST(self):
   request=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+  if self.path.startswith('/stream-finished/'):
+   assert request.get('stream'), 'Expected streaming request'
+   self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+   event={'choices':[{'delta':{'content':'complete'},'finish_reason':'stop'}]}
+   try:
+    self.wfile.write(('data: '+json.dumps(event)+'\n\n').encode());self.wfile.flush()
+    for _ in range(40):
+     self.wfile.write(b': heartbeat\n\n');self.wfile.flush();time.sleep(0.05)
+   except (BrokenPipeError,ConnectionResetError): pass
+   return
+  if self.path.startswith('/heartbeat/'):
+   if request.get('stream'):
+    self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+    try:
+     for _ in range(40):
+      self.wfile.write(b': heartbeat\n\n');self.wfile.flush();time.sleep(0.05)
+    except (BrokenPipeError,ConnectionResetError): pass
+   else:
+    data=json.dumps({'choices':[{'message':{'role':'assistant','content':'recovered'}}]}).encode()
+    self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+   return
   if self.path.startswith('/api-wire/'):
    try: status,result=model_api_response(self.path,request,self.headers)
    except (AssertionError,KeyError,TypeError) as error: status,result=422,{'error':{'message':'Wire fixture rejected request: '+str(error)}}

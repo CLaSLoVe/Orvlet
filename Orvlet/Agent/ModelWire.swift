@@ -77,7 +77,10 @@ enum ModelWire {
                 body["tool_choice"] = ["type": "function", "name": forced]
                 body["parallel_tool_calls"] = false
             }
-            if ![ModelReasoning.automatic, .provider].contains(options.reasoning) {
+            if options.reasoning == .automatic, endpoint.completionURL?.host == "api.openai.com", endpoint.model.hasPrefix("gpt-6") {
+                if !reasoning || budget == .low { body["reasoning"] = ["effort": "low"] }
+                else if budget == .normal || budget == .high { body["reasoning"] = ["effort": budget == .high ? "high" : "medium"] }
+            } else if ![ModelReasoning.automatic, .provider].contains(options.reasoning) {
                 body["reasoning"] = ["effort": options.reasoning.rawValue]
             }
         case .messages:

@@ -180,10 +180,10 @@
                     runtime: TaskRuntimeSpec(sources: [TaskDataSource(key: "elapsed", kind: .elapsed, format: .seconds)]
                     ))
                 model.publishTaskSurface(try surface.validated(), id: runtimeID)
-                try await model.taskRuntime.verify(runtimeID)
+                try await model.taskRuntime.verify(model.work.view(runtimeID)?.selected ?? runtimeID)
                 model.closeTask(runtimeID)
                 try check(model.restoreHistoryTask(runtimeID), "A closed running tool can be restored from History")
-                try await model.taskRuntime.verify(runtimeID)
+                try await model.taskRuntime.verify(model.work.view(runtimeID)?.selected ?? runtimeID)
                 try check(
                     model.sideTasks.first(where: { $0.id == runtimeID })?.runtimeState?.phase == .running,
                     "Restoring a running local tool resumes its data engine")

@@ -14,10 +14,10 @@
                 let toolNames = AgentToolRegistry.definitions.compactMap {
                     ($0["function"] as? [String: Any])?["name"] as? String
                 }
-                let advertised = Set(AgentToolName.allCases.map(\.rawValue))
+                let advertised = Set(AgentToolName.allCases.map(\.rawValue)).union(["separate_cards"])
                 try check(
                     Set(toolNames) == advertised && toolNames.count == advertised.count,
-                    "Every advertised tool has one registered executor and no duplicate schema")
+                    "Every advertised tool has a registered executor or partition handler and no duplicate schema")
                 try check(
                     DebugHarness.Mode.rankingLiveCheck.requiresLiveServices
                         && !DebugHarness.Mode.selfCheck.requiresLiveServices,
@@ -772,6 +772,16 @@
                 try check(
                     quiet.ambientTasks.map(\.id) == [currentMusic.id, liveTimer.id],
                     "An older paused player cannot push the active timer out beside the current music")
+                quiet.ambientRequestID = oldMusic.id
+                quiet.preferredMediaTaskID = oldMusic.id
+                quiet.learnedTaskOrder = [oldMusic.id, liveTimer.id, currentMusic.id]
+                try check(quiet.orderedTasks.first?.id == currentMusic.id && quiet.ambientTasks.first?.id == currentMusic.id,
+                    "The shelf and capsule surface the playing track ahead of stale music preferences")
+                quiet.taskOrder = [oldMusic.id, liveTimer.id, currentMusic.id]
+                try check(quiet.ambientTasks.first?.id == oldMusic.id,
+                    "A manual shelf order takes precedence over active playback")
+                quiet.learnedTaskOrder = []
+                quiet.taskOrder = []
                 let work = SideTask(kind: .workspace, title: "Text cleanup", status: "Ready")
                 quiet.sideTasks.append(work)
                 quiet.ambientRequestID = work.id

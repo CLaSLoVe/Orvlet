@@ -1,6 +1,12 @@
 import Darwin
 import Foundation
 
+/// An address/query can be corrected without abandoning an otherwise available API.
+nonisolated struct PublicDataRequestIssue: LocalizedError {
+    let reason: String
+    var errorDescription: String? { reason }
+}
+
 /// Public GETs are independent of model authentication and browsing sessions.
 nonisolated final class PublicDataClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     static func url(_ raw: String) throws -> URL {
@@ -98,18 +104,20 @@ nonisolated final class PublicDataClient: NSObject, URLSessionTaskDelegate, @unc
         switch http.statusCode {
         case 200...299: break
         case 404, 410:
-            throw AppError.message("HTTP \(http.statusCode): this endpoint or record was not found. Resolve the requested name in a public directory or search endpoint, then fetch the returned identifier.")
+            throw PublicDataRequestIssue(reason: "HTTP \(http.statusCode): this endpoint or record was not found. Resolve the requested name in a public directory or search endpoint, then fetch the returned identifier.")
+        case 400, 422:
+            throw PublicDataRequestIssue(reason: "HTTP \(http.statusCode): correct the public request parameters or use another source.")
         case 401, 403, 429:
             throw AppError.message("HTTP \(http.statusCode): this source denied or limited the public request. Use another public endpoint or an accessible page.")
         default:
             throw AppError.message("The source returned HTTP \(http.statusCode). Verify the endpoint or try another public source.")
         }
-        guard response.expectedContentLength <= 524288 else { throw AppError.message("The data response is too large. Narrow the query.") }
+        guard response.expectedContentLength <= 524288 else { throw PublicDataRequestIssue(reason: "The data response is too large. Narrow the query.") }
         var data = Data()
         for try await byte in stream {
             try Task.checkCancellation()
             guard data.count < 524288 else {
-                throw AppError.message("The data response is too large. Narrow the query.")
+                throw PublicDataRequestIssue(reason: "The data response is too large. Narrow the query.")
             }
             data.append(byte)
         }

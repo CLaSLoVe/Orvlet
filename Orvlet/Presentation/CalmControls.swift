@@ -280,27 +280,37 @@ struct CalmStrip: View {
                     .accessibilityLabel("All tasks, \(model.overflowTaskCount) tucked away")
                 Spacer(minLength: 4)
                 Button {
-                    model.selectChat(!model.commandPanelVisible)
+                    model.openComposerOrUnreadReply()
                 } label: {
                     Image(systemName: "plus").font(.system(size: 11, weight: .medium)).frame(width: 28, height: 26)
                         .background(model.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
                         .overlay(alignment: .topTrailing) {
-                            if model.hasTaskWork {
-                                if model.motionReduced {
-                                    Image(systemName: "hourglass").font(.system(size: 6)).padding(1)
-                                } else {
-                                    ProgressView().controlSize(.mini).scaleEffect(0.5).frame(width: 10, height: 10)
-                                }
-                            } else if model.hasUnreadReply {
+                            if model.hasUnreadReply {
                                 Circle().fill(CalmVisualStyle.tint(model.accent, scheme: scheme)).frame(
                                     width: 4, height: 4
                                 ).padding(2)
                             }
                         }
-                }.buttonStyle(WindowDragButtonStyle()).help("Ask Orvlet · " + model.settings.shortcut.title)
-                    .accessibilityLabel("Ask Orvlet")
+                }.buttonStyle(WindowDragButtonStyle()).help(model.hasUnreadReply ? "Read latest reply" : "Ask Orvlet · " + model.settings.shortcut.title)
+                    .accessibilityLabel(model.hasUnreadReply ? "Read latest reply" : "Ask Orvlet")
             }.foregroundStyle(CalmVisualStyle.tint(model.accent, scheme: scheme))
         }
+    }
+}
+
+struct PinnedTasksButton: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        Button {
+            model.taskShelfVisible.toggle()
+        } label: {
+            Image(systemName: "square.stack.3d.up")
+                .font(.system(size: 11, weight: .medium)).frame(width: 24, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(WindowDragButtonStyle()).foregroundStyle(.secondary)
+        .help(model.taskShelfVisible ? "Return to card" : "Show tasks")
+        .accessibilityLabel(model.taskShelfVisible ? "Return to card" : "Show tasks")
     }
 }
 
@@ -330,6 +340,7 @@ struct CalmTaskShelf: View {
                     Image(systemName: "plus").font(.system(size: 11, weight: .medium)).frame(width: 28, height: 28)
                 }.buttonStyle(WindowDragButtonStyle()).foregroundStyle(.secondary)
                     .help("Add task").accessibilityLabel("Add task")
+                if model.compactRailTucked { PinnedTasksButton(model: model) }
             }.frame(height: 28).background { WindowDragArea() }
             if let error = model.lastActionError {
                 Text(error).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(
@@ -347,7 +358,7 @@ struct CalmTaskShelf: View {
                             }
                             .opacity(draggedTask == task.id ? 0.65 : 1)
                     }
-                    if model.sideTasks.isEmpty {
+                    if model.listedTasks.isEmpty {
                         Text("Your tasks will appear here.").foregroundStyle(.secondary).font(.system(size: 12))
                             .padding(16)
                     }
@@ -356,6 +367,34 @@ struct CalmTaskShelf: View {
         }.buttonStyle(.plain).padding(12).frame(maxWidth: .infinity, maxHeight: .infinity)
             .preferredColorScheme(model.settings.appearance.scheme)
             .onExitCommand { model.taskShelfVisible = false }
+    }
+    func rowDrag(_ task: SideTask, opensTask: Bool = false) -> some View {
+        TaskDragHandle(
+            taskID: task.id,
+            onClick: opensTask ? { open(task) } : nil,
+            onDoubleClick: opensTask ? { model.openTaskFromDoubleClick(task.id) } : nil,
+            appearance: model.dragAppearance(task.id), close: { model.closeTask(task.id) },
+            begin: {
+                draggedTask = task.id
+                model.draggingTaskID = task.id
+            },
+            preview: { offset in
+                let ids = model.orderedTasks.map(\.id)
+                if let index = ids.firstIndex(of: task.id), offset != 0, ids.indices.contains(index + offset) {
+                    dropTarget = ids[index + offset]
+                    dropAfter = offset > 0
+                } else { dropTarget = nil }
+            }, commit: { offset in model.moveTask(task.id, by: offset) },
+            end: {
+                draggedTask = nil
+                model.draggingTaskID = nil
+                dropTarget = nil
+            }
+        ).accessibilityHidden(true)
+    }
+    func open(_ task: SideTask) {
+        model.taskRanking.record(task.id, .open)
+        if model.selectTask(task.id, expanded: true) { model.taskShelfVisible = false }
     }
     func row(_ task: SideTask) -> some View {
         HStack(spacing: 6) {
@@ -369,33 +408,9 @@ struct CalmTaskShelf: View {
             }
             .frame(width: 24, height: 32).contentShape(Rectangle())
             .help("Drag to reorder or close " + task.title).accessibilityLabel("Reorder " + task.title)
-            .overlay {
-                TaskDragHandle(
-                    appearance: model.dragAppearance(task.id), close: { model.closeTask(task.id) },
-                    begin: {
-                        draggedTask = task.id
-                        model.draggingTaskID = task.id
-                    },
-                    preview: { offset in
-                        let ids = model.orderedTasks.map(\.id)
-                        if let index = ids.firstIndex(of: task.id), offset != 0, ids.indices.contains(index + offset) {
-                            dropTarget = ids[index + offset]
-                            dropAfter = offset > 0
-                        } else {
-                            dropTarget = nil
-                        }
-                    }, commit: { offset in model.moveTask(task.id, by: offset) },
-                    end: {
-                        draggedTask = nil
-                        model.draggingTaskID = nil
-                        dropTarget = nil
-                    }
-                )
-                .accessibilityHidden(true)
-            }
+            .overlay { rowDrag(task) }
             Button {
-                model.taskRanking.record(task.id, .open)
-                if model.selectTask(task.id, expanded: true) { model.taskShelfVisible = false }
+                open(task)
             } label: {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 3) {
@@ -411,19 +426,18 @@ struct CalmTaskShelf: View {
                     }
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle())
-            }.buttonStyle(
-                WindowDragButtonStyle(
-                    onDoubleClick: { model.openTaskFromDoubleClick(task.id) },
-                    delaySingleClick: true, allowsWindowDrag: false)
-            )
+            }.buttonStyle(.plain)
+            .overlay { rowDrag(task, opensTask: true) }
             .help("Open " + task.title)
             if model.taskListEditing {
                 Button {
-                    model.dismissTask(task.id)
+                    if task.hidden { model.showTask(task.id) }
+                    else { model.dismissTask(task.id) }
                 } label: {
-                    Image(systemName: "eye.slash").frame(width: 26, height: 30)
+                    Image(systemName: task.hidden ? "eye" : "eye.slash").frame(width: 26, height: 30)
                 }
-                .disabled(task.hidden).help("Hide " + task.title).accessibilityLabel("Hide " + task.title)
+                .help((task.hidden ? "Show " : "Hide ") + task.title)
+                .accessibilityLabel((task.hidden ? "Show " : "Hide ") + task.title)
                 Button {
                     model.closeTask(task.id)
                 } label: {
@@ -457,7 +471,10 @@ struct CalmTaskShelf: View {
             .onHover { if $0 { hoveredTask = task.id } else if hoveredTask == task.id { hoveredTask = nil } }
             .contextMenu {
                 Button("Chat") { model.openTaskConversation(task.id) }
-                Button("Hide") { model.dismissTask(task.id) }.disabled(task.hidden)
+                Button(task.hidden ? "Show" : "Hide") {
+                    if task.hidden { model.showTask(task.id) }
+                    else { model.dismissTask(task.id) }
+                }
                 Divider()
                 Button("Remove from Tasks") { model.closeTask(task.id) }
             }
@@ -480,12 +497,13 @@ struct CalmMediaRail: View {
 extension AppModel {
     var quickMediaTasks: [SideTask] {
         sideTasks.filter { task in
-            task.kind == .web && task.isMediaTask && (task.id == browser.id || parkedBrowsers[task.id] != nil)
+            task.kind == .web && task.isMediaTask && (task.id == browser.id || parkedBrowsers[task.id] != nil || task.id == dormantLaunchSession?.taskID)
         }
     }
     /// Automatic priorities are the default; an explicit user order always wins.
     var automaticTaskOrder: [SideTask] {
         let media = quickMediaTasks.filter { !$0.hidden }
+        let playing = media.first { $0.id == playbackCoordinator.owner && $0.playing } ?? media.first(where: \.playing)
         let timers = visibleTasks.filter { $0.kind == .timer }
         let firstTimer =
             timers.filter { $0.finished && $0.status != "Stopped" }.max {
@@ -493,14 +511,20 @@ extension AppModel {
             } ?? timers.first
         var result = [SideTask]()
         func append(_ task: SideTask?) {
-            if let task, !result.contains(where: { $0.id == task.id }) { result.append(task) }
+            if let task, work.view(task.id)?.closed != true, !result.contains(where: { $0.id == task.id }) { result.append(task) }
         }
-        append(visibleTasks.first { $0.id == ambientRequestID })
+        if let requested = visibleTasks.first(where: { $0.id == ambientRequestID }) {
+            if requested.isMediaTask && !requested.playing && taskActivity(requested) == nil {
+                append(playing ?? requested)
+            } else {
+                append(requested)
+            }
+        }
         if !result.contains(where: { $0.isMediaTask }) {
-            append(media.first(where: { $0.id == preferredMediaTaskID }) ?? media.first)
+            append(playing ?? media.first(where: { $0.id == preferredMediaTaskID }) ?? media.first)
         }
         append(firstTimer)
-        for task in media + timers + sideTasks { append(task) }
+        for task in media + timers + listedTasks { append(task) }
         return result
     }
     var orderedTasks: [SideTask] {
@@ -508,16 +532,17 @@ extension AppModel {
         let explicit = !taskOrder.isEmpty
         let order = explicit ? taskOrder : learnedTaskOrder
         guard !order.isEmpty else { return fallback }
-        let lookup = Dictionary(uniqueKeysWithValues: sideTasks.map { ($0.id, $0) })
+        let lookup = Dictionary(uniqueKeysWithValues: listedTasks.map { ($0.id, $0) })
         var seen = Set<UUID>()
         var result = order.compactMap { id -> SideTask? in
             guard seen.insert(id).inserted else { return nil }
             return lookup[id]
         }
-        for task in explicit ? sideTasks : fallback where seen.insert(task.id).inserted { result.append(task) }
+        for task in explicit ? listedTasks : fallback where seen.insert(task.id).inserted { result.append(task) }
         if !explicit {
             let urgent = fallback.filter {
-                $0.id == ambientRequestID
+                ($0.id == ambientRequestID && (!$0.isMediaTask || $0.id == fallback.first?.id))
+                    || ($0.isMediaTask && $0.playing && !$0.hidden)
                     || ($0.kind == .timer
                         && (($0.finished && $0.status != "Stopped") || ($0.deadline != nil && $0.remaining <= 60)))
             }
@@ -567,7 +592,7 @@ extension AppModel {
         if !isLiveTest { settings.save() }
         onResize?(windowSize)
     }
-    var overflowTaskCount: Int { sideTasks.count - ambientTasks.count }
+    var overflowTaskCount: Int { listedTasks.count - ambientTasks.count }
     var microMediaTasks: [SideTask] {
         ambientTasks.filter { task in quickMediaTasks.contains(where: { $0.id == task.id }) }
     }

@@ -6,6 +6,13 @@ extension AgentController {
     func executeCompletionTool(_ name: String, _ input: [String: Any], revision: Int) async throws -> [String: Any] {
         switch name {
         case "finish":
+            if RequestRun.current?.awaitingPresentation == true,
+                !["blocked", "needs_input"].contains(input["outcome"] as? String ?? "") {
+                throw AppError.message("Verified results are retained independently. Present the requested interaction with present_results before completing delivery.")
+            }
+            if ["blocked", "needs_input"].contains(input["outcome"] as? String ?? ""), recovery.needsAlternativeSource {
+                throw AppError.message("Only one data route has failed. Try a different endpoint/provider or inspect an accessible page before stopping. Source availability is internal recovery work, not missing user input.")
+            }
             if input["outcome"] as? String == "needs_input" {
                 let question = (input["reply"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !question.isEmpty, question.count <= RequestIntent.clarificationLimit else {
@@ -23,7 +30,7 @@ extension AgentController {
                         try Task.checkCancellation()
                         guard revision == steeringRevision else { return ["superseded": true] }
                         return ["status": "continue", "possibleMeaning": reading,
-                            "next": "A standalone reading is available. Answer the original request directly if it matches; omit optional presentation questions."]
+                            "next": "Check this interpretation against the request. If a local tool can support the human’s own next action with the supplied information, create it. For a one-off question give the answer. Ask only for information essential to executing the actual request."]
                     }
                 }
                 replyKind = .needsInput
@@ -36,7 +43,7 @@ extension AgentController {
             }
             let outcome = input["outcome"] as? String ?? ""
             if outcome == "blocked" {
-                if let tool = recovery.lastTool, recovery.awaitingAlternative || !recovery.switched, ["query_api", "read_value", "inspect_api", "compose_ui", "present_ui", "reuse_saved_ui", "navigate"].contains(tool) {
+                if let tool = recovery.lastTool, recovery.awaitingAlternative || !recovery.switched, ["query_api", "build_data_tool", "read_value", "inspect_api", "compose_ui", "present_ui", "reuse_saved_ui", "navigate"].contains(tool) {
                     throw AppError.message("A recoverable method failed. Try another source or capability before reporting a blocker.")
                 }
                 failureReason = input["reply"] as? String ?? "Unable to complete this page action."
@@ -51,7 +58,7 @@ extension AgentController {
                 throw AppError.message("The calendar action is not verified. Do not claim it succeeded.")
             }
             if outcome == "answer" {
-                guard requestIntent.placement?.layout != .existing else {
+                guard requestIntent.placement?.layout.usesExistingCard != true else {
                     throw ToolArgumentError(path: "$.outcome", issue: "a change to a selected card needs an actual control or management action and its receipt before reporting success")
                 }
                 guard requestedDelivery != .card, RequestRun.current?.assignment == nil else {
@@ -94,10 +101,11 @@ extension AgentController {
                 let readings = try JSONDecoder().decode(
                     [CardReading].self, from: JSONSerialization.data(withJSONObject: raw))
                 let proof = input["outcomeEvidence"] as? [[String: Any]] ?? []
-                let primary = proof.first?["valueKey"] as? String ?? readings.last!.key
+                let primary = input["primaryKey"] as? String ?? proof.first?["valueKey"] as? String ?? readings.last!.key
                 let observation = try await model.observation()
                 pendingSurface = try SurfacePlan.sourceFallback(
-                    readings: readings, primary: primary, observation: observation)
+                    readings: checkedPageReadings(readings, values: input["readingValues"] as? [String: String], observation: observation),
+                    primary: primary, observation: observation, subject: input["title"] as? String)
             }
             if interfaceAttempted && pendingSurface == nil {
                 throw AppError.message(
@@ -193,13 +201,17 @@ extension AgentController {
             guard revision == steeringRevision else { return ["superseded": true] }
             if let ticket = interfaceTicket { model.taskRevisions.finish(ticket) }
             if outcome == "page_ready", model.browser.waitingForInterface {
-                await model.browser.webView.pauseAllMediaPlayback()
+                await model.browser.pauseMedia()
                 model.browser.releaseInterface()
                 await model.browser.applyPlaybackPolicy()
             }
             try Task.checkCancellation()
             guard revision == steeringRevision else { return ["superseded": true] }
             if outcome == "media_playing" {
+                model.activeRequest?.expectsPlayback = true
+                if model.activeRequest?.musicSessionRole == nil {
+                    model.activeRequest?.musicSessionRole = RequestRun.current?.forceNewTask == true ? .independent : suggestedMusicSessionRole ?? .shared
+                }
                 model.beginBackgroundListening()
             } else if outcome == "video_playing" || outcome == "page_ready" {
                 model.endBackgroundListening(clearTaskIntent: true)

@@ -134,24 +134,25 @@ final class TaskRanking {
         guard candidates.count > 1 else { return }
         let now = Date()
         var judgments: [String: Double] = [:]
-        let endpoint = model.settings.fast
+        let decision = model.settings
+        let endpoint = decision.fast
         // Only the approved destination receives the anonymous, allowlisted summary.
-        if model.settings.useFast, !model.isLiveTest, now.timeIntervalSince(lastJev) >= 300,
-            URL(string: endpoint.baseURL)?.host == "api.typesafe.ai", URL(string: endpoint.baseURL)?.scheme == "https"
+        if decision.useFast, !model.isLiveTest, now.timeIntervalSince(lastJev) >= 300,
+            decision.decisionAPI.allowsBackground(endpoint)
         {
             lastJev = now
-            if let key = try? await SecretStore.loadAvailable(model.settings.fastKeyAccount), !key.isEmpty,
+            if let key = try? await SecretStore.loadAvailable(decision.fastKeyAccount), !key.isEmpty,
                 !Task.isCancelled
             {
                 judgments =
-                    (try? await Self.judge(habits: habits, tasks: candidates, endpoint: endpoint, key: key, at: now))
+                    (try? await Self.judge(habits: habits, tasks: candidates, endpoint: endpoint, key: key, at: now, api: decision.decisionAPI))
                     ?? [:]
             }
         }
         let ids = habits.ranked(candidates, request: model.ambientRequestID, judgments: judgments, at: now)
         apply(ids, revision: stamp, candidates: candidates.map(\.id))
     }
-    static func judge(habits: TaskHabits, tasks: [SideTask], endpoint: Endpoint, key: String, at date: Date)
+    static func judge(habits: TaskHabits, tasks: [SideTask], endpoint: Endpoint, key: String, at date: Date, api: DecisionAPI = .jev)
         async throws -> [String: Double]
     {
         let tasks = Array(tasks.prefix(24))
@@ -162,8 +163,8 @@ final class TaskRanking {
                     "Does candidate \(index) need convenient access now, based on repeated user habits and current activity? Prefer repeated deliberate use over passive duration. No evidence means uncertain. Judge this candidate only."
                 )
             })
-        return try await JevClient.judge(
-            endpoint: endpoint, key: key,
+        return try await DecisionClient.judge(
+            endpoint: endpoint, api: api, key: key,
             state: ["candidates": habits.payload(for: tasks, at: date)], questions: questions, timeout: 1.5)
     }
     var canApply: Bool {

@@ -38,7 +38,15 @@ final class AppModel: ObservableObject {
         var readinessConnectionsOverride: (() async -> Void)?
         var readinessStorageOverride: (() throws -> Void)?
     #endif
-    @Published var hasUnreadReply = false
+    @Published var unreadReplyIDs: Set<UUID> = []
+    var latestUnreadReply: ChatMessage? {
+        guard !unreadReplyIDs.isEmpty else { return nil }
+        return messages.last {
+            unreadReplyIDs.contains($0.id) && $0.taskID != nil && !$0.isUser && $0.issueResolved != true
+                && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+    var hasUnreadReply: Bool { latestUnreadReply != nil }
     @Published var feedback: RequestFeedback?
     var feedbackTask: Task<Void, Never>?
     var feedbackWakesStack = false
@@ -54,7 +62,7 @@ final class AppModel: ObservableObject {
     var motionReduced: Bool { settings.reduceMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     var shellExpanded: Bool { taskShelfVisible || !collapsed }
     var shellContentSize: NSSize? {
-        if taskShelfVisible { return NSSize(width: 320, height: min(360, 60 + Double(max(1, sideTasks.count)) * 46)) }
+        if taskShelfVisible { return NSSize(width: 320, height: min(360, 60 + Double(max(1, listedTasks.count)) * 46)) }
         if collapsed { return feedback == nil ? nil : feedbackSize }
         let detail = windowSize
         return NSSize(width: detail.width, height: detail.height + (feedback == nil ? 0 : feedbackSize.height))
@@ -101,7 +109,7 @@ final class AppModel: ObservableObject {
     @Published var surface = SurfacePlan.empty
     @Published var collapsed = true { didSet { refreshStackAttention() } }
     var clickExpanded = false
-    var menuTracking = false { didSet { refreshStackAttention() } }
+    @Published var menuTracking = false { didSet { refreshStackAttention() } }
     @Published var chatVisible = false  // Composer focus; the webpage remains visible.
     @Published var commandFocusRequest = 0
     @Published var canGoBack = false
@@ -111,15 +119,39 @@ final class AppModel: ObservableObject {
     var shelfArchive = SavedTaskList()
     var historyArchive = SavedTaskList()
     let preferences: UserDefaults
+    lazy var work = WorkRepository(defaults: isLiveTest && preferences === UserDefaults.standard
+        ? UserDefaults(suiteName:"orvlet.work.check." + UUID().uuidString)! : preferences, recoverInterrupted: true)
+    var extensionStorage: AnyObject?
+    lazy var systemBrowserHost = SystemBrowserHost(root: isLiveTest || preferences !== UserDefaults.standard
+        ? FileManager.default.temporaryDirectory.appendingPathComponent("orvlet-browser-test-" + UUID().uuidString) : nil)
+    lazy var nativeBrowserHost = SystemBrowserHost(root: nativeBrowserTestRoot, native: true)
+    lazy var nativeExtensions = NativeExtensions(root: nativeBrowserHost.root)
+    private var nativeBrowserTestRoot: URL? {
+        guard isLiveTest || preferences !== UserDefaults.standard else { return nil }
+        if let path = ProcessInfo.processInfo.environment["ORVLET_NATIVE_CHECK_PROFILE"] { return URL(fileURLWithPath: path) }
+        return FileManager.default.temporaryDirectory.appendingPathComponent("orvlet-native-test-" + UUID().uuidString)
+    }
+    var usesNativeBrowser: Bool { NativeChromium.enabled && settings.browserEngine == .builtIn }
+    var workJobTokens: [UUID: UUID] = [:]
+    var workJobs: [UUID: Task<Void, Never>] = [:]
     lazy var sessions = SessionStore(defaults: preferences)
     @Published var recentSessions: [SavedSession] = []
     @Published var restoringSession = false
     var restoreTask: Task<Void, Never>?
+    var dormantLaunchSession: SavedSession?
     var restoreRevision = 0
     var lastSessionSave = Date.distantPast
     var queuedRestoreAction: (() -> Void)?
     init(defaults: UserDefaults = .standard) {
         preferences = defaults
+        if NativeChromium.enabled, !CommandLine.arguments.contains("--background-checks"),
+            !CommandLine.arguments.contains("--native-browser-check"), defaults === UserDefaults.standard,
+            !defaults.bool(forKey: "nativeChromiumDefaultApplied") {
+            settings.browserEngine = .builtIn
+            settings.save()
+            defaults.set(true, forKey: "nativeChromiumDefaultApplied")
+        }
+        if defaults !== UserDefaults.standard { settings.browserEngine = .builtIn }
         if let data = defaults.data(forKey: "conversation.v1"),
             let saved = try? JSONDecoder().decode([ChatMessage].self, from: data)
         {
@@ -141,7 +173,7 @@ final class AppModel: ObservableObject {
     }
     var showingWeb: Bool { !collapsed && webExpanded }
     func rememberWebSize(_ size: NSSize) {
-        guard showingWeb, size.width.isFinite, size.height.isFinite else { return }
+        guard showingWeb, !taskShelfVisible, size.width.isFinite, size.height.isFinite else { return }
         preferredWebSize = Self.boundedWebSize(size)
         if !isLiveTest {
             preferences.set(
@@ -158,8 +190,19 @@ final class AppModel: ObservableObject {
     @Published var webURL = ""
     @Published var webLoading = false
     @Published var webError: String?
+    @Published var handoffSource: HandoffSource? { didSet { if oldValue !== handoffSource { oldValue?.close() } } }
+    var visibleHandoff: HandoffSource? {
+        guard showingWeb, handoffSource?.taskID == selectedTaskID else { return nil }
+        return handoffSource
+    }
+    var attachedWorkFiles: [String: String] = [:]
     @Published var command = ""
-    @Published var messages: [ChatMessage] = [] { didSet { persistConversation() } }
+    @Published var messages: [ChatMessage] = [] {
+        didSet {
+            if !unreadReplyIDs.isEmpty { unreadReplyIDs.formIntersection(messages.lazy.map(\.id)) }
+            persistConversation()
+        }
+    }
     @Published var conversationHistoryVisible = false
     @Published var conversationTaskID: UUID?
     @Published var archivedTaskHistory: [SideTask] = []
@@ -183,10 +226,11 @@ final class AppModel: ObservableObject {
     }
     let taskCode = TaskCodeRuntime()
     lazy var apiData = APIDataService(code: taskCode)
-    lazy var taskRuntime = TaskRuntimeEngine(store: self, code: taskCode) { id, attempt, error in
+    lazy var taskRuntime = TaskRuntimeEngine(store: self, code: taskCode) { [weak self] id, attempt, error in
         Diagnostics.record(
             "runtime_failure",
             ["taskID": id.uuidString, "attempt": attempt, "type": String(describing: type(of: error))])
+        self?.reportTaskIssue(id, source: .runtime, detail: error.localizedDescription)
     }
     @Published var taskActionJobs: [UUID: Task<Void, Never>] = [:]
     @Published var queuedTaskRequests: [TaskUserRequest] = []
@@ -208,7 +252,20 @@ final class AppModel: ObservableObject {
             if oldValue != pinned { onResize?(windowSize) }
         }
     }
-    var compactRailTucked: Bool { pinned && !collapsed && !taskShelfVisible }
+    var compactRailTucked: Bool { pinned && !collapsed }
+    @Published var activeWindowPlayer: WindowPlayer?
+    @Published var addressFocusRequest = 0
+    @Published var editingWebAddress = false
+    @Published var pointerNearSourceControls = false
+    var hasWebAddressBar: Bool {
+        showingWeb && visibleHandoff?.document == nil && visibleHandoff?.isBrowserManager != true
+    }
+    var floatingSourceControls: Bool { hasWebAddressBar && compactRailTucked }
+    var detailControlsVisible: Bool {
+        guard !sourceIsFullscreen else { return false }
+        return !compactRailTucked || menuTracking || editingWebAddress
+            || (floatingSourceControls ? pointerNearSourceControls : pointerInside)
+    }
     @Published var history: [HistoryEntry] = []
     @Published var settings = AppSettings.load() {
         didSet {
@@ -219,6 +276,7 @@ final class AppModel: ObservableObject {
             if oldValue.inactiveStackOpacity != settings.inactiveStackOpacity { onStackOpacity?(stackOpacity) }
             if oldValue.blockAds != settings.blockAds {
                 for browser in liveBrowsers { Task { await browser.configureAdBlocking() } }
+                if let handoffSource { Task { await handoffSource.configureAdBlocking() } }
             }
         }
     }
@@ -280,9 +338,11 @@ final class AppModel: ObservableObject {
             ? NSSize(width: 136, height: 40 + 38 * ambientTasks.count) : NSSize(width: microWidth, height: 44)
     }
     var windowSize: NSSize {
-        if showingWeb { return preferredWebSize }
-        let card = selectedSideTask
         if collapsed { return compactSize }
+        if showingWeb { return preferredWebSize }
+        return cardWindowSize(selectedSideTask)
+    }
+    func cardWindowSize(_ card: SideTask?) -> NSSize {
         if let card, usesMusicCard(card) {
             return NSSize(width: 328, height: musicCardHeight(card) + 30)
         }
@@ -304,6 +364,7 @@ final class AppModel: ObservableObject {
         return 66 + resultHeight + 34
     }
     var onResize: ((NSSize) -> Void)?
+    var onParkCapsule: (() -> Void)?
     var onHide: (() -> Void)?
     var onShow: (() -> Void)?
     var onSettings: (() -> Void)?
@@ -345,7 +406,7 @@ final class AppModel: ObservableObject {
         recentSessions = sessions.entries
         if settings.allowAgents { bridge.start() }
         if settings.restoreLastSession, let previous = recentSessions.first {
-            restoreSession(previous, play: settings.resumePlaybackOnLaunch && previous.wasPlaying)
+            restoreSessionOnLaunch(previous)
         }
     }
     func install(_ plan: SurfacePlan, automatic: Bool = false) {
@@ -396,7 +457,6 @@ final class AppModel: ObservableObject {
         refreshHover()
     }
     func performBrowserAction(_ input: [String: Any]) async throws -> [String: Any] {
-        if externalBrowser && browserConnected { return try await bridge.externalAction(input) }
         if input["action"] as? String == "media", let operation = input["operation"] as? String,
             ["next", "previous"].contains(operation),
             let task = sideTasks.first(where: { $0.id == browser.id }), task.isMediaTask,
@@ -408,13 +468,8 @@ final class AppModel: ObservableObject {
         }
         return try await browser.action(input)
     }
-    func observation() async throws -> [String: Any] {
-        let result: [String: Any]
-        if externalBrowser && browserConnected {
-            result = try await bridge.externalAction(["action": "observe"])
-        } else {
-            result = try await browser.observe()
-        }
+    func observation(query: String? = nil) async throws -> [String: Any] {
+        let result = try await browser.observe(query: query)
         lastObservation = result
         if isLiveTest {
             Diagnostics.record(

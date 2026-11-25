@@ -46,6 +46,23 @@ struct CardMarkup: Codable, Equatable {
         return "<span class='preset-unit-suffix raw-value-unit'>" + unit.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;") + "</span>"
     }
 
+    static func shortGlanceSubject(_ subject: String) -> String {
+        let font = NSFont.systemFont(ofSize: 9, weight: .medium)
+        func width(_ text: String) -> CGFloat { (text as NSString).size(withAttributes: [.font: font]).width }
+        if width(subject) <= 76 { return subject }
+        var prefix = ""
+        for character in subject {
+            let next = prefix + String(character)
+            guard width(next + "…") <= 76 else { break }
+            prefix = next
+        }
+        return prefix + "…"
+    }
+
+    static func fitsGlance(_ text: String, width: CGFloat = 85) -> Bool {
+        (text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)]).width <= width
+    }
+
     func validateGlance(state: [String: String], fieldPath: String, runtimeKeys: Set<String> = []) throws {
         let keys = Self.bindingKeys(in: compactHTML).subtracting(["title", "status"])
         guard keys.count == 1, let key = keys.first else {
@@ -55,9 +72,41 @@ struct CardMarkup: Codable, Equatable {
         guard let value = state[key], !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ToolArgumentError(path: fieldPath, issue: "the selected value is empty or missing; bind a populated output or initialize it")
         }
-        let width = (value as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold)]).width
-        guard width <= 85 else {
+        guard Self.fitsGlance(value) else {
             throw ToolArgumentError(path: fieldPath, issue: "The primary reading in " + key + " would be clipped. Bind a short value with its unit (about 12 characters). Keep explanations and secondary values on the expanded card. Set form.compactKey or markup.glance.valueKey accordingly.")
+        }
+    }
+
+    /// A named option can identify the winner, but it cannot also serve as the
+    /// measurement. Consider only values actually displayed on this card.
+    func validateMeasuredResult(primary: String, subjects: [String], state: [String: String], fieldPath: String) throws {
+        guard let name = state[primary]?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !name.isEmpty, name.contains(where: \.isLetter) else { return }
+        let literal = NSRegularExpression.escapedPattern(for: name)
+        // Latin names can border Chinese conjunctions without spaces.
+        let pattern = #"(?<![\p{Latin}\p{N}])"# + literal + #"(?![\p{Latin}\p{N}])"#
+        guard subjects.contains(where: { $0.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil }) else { return }
+        let details = Self.bindingKeys(in: html).subtracting([primary, "title", "detail", "status", "sourceDate", "sourceDateDisplay", "sourceChecked"])
+        let measured = details.filter { key in
+            guard let value = state[key]?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+            return value.range(of: #"^(?:[\p{Sc}]|[A-Z]{1,3}\$)?\s*[+−-]?\d+(?:[.,]\d+)*\s*(?:[%‰°\p{L}]+)?$"#, options: .regularExpression) != nil
+        }
+        guard measured.count < 2 else {
+            throw ToolArgumentError(path: fieldPath, issue: "The capsule repeats an option name while the expanded result has measurements. Show the relevant measured value with its unit and identifiable subject, or a verified difference. Keep the other readings in the expanded card.")
+        }
+    }
+
+    func validateExpandedPurpose(state: [String: String], subject: String, hasActions: Bool) throws {
+        let supporting = Self.bindingKeys(in: html).subtracting(Self.bindingKeys(in: compactHTML))
+            .subtracting(["title", "status"])
+        if hasActions || !supporting.isEmpty || html.contains("data-series") || html.contains("<table") { return }
+        // Only flag clear replicas. Explanations, instructions and static legends can be useful.
+        var copy = html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        for word in [subject, state["title"] ?? ""] where !word.isEmpty {
+            copy = copy.replacingOccurrences(of: word, with: "", options: .caseInsensitive)
+        }
+        guard copy.contains(where: { $0.isLetter || $0.isNumber }) else {
+            throw ToolArgumentError(path: "$.markup.html", issue: "the expanded view repeats the capsule. Include a verified detail that helps a decision, an actual control or the original work. For a transient answer reply in conversation.")
         }
     }
 
@@ -153,6 +202,13 @@ struct CardMarkup: Codable, Equatable {
                 throw AppError.message("Every generated control must reference a registered action ID.")
             }
         }
+        let controls = try NSRegularExpression(pattern: #"<(?:input|select|textarea)\b[^>]*>"#, options: .caseInsensitive)
+        for match in controls.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+            guard let range = Range(match.range, in: html),
+                html[range].range(of: #"\bdata-field\s*=\s*["'][^"']+["']"#, options: [.regularExpression,.caseInsensitive]) != nil else {
+                throw ToolArgumentError(path: "$.markup.html", issue: "Bind each editable control to a registered field. If this operation is new, extend the current card’s behavior before presenting it.")
+            }
+        }
         let buttons = try NSRegularExpression(pattern: #"<button\b[^>]*>"#, options: .caseInsensitive)
         for match in buttons.matches(in: source, range: NSRange(source.startIndex..., in: source)) {
             guard let range = Range(match.range, in: source),
@@ -167,6 +223,13 @@ struct CardMarkup: Codable, Equatable {
         if source.range(of: #"\son[a-z]+\s*="#, options: [.regularExpression, .caseInsensitive]) != nil {
             throw AppError.message("Use data-action instead of JavaScript event attributes.")
         }
+    }
+    var boundControlIDs: Set<String> {
+        let pattern = #"\bdata-(?:action|input|change)\s*=\s*["']([^"']+)["']"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return [] }
+        return Set(regex.matches(in: html, range: NSRange(html.startIndex..., in: html)).compactMap {
+            Range($0.range(at: 1), in: html).map { String(html[$0]) }
+        })
     }
     func actionsBound(to key: String) -> Set<String> {
         guard let buttons = try? NSRegularExpression(pattern: #"<button\b[^>]*>"#, options: .caseInsensitive) else {
@@ -350,7 +413,8 @@ struct HTMLCardView: NSViewRepresentable {
     static func document(fragment: String, css: String, language: String? = nil) -> String {
         let nonce = UUID().uuidString
         let locale = language.flatMap { CardMarkup.localeIdentifier(for: $0) } ?? "en"
-        let payload = JSONText.encode(["locale": locale, "html": fragment, "css": css, "hostCSS": CalmVisualStyle.css])
+        let catalogs = fragment.contains("data-catalog") ? Dictionary(uniqueKeysWithValues: ChoiceCatalog.allCases.filter { fragment.contains($0.rawValue) }.map { ($0.rawValue, $0.choices(locale: Locale(identifier: locale))) }) : [:]
+        let payload = JSONText.encode(["catalogs": catalogs, "locale": locale, "html": fragment, "css": css, "hostCSS": CalmVisualStyle.css])
             .replacingOccurrences(of: "<", with: "\\u003c")
         return """
             <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -359,11 +423,12 @@ struct HTMLCardView: NSViewRepresentable {
             :root{color-scheme:light dark;--accent:#a49bdf;--muted:#88858e;--line:#8882;--soft:#8881}
             *{box-sizing:border-box}html,body{margin:0;background:transparent;font:12px -apple-system,BlinkMacSystemFont,sans-serif;color:light-dark(#292832,#eeedf3);overflow:hidden;height:100%}body{padding:6px 8px}h1,h2,h3,p{margin:0}h1{font-size:24px}h2{font-size:16px}h3{font-size:13px}small{color:var(--muted);font-size:10px}button,input{font:inherit;color:inherit}button{border:1px solid var(--line);background:var(--soft);border-radius:9px;padding:6px 9px;cursor:pointer;min-height:28px}button:hover{background:color-mix(in srgb,var(--accent) 22%,transparent)}button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}input{background:var(--soft);border:1px solid var(--line);border-radius:7px;padding:6px;max-width:100%}#surface{overflow:auto;height:100%;max-height:100%}button:disabled{opacity:.45}*{animation:none!important}:is(button,input,textarea,select){transition:background-color .14s ease,border-color .14s ease!important}html[data-reduce-motion=true] *{transition:none!important}
             html[data-compact="true"] body{padding:0;font-size:11px}html[data-compact="true"] #surface{overflow:hidden}html[data-compact="true"] h1,html[data-compact="true"] h2{font-size:14px}
+            select[hidden]{display:none!important}.clock-zone .choice-trigger{grid-area:1/1/2/3}.data-input .choice-trigger{grid-area:2/1/3/3}.choice-trigger{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.choice-dialog{padding:8px;width:min(240px,92vw);max-height:92vh;background:Canvas;color:CanvasText;border:1px solid var(--line);border-radius:10px}.choice-dialog[open]{display:flex;flex-direction:column;gap:6px}.choice-dialog::backdrop{background:#5552}.choice-dialog div{overflow:auto}.choice-dialog input{flex:none;width:100%}.choice-dialog button{display:block;width:100%;text-align:start;background:transparent;border:0}.choice-dialog button:hover,.choice-dialog button:focus-visible{background:var(--soft)}
             </style></head><body><main id="surface"></main><script nonce="\(nonce)">
             const payload=\(payload);
             document.documentElement.lang=payload.locale;
             const permitted=new Set('DIV SPAN P STRONG EM SMALL SECTION HEADER FOOTER H1 H2 H3 BUTTON INPUT TEXTAREA SELECT OPTION LABEL UL OL LI BR HR TABLE CAPTION THEAD TBODY TR TH TD FIGURE FIGCAPTION'.split(' '));
-            const attributes=new Set(['class','style','title','aria-label','role','scope','data-column','data-series','data-x','data-x-format','data-action','data-field','data-input','data-change','data-bind','placeholder','type','value','min','max','step','rows','required','selected','checked']);
+            const attributes=new Set(['class','style','title','aria-label','role','scope','data-catalog','data-column','data-series','data-x','data-x-format','data-action','data-field','data-input','data-change','data-bind','placeholder','type','value','min','max','step','rows','required','selected','checked']);
             const safeCSS=s=>!/[\\\\@]|url\\s*\\(|expression\\s*\\(|image-set\\s*\\(|position\\s*:\\s*(fixed|absolute)/i.test(s);
             \(CalmVisualStyle.harmonizeScript)
             const template=document.createElement('template');template.innerHTML=payload.html;
@@ -378,6 +443,71 @@ struct HTMLCardView: NSViewRepresentable {
               for(const ch of node.childNodes)el.appendChild(clean(ch));return el;
             }
             for(const ch of template.content.childNodes)document.querySelector('#surface').appendChild(clean(ch));
+            for (const select of document.querySelectorAll('select[data-field]')) {
+                const rows = payload.catalogs[select.dataset.catalog];
+                if (Array.isArray(rows)) {
+                    const prior = [...select.options];
+                    select.replaceChildren();
+                    for (const [value,label,aliases] of rows) {
+                        const option = new Option(label,value);
+                        option.dataset.aliases = aliases;
+                        select.add(option);
+                    }
+                    for (const option of prior) if (![...select.options].some(o=>o.value===option.value)) select.add(option);
+                }
+                if (select.options.length > 1) installPicker(select);
+            }
+            function installPicker(select) {
+                const trigger = document.createElement('button');
+                trigger.type = 'button';
+                trigger.className = 'choice-trigger';
+                trigger.setAttribute('aria-label',select.getAttribute('aria-label') || select.dataset.field);
+                trigger.setAttribute('aria-haspopup','dialog');
+                select.hidden = true;
+                select.after(trigger);
+                select.syncLabel = () => { trigger.textContent = select.selectedOptions[0]?.text || '…'; };
+                select.syncLabel();
+                trigger.addEventListener('click', event => {
+                    event.preventDefault();
+                    const dialog = document.createElement('dialog'), search = document.createElement('input'), list = document.createElement('div');
+                    dialog.className = 'choice-dialog';
+                    dialog.setAttribute('aria-label',trigger.getAttribute('aria-label'));
+                    search.type = 'search';
+                    search.placeholder = payload.locale.startsWith('zh') ? '搜索' : 'Search';
+                    search.setAttribute('aria-label', search.placeholder);
+                    function filter() {
+                        list.replaceChildren();
+                        const query = search.value.trim().toLocaleLowerCase();
+                        for (const option of select.options) {
+                            const terms = [option.text,option.value,option.dataset.aliases || ''].join(' ').toLocaleLowerCase();
+                            if (!terms.includes(query)) continue;
+                            const button = document.createElement('button');
+                            button.type = 'button'; button.textContent = option.text; button.value = option.value;
+                            button.addEventListener('click', () => {
+                                select.value = option.value;
+                                select.syncLabel();
+                                dialog.close();
+                                select.dispatchEvent(new Event('input',{bubbles:true}));
+                                select.dispatchEvent(new Event('change',{bubbles:true}));
+                            });
+                            list.append(button);
+                        }
+                        if (!list.childElementCount) list.textContent = payload.locale.startsWith('zh') ? '没有匹配项' : 'No matches';
+                    }
+                    search.oninput = filter;
+                    search.onkeydown = e => { if (e.key==='ArrowDown') { e.preventDefault(); list.firstElementChild?.focus(); } };
+                    dialog.onclose = () => { dialog.remove(); trigger.focus(); };
+                    const searchable = select.options.length > 16 || select.hasAttribute('data-catalog');
+                    if (searchable) dialog.append(search);
+                    dialog.append(list); document.body.append(dialog); filter(); dialog.showModal();
+                    if (searchable) search.focus(); else list.querySelector('button')?.focus();
+                    dialog.addEventListener('click', e => {
+                        if (e.target !== dialog) return;
+                        const r = dialog.getBoundingClientRect();
+                        if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) dialog.close();
+                    });
+                });
+            }
             const hostGlance = document.querySelector('#surface > .calm-glance .calm-value') !== null;
             let customStyle;
             if(safeCSS(payload.css)){
@@ -387,6 +517,11 @@ struct HTMLCardView: NSViewRepresentable {
             }
             const hostStyle=document.createElement("style");hostStyle.textContent=payload.hostCSS;document.head.appendChild(hostStyle);
             \(CardVisuals.script)
+            function compactTimestamp(value) {
+                // ISO wall time belongs to the source zone. Preserve it when shortening a capsule.
+                const match = /^(\\d{4})-(\\d{2}-\\d{2})T(\\d{2}:\\d{2}):\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?$/.exec(value);
+                return match ? match[2] + ' ' + match[3] : value;
+            }
             function updateUnitSuffixes(){
               for(const unit of document.querySelectorAll('.preset-unit,.preset-unit-suffix')){
                 const value=unit.previousElementSibling?.textContent.trim()||'';
@@ -401,7 +536,7 @@ struct HTMLCardView: NSViewRepresentable {
                   (value.startsWith(suffix) && /^[0-9.,+-]/.test(value.slice(suffix.length).trimStart())));
               }
             }
-            window.updateCard=({values:s,view})=>{if(customStyle && hostGlance)customStyle.disabled=view.compact==='true';document.documentElement.dataset.reduceMotion=view.reduceMotion||'false';window.measureContent=view.measureContent==='true';window.formMode=view.formMode==='true';if(window.formMode)for(const el of document.querySelectorAll('[data-field]'))if(Object.hasOwn(s,el.dataset.field)&&document.activeElement!==el&&!el.dataset.dirty){if(el.type==='checkbox')el.checked=s[el.dataset.field]==='true'||s[el.dataset.field]==='1';else el.value=s[el.dataset.field]};window.isCompact=view.compact==='true';document.documentElement.dataset.compact=String(window.isCompact);for(const el of document.querySelectorAll('[data-bind]'))el.textContent=Object.hasOwn(s,el.dataset.bind)?s[el.dataset.bind]:'—';updateUnitSuffixes();updateVisuals(s);const playing=s.mediaPlaying==='true';for(const [id,op] of Object.entries(JSON.parse(view.mediaActions||'{}'))){if(!['toggle','play','pause','mute','unmute','toggleMute'].includes(op))continue;for(const b of document.querySelectorAll('button[data-action]')){if(b.dataset.action!==id)continue;if(['mute','unmute','toggleMute'].includes(op)){const muted=s.mediaMuted==='true',label=op==='unmute'||(op==='toggleMute'&&muted)?'Unmute':'Mute';b.textContent=label;b.setAttribute('aria-label',label);b.title=label;b.disabled=op==='mute'?muted:op==='unmute'?!muted:false;continue}const pause=op==='pause'||(op==='toggle'&&playing),label=pause?'Pause':'Play';b.classList.add('calm-transport');b.dataset.playing=String(pause);b.setAttribute('aria-label',label);b.title=label;b.disabled=op==='pause'?!playing:op==='play'?playing:false;b.replaceChildren();const icon=document.createElement('span');icon.className='calm-transport-icon';icon.setAttribute('aria-hidden','true');const text=document.createElement('span');text.textContent=label;b.append(icon,text)}}document.documentElement.style.colorScheme=view.appearance==='system'?'light dark':view.appearance;document.documentElement.style.setProperty('--accent',view.accent||'#a49bdf');reportHeight();requestAnimationFrame(reportHeight);};
+            window.updateCard=({values:s,view})=>{if(customStyle && hostGlance)customStyle.disabled=view.compact==='true';document.documentElement.dataset.reduceMotion=view.reduceMotion||'false';window.measureContent=view.measureContent==='true';window.formMode=view.formMode==='true';if(window.formMode)for(const el of document.querySelectorAll('[data-field]'))if(Object.hasOwn(s,el.dataset.field)&&document.activeElement!==el&&!el.dataset.dirty){if(el.type==='checkbox')el.checked=s[el.dataset.field]==='true'||s[el.dataset.field]==='1';else el.value=s[el.dataset.field];el.syncLabel?.()};window.isCompact=view.compact==='true';document.documentElement.dataset.compact=String(window.isCompact);for(const el of document.querySelectorAll('[data-bind]')){el.textContent=Object.hasOwn(s,el.dataset.bind)?(window.isCompact?compactTimestamp(s[el.dataset.bind]):s[el.dataset.bind]):'—';el.dataset.longValue=String(el.textContent.length>48)};updateUnitSuffixes();updateVisuals(s);const playing=s.mediaPlaying==='true';for(const [id,op] of Object.entries(JSON.parse(view.mediaActions||'{}'))){if(!['toggle','play','pause','mute','unmute','toggleMute'].includes(op))continue;for(const b of document.querySelectorAll('button[data-action]')){if(b.dataset.action!==id)continue;if(['mute','unmute','toggleMute'].includes(op)){const muted=s.mediaMuted==='true',label=op==='unmute'||(op==='toggleMute'&&muted)?'Unmute':'Mute';b.textContent=label;b.setAttribute('aria-label',label);b.title=label;b.disabled=op==='mute'?muted:op==='unmute'?!muted:false;continue}const pause=op==='pause'||(op==='toggle'&&playing),label=pause?'Pause':'Play';b.classList.add('calm-transport');b.dataset.playing=String(pause);b.setAttribute('aria-label',label);b.title=label;b.disabled=op==='pause'?!playing:op==='play'?playing:false;b.replaceChildren();const icon=document.createElement('span');icon.className='calm-transport-icon';icon.setAttribute('aria-hidden','true');const text=document.createElement('span');text.textContent=label;b.append(icon,text)}}document.documentElement.style.colorScheme=view.appearance==='system'?'light dark':view.appearance;document.documentElement.style.setProperty('--accent',view.accent||'#a49bdf');reportHeight();requestAnimationFrame(reportHeight);};
             let lastHeight=0;
             function reportHeight(){if(!window.measureContent||window.isCompact||document.querySelector('#surface').clientWidth===0)return;const surface=document.querySelector('#surface'),top=surface.getBoundingClientRect().top,style=getComputedStyle(document.body);const height=Math.ceil(Math.max(0,...[...surface.children].map(n=>n.getBoundingClientRect().bottom-top+(parseFloat(getComputedStyle(n).marginBottom)||0)))+parseFloat(style.paddingTop)+parseFloat(style.paddingBottom));if(Math.abs(height-lastHeight)>1){lastHeight=height;window.webkit.messageHandlers.card.postMessage({height})}}
             const sizeObserver=new ResizeObserver(reportHeight);sizeObserver.observe(document.querySelector('#surface'));for(const child of document.querySelector('#surface').children)sizeObserver.observe(child);

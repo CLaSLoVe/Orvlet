@@ -271,7 +271,7 @@
             model.openTaskConversation(conversation)
             model.deliverReply("Already visible", kind: .success, taskID: conversation)
             try check(
-                model.feedback == nil && !model.hasUnreadReply,
+                model.feedback == nil && model.latestUnreadReply?.text == question,
                 "A reply in its own open conversation does not receive a duplicate notification")
             return checks
         }

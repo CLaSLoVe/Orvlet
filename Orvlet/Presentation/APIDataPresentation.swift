@@ -18,7 +18,7 @@ extension APIDataSpec {
             text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
                 .replacingOccurrences(of: "\"", with: "&quot;")
         }
-        var source = withWeatherControls.bindingVisuals()
+        var source = exposingVerifiedChoices(state: state).withWeatherControls.bindingVisuals()
         source.card = source.resolvedCard
         source.controls = source.cardControls
         let roles = source.currencyFields
@@ -47,11 +47,14 @@ extension APIDataSpec {
                 " data-field='" + control.key + "' " + event + "='updateData' aria-label=\"" + escape(control.label)
                 + "\""
             let element: String
-            if control.kind == "select", let options = control.options, !options.isEmpty {
+            if let catalog = control.catalog {
+                let value = escape(source.inputs?[control.key] ?? "")
+                element = "<select" + attributes + " data-catalog='" + catalog.rawValue + "'><option value=\"" + value + "\">" + value + "</option></select>"
+            } else if control.kind == "select", let options = control.options, !options.isEmpty {
                 element =
                     "<select" + attributes + ">"
                     + options.map {
-                        "<option value=\"" + escape($0) + "\">" + escape(source.optionLabel($0, for: control.key))
+                        "<option value=\"" + escape($0) + "\">" + escape(control.optionLabels?[$0] ?? source.optionLabel($0, for: control.key))
                             + "</option>"
                     }.joined()
                     + "</select>"
@@ -69,8 +72,10 @@ extension APIDataSpec {
         let footer =
             "<small data-bind='resultStatus'></small><footer><span data-bind='sourceHost'></span><span data-bind='sourceDateDisplay'></span><button class='calm-secondary' data-action='refreshData' aria-label='\(refreshLabel)'>\(refreshLabel)</button></footer>"
         let layout = source.card ?? DataCardPreset(kind: .reading, primaryKey: primary.key, subject: title)
+        var visibleLayout = layout
+        if source.choiceSubject(state) != nil { visibleLayout.displayNameKey = "orvletChoiceSubject" }
         let fallback = BuiltinCards.data(
-            layout, rows: rows, inputs: inputHTML, footer: footer, swap: source.supportsCurrencySwap,
+            visibleLayout, rows: rows, inputs: inputHTML, footer: footer, swap: source.supportsCurrencySwap,
             visuals: try CardVisual.markup(source.visuals ?? [], path: "$.source.visuals"), englishPresetCopy: source.usesEnglishPresetCopy, dateKey: source.weatherDateKey, conditionKey: source.weatherConditionKey, lowKey: source.weatherLowKey)
         var standardMarkup = fallback
         standardMarkup.interfaceLanguage = source.interfaceLanguage
@@ -78,14 +83,8 @@ extension APIDataSpec {
             title: source.usesEnglishPresetCopy && usesPreset && source.card?.kind == .weather ? "Weather"
                 : source.usesEnglishPresetCopy && usesPreset && source.card?.kind == .currency ? "Currency converter" : String(title.prefix(120)),
             markup: standardMarkup, fields: source.inputControls.map(\.key),
-            actions: [
-                TaskSurfaceAction(id: "refreshData", kind: .remote, operation: "refresh"),
-                TaskSurfaceAction(id: "updateData", kind: .remote, operation: "update"),
-            ], state: source.presentationState(state.merging(source.inputs ?? [:]) { current, _ in current }),
+            actions: source.workActions, state: source.presentationState(state.merging(source.inputs ?? [:]) { current, _ in current }),
             apiData: source)
-        if source.supportsCurrencySwap {
-            surface.actions.append(TaskSurfaceAction(id: "swapCurrencies", kind: .remote, operation: "swap"))
-        }
         if usesPreset {
             surface.preset = source.card?.kind.rawValue
             return try surface.validated()
@@ -128,8 +127,9 @@ extension APIDataSpec {
                 markup.html += footer
             }
             if layout.kind == .reading { markup.compactHTML = fallback.compactHTML }
+            let choicesBound = (try? markup.preserveChoices(from: fallback)) != nil
             surface.markup = markup
-            if let validated = try? surface.validated(), !primary.key.isEmpty,
+            if choicesBound, let validated = try? surface.validated(), !primary.key.isEmpty,
                 CardMarkup.bindingKeys(in: markup.html).contains(primary.key),
                 CardMarkup.bindingKeys(in: markup.compactHTML).contains(primary.key),
                 primaryUnit == nil

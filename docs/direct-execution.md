@@ -16,16 +16,8 @@ For a named public reading, `read_value` binds the source identity, value and un
 
 After a failed method, the executor can repair the specific step. Two failures on the same method open alternatives and prevent another identical approach. For data this can mean direct binding, another API or an observed webpage. Changing an error field alone does not reset the allowance. Alternative routes share the task owner, source qualifications and effect ledger. If the result still cannot be verified, the user sees a short explanation while the support trace keeps the failure category and field path.
 
-The old fast-method classifier and intent-planning helpers are Debug-only historical fixtures. They are not called by the production loop or included as a production execution alternative. The frozen original experiment sources remain in `output/continuation-study-2026-11-13/`.
+The old fast-method classifier and intent-planning helpers are Debug-only historical fixtures. They are not called by the production loop or included as a production execution alternative.
 
 ## Validation
 
-The November 15 comparison and fixtures are in `output/direct-execution-study-2026-11-15/`. Raw runs are in `.local/direct-execution-2026-11-15/`. Do not replay a started live session into the same output directory.
-
-- `scripts/continuation-study.py`: original eight continuation sessions, unchanged inputs and independent oracle; supports an explicit expected model and condition selection.
-- `scripts/routing-study.py`: frozen multi-task catalogue, routing-only probes and full global-input execution probes; records binary/fixture hashes before starting.
-- Continuation harness condition `direct-check`: offline direct execution, ownership, multi-step/native execution, runtime and lifecycle checks. It rejects provider calls.
-- Continuation harness mode `state`: original 23 saved snapshots, four real local actions each.
-- Mode `ui` exercises the actual WebKit document/bridge and is reported separately; local state checks never count as UI success.
-
-Legacy suites that assert an `interpret_request` plan, Jev parameter-slot matching or goal-index planning describe the former architecture. Their fixtures remain available for historical reproduction; they are not evidence that the new production loop was exercised. Use the direct execution and provider-backed continuation/routing harnesses for this refactor.
+Run `python3 scripts/check.py state-machines model-api` to exercise task ownership and model transport using local fixtures.

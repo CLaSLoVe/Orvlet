@@ -1,5 +1,27 @@
 """Wire-contract fixture: rejects lost tool results, reasoning state, and ignored settings."""
 def respond(path, body, headers):
+    if path.startswith('/api-wire/decision/'):
+        assert headers.get('Authorization') == 'Bearer TEST_DECISION_KEY'
+        if path.endswith('/systemone'):
+            assert body['model'] == 'jev-latest' and 'state' in body
+            assert body['questions']['audio']['type'] == 'noul'
+            return 200, {'answers': {'audio': {'type': 'noul', 'noul': .95}}}
+        assert path.endswith('/decisions') and body['model'] == 'gpt-6-luna'
+        assert 'state' not in body and 'stream' not in body and 'tools' not in body
+        assert body['input'][0]['content'][0]['type'] == 'input_json'
+        assert isinstance(body['questions'], list)
+        answers = []
+        for question in body['questions']:
+            name = question['name']
+            if question['type'] == 'predicate':
+                answers.append({'name': name, 'type': 'predicate', 'probability': .95})
+            else:
+                selected = {'route': 'new', 'instance': 'automatic', 'family': 'general', 'group': 'single', 'delivery': 'unspecified'}[name]
+                choices = [option['value'] for option in question['choices']]
+                assert selected in choices and all('description' in option for option in question['choices'])
+                answers.append({'name': name, 'type': 'choice', 'choice': selected, 'confidence': 1,
+                                'probabilities': [{'value': v, 'probability': 1 if v == selected else 0} for v in choices]})
+        return 200, {'answers': list(reversed(answers))}
     if '/error' in path:
         return 400, {'error': {'message': 'Unsupported temperature; credential TEST_WIRE_KEY'}}
     if '/chat/' in path:

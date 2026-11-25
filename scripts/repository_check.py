@@ -2,6 +2,7 @@
 """Check publishable Git files without printing potential secret contents."""
 from __future__ import annotations
 
+import hashlib
 import json
 import plistlib
 import re
@@ -12,7 +13,26 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
-REVIEWED_IMAGES = {"docs/assets/compact-timer.png", "docs/assets/command-window.png"}
+REVIEWED_IMAGES = {
+    "Orvlet/Assets.xcassets/AppIcon.appiconset/icon_128x128@1x.png": "6df0d415bbff94240f77ac78516908cdb2a3ccbc30e05bfbbf6a74ae4c3ccc0a",
+    "Orvlet/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png": "72efe02614772bf341d4946922f46b4a9fe617b9cac8c948bce019ea99096d69",
+    "Orvlet/Assets.xcassets/AppIcon.appiconset/icon_16x16@1x.png": "96f5e5992655830d0c424457743514c904d609992daa69e6a3df8aa171efd1a1",
+    "Orvlet/Assets.xcassets/AppIcon.appiconset/icon_16x16@2x.png": "3be437304584e7c5f270464c900f691bf385311feb9c668f7784603da1db21b7",
+    "Orvlet/Assets.xcassets/AppIcon.appiconset/icon_256x256@1x.png": "72efe02614772bf341d4946922f46b4a9fe617b9cac8c948bce019ea99096d69",
+    "Orvlet/Assets.xcassets/AppIcon.appiconset/icon_256x256@2x.png": "551d2aa5ab0ea99862c3bd51b87aaf7aa0e027cbd1b84af15b83d536e2d89266",
+    "Orvlet/Assets.xcassets/AppIcon.appiconset/icon_32x32@1x.png": "3be437304584e7c5f270464c900f691bf385311feb9c668f7784603da1db21b7",
+    "Orvlet/Assets.xcassets/AppIcon.appiconset/icon_32x32@2x.png": "b68abce04a4e0e3077e799f58bc53f6556b3e90ed5a09b7ce5bff0b1cc5315e6",
+    "Orvlet/Assets.xcassets/AppIcon.appiconset/icon_512x512@1x.png": "551d2aa5ab0ea99862c3bd51b87aaf7aa0e027cbd1b84af15b83d536e2d89266",
+    "Orvlet/Assets.xcassets/AppIcon.appiconset/icon_512x512@2x.png": "093a054364cfbe7ac2097497e908f7aedc538085a8d4cdc3864782cbf329e8b2",
+    "Orvlet/Assets.xcassets/StatusMark.imageset/status@1x.png": "c57520d02d4ee6c53f305661f087c396eb060e287f1b6dd40e94d465358daa23",
+    "Orvlet/Assets.xcassets/StatusMark.imageset/status@2x.png": "709d7c1204165b3557cc9139039f5faf9f9f78e86d552aa9968c0dd53c381363",
+    "docs/assets/command-window.png": "bb6bcde1c57505bafb821da939301e68eb62daf2e26281ba9e383cb4e6b13cf9",
+    "docs/assets/compact-timer.png": "5d90a2241c77b50b27625c661298e5d711c054baa655f8754f9a5f19f1a5ce06",
+    "docs/assets/generative-ui.png": "1f1fdcf807adbe076844e0ddd405388e97e1b41dbb8a8f44878a187596416b7c",
+    "docs/assets/generative-ui.zh-CN.png": "44055bd33ecfc079130a7c4d1d1c6c7ddb2bd2d78909414208888318191df5ef",
+    "docs/brand/orvlet-icon.png": "551d2aa5ab0ea99862c3bd51b87aaf7aa0e027cbd1b84af15b83d536e2d89266",
+    "docs/brand/orvlet-identity.png": "cbac5348115d64157b8f511961408a8c4a93584b275b99a5a027201d9dcd9c7b",
+}
 SECRET_PATTERNS = {
     "provider key": re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
     "GitHub token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})"),
@@ -29,7 +49,7 @@ SECRET_PATTERNS = {
 def forbidden_path(name: str) -> bool:
     path = PurePosixPath(name)
     parts = path.parts
-    if any(p.startswith('.build') or p in {'.local', '.backups', 'dist', 'DerivedData', 'build', 'xcuserdata', '__pycache__', '.aws', '.codex', '.agents', '.venv'} for p in parts):
+    if any(p.startswith('.build') or p in {'.local', '.backups', 'output', 'tmp', 'dist', 'DerivedData', 'build', 'xcuserdata', '__pycache__', '.aws', '.codex', '.agents', '.venv'} for p in parts):
         return True
     if any(p.endswith(('.app', '.dSYM', '.xcarchive', '.xcresult')) for p in parts):
         return True
@@ -85,12 +105,12 @@ def main() -> int:
             continue
         data = path.read_bytes()
         total += len(data)
+        if name in REVIEWED_IMAGES:
+            if hashlib.sha256(data).hexdigest() != REVIEWED_IMAGES[name]:
+                findings.append(f'{name}: reviewed artwork changed; inspect the new file before updating its digest')
+            continue
         if len(data) > 1_000_000:
             findings.append(f'{name}: file exceeds the source-tree size limit')
-        if name in REVIEWED_IMAGES:
-            if not data.startswith(b'\x89PNG\r\n\x1a\n'):
-                findings.append(f'{name}: expected reviewed PNG')
-            continue
         try:
             text = data.decode('utf-8')
         except UnicodeDecodeError:

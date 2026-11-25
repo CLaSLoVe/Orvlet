@@ -5,29 +5,35 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var systemScheme
     @ObservedObject var model: AppModel
     private var scheme: ColorScheme { model.settings.appearance.scheme ?? systemScheme }
-    private var content: NSRect { model.shellLayout.localContent }
-    private var viewport: NSRect { model.shellLayout.localVisibleContent }
+    private var playerFrame: NSRect { NSRect(origin: .zero, size: model.shellLayout.frame.size) }
+    private var content: NSRect { model.sourceIsFullscreen ? playerFrame : model.shellLayout.localContent }
+    private var viewport: NSRect { model.sourceIsFullscreen ? playerFrame : model.shellLayout.localVisibleContent }
     private var compact: NSRect { model.shellLayout.localCompact }
+    private var stripOpacity: Double {
+        min(1, compact.width / max(1, model.compactSize.width), compact.height / max(1, model.compactSize.height))
+    }
+    private var verticalRail: Bool { model.shellLayout.edge == .left || model.shellLayout.edge == .right }
     var body: some View {
         ZStack(alignment: .topLeading) {
-            if model.shellLayout.edge != nil {
+            if !model.sourceIsFullscreen && model.shellLayout.edge != nil && !compact.isEmpty {
                 // One shared surface, with the original compact controls kept in the same screen position.
-                Rectangle().fill(.primary.opacity(0.025))
+                Rectangle().fill(.primary.opacity(0.025 * stripOpacity))
+                    .allowsHitTesting(false)
                     .frame(
-                        width: model.settings.compactLayout == .vertical
+                        width: verticalRail
                             ? compact.width : model.shellLayout.frame.width,
-                        height: model.settings.compactLayout == .vertical
+                        height: verticalRail
                             ? model.shellLayout.frame.height : compact.height
                     )
                     .offset(
-                        x: model.settings.compactLayout == .vertical ? compact.minX : 0,
-                        y: model.settings.compactLayout == .vertical ? 0 : compact.minY)
+                        x: verticalRail ? compact.minX : 0,
+                        y: verticalRail ? 0 : compact.minY)
             }
             DetailContentView(model: model)
                 .frame(
                     width: content.width > 0 ? content.width : model.preferredWebSize.width,
                     height: content.height > 0
-                        ? max(1, content.height - (model.feedback == nil ? 0 : model.feedbackSize.height))
+                        ? max(1, content.height - (model.feedback == nil || model.sourceIsFullscreen ? 0 : model.feedbackSize.height))
                         : model.preferredWebSize.height
                 )
                 .opacity(!model.collapsed && !model.taskShelfVisible ? 1 : 0)
@@ -35,6 +41,7 @@ struct ContentView: View {
                     CalmMotion.animation(reduced: model.motionReduced),
                     value: !model.collapsed && !model.taskShelfVisible
                 )
+                .offset(x: content.minX - viewport.minX, y: content.minY - viewport.minY)
                 .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
                 .clipped()
                 .offset(x: viewport.minX, y: viewport.minY)
@@ -45,42 +52,27 @@ struct ContentView: View {
             }
             .animation(CalmMotion.animation(reduced: model.motionReduced), value: model.taskShelfVisible)
             .frame(width: content.width, height: content.height)
+            .offset(x: content.minX - viewport.minX, y: content.minY - viewport.minY)
             .frame(width: viewport.width, height: viewport.height, alignment: .topLeading).clipped()
             .offset(x: viewport.minX, y: viewport.minY)
             .allowsHitTesting(model.taskShelfVisible)
-            if let feedback = model.feedback, content.width > 0, !model.taskShelfVisible {
+            if !model.sourceIsFullscreen, let feedback = model.feedback, content.width > 0, !model.taskShelfVisible {
                 RequestFeedbackView(model: model, feedback: feedback)
+                    .id(feedback.id)
                     .frame(width: content.width, height: min(model.feedbackSize.height, content.height))
                     .offset(x: content.minX, y: content.maxY - min(model.feedbackSize.height, content.height))
             }
-            ZStack(alignment: .topLeading) {
+            if !compact.isEmpty && !model.sourceIsFullscreen {
                 CalmStrip(model: model)
                     .frame(width: model.compactSize.width, height: model.compactSize.height)
-                    .opacity(model.compactRailTucked ? 0 : 1)
-                    .allowsHitTesting(!model.compactRailTucked)
-                    .accessibilityHidden(model.compactRailTucked)
-                if model.compactRailTucked {
-                    Button {
-                        model.taskShelfVisible = true
-                    } label: {
-                        Image(systemName: "square.stack.3d.up")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(CalmVisualStyle.tint(model.accent, scheme: scheme))
-                            .frame(
-                                width: model.settings.compactLayout == .vertical ? 28 : 36,
-                                height: model.settings.compactLayout == .vertical ? 36 : 28
-                            )
-                            .contentShape(Rectangle())
-                    }.buttonStyle(WindowDragButtonStyle())
-                        .help("Show tasks").accessibilityLabel("Show tasks")
-                        .transition(.opacity)
-                }
+                    .frame(width: compact.width, height: compact.height, alignment: .topLeading)
+                    .clipped().opacity(stripOpacity)
+                    .allowsHitTesting(!model.compactRailTucked).accessibilityHidden(model.compactRailTucked)
+                    .offset(x: compact.minX, y: compact.minY)
             }
-            .animation(CalmMotion.animation(reduced: model.motionReduced), value: model.compactRailTucked)
-            .frame(width: compact.width, height: compact.height, alignment: .topLeading)
-            .clipped().offset(x: compact.minX, y: compact.minY)
         }
         .frame(width: model.shellLayout.frame.width, height: model.shellLayout.frame.height, alignment: .topLeading)
+        .animation(CalmMotion.layout(reduced: model.motionReduced), value: model.sourceIsFullscreen)
         .background { WindowDragArea() }
         .background {
             ZStack {
@@ -102,13 +94,18 @@ struct ContentView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 16).strokeBorder(
                 scheme == .dark ? Color.white.opacity(0.13) : Color.white.opacity(0.9), lineWidth: 1)
+                .allowsHitTesting(false)
         )
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(model.accent.opacity(0.12), lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(model.accent.opacity(0.12), lineWidth: 0.5)
+            .allowsHitTesting(false))
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .environment(\.calmReducedMotion, model.motionReduced)
         .environment(\.colorScheme, scheme)
         .preferredColorScheme(model.settings.appearance.scheme)
         .onChange(of: model.compactSize) { _, _ in model.onResize?(model.windowSize) }
+        .onChange(of: model.visibleWindowPlayer.map(ObjectIdentifier.init)) { _, _ in
+            if !model.sourceIsFullscreen { model.activeWindowPlayer?.exit() }
+        }
         .onHover { model.pointerChanged($0) }
     }
 }
@@ -116,19 +113,70 @@ struct ContentView: View {
 struct DetailContentView: View {
     @ObservedObject var model: AppModel
     @State private var inputActive = false
-    var body: some View {
-        interactionCard
-            .overlay(alignment: .topLeading) { sourceHosts }
-            .preferredColorScheme(model.settings.appearance.scheme)
-            .onExitCommand { model.collapse() }
-            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
-                model.menuTracking = true
-            }
-            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
-                model.menuTracking = false
-            }
+    @State private var showingExitHint = false
+
+    private var toolbarHeight: CGFloat { model.hasWebAddressBar ? 52 : 30 }
+    private var reservedHeight: CGFloat {
+        model.detailControlsVisible && !model.floatingSourceControls ? toolbarHeight : 0
     }
-    var interactionCard: some View {
+    var body: some View {
+        ZStack(alignment: .top) {
+            interactionCard
+            sourceHosts
+            toolbar
+                .background {
+                    if model.floatingSourceControls {
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .fill(.regularMaterial)
+                            .overlay { RoundedRectangle(cornerRadius: 11).strokeBorder(.primary.opacity(0.10)) }
+                            .shadow(color: .black.opacity(0.13), radius: 5, y: 2)
+                    }
+                }
+                .padding(.horizontal, model.floatingSourceControls ? 4 : 0)
+                .padding(.top, model.floatingSourceControls ? 3 : 0)
+                .modifier(RevealingControls(visible: model.detailControlsVisible,
+                                            height: toolbarHeight + (model.floatingSourceControls ? 3 : 0),
+                                            reduced: model.motionReduced))
+            if model.sourceIsFullscreen {
+                Button { model.activeWindowPlayer?.exit() } label: {
+                    Label("Exit fullscreen", systemImage: "arrow.down.right.and.arrow.up.left")
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 11).frame(height: 28)
+                        .foregroundStyle(.white)
+                        .background(Color(red: 0.13, green: 0.13, blue: 0.16).opacity(0.92), in: Capsule())
+                        .overlay { Capsule().strokeBorder(.white.opacity(0.20)) }
+                        .shadow(color: .black.opacity(0.14), radius: 4, y: 1)
+                }
+                .buttonStyle(WindowDragButtonStyle(allowsWindowDrag: false))
+                .accessibilityIdentifier("exit-window-player").help("Exit fullscreen · Esc")
+                .padding(.top, 7)
+                .modifier(RevealingControls(visible: model.pointerNearSourceControls || showingExitHint,
+                                           height: 40, reduced: model.motionReduced))
+            }
+        }
+        .onContinuousHover { phase in
+            switch phase {
+            case let .active(point): model.trackSourcePointer(y: point.y)
+            case .ended: model.trackSourcePointer(y: nil)
+            }
+        }
+        .task(id: model.sourceIsFullscreen) {
+            showingExitHint = model.sourceIsFullscreen
+            if showingExitHint {
+                do { try await Task.sleep(for: .milliseconds(1400)); showingExitHint = false }
+                catch {}
+            }
+        }
+        .preferredColorScheme(model.settings.appearance.scheme)
+        .onExitCommand { if model.sourceIsFullscreen { model.activeWindowPlayer?.exit() } else { model.collapse() } }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            model.menuTracking = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            model.menuTracking = false
+        }
+    }
+    private var toolbar: some View {
         VStack(spacing: 0) {
             HStack(spacing: 7) {
                 Button {
@@ -144,7 +192,7 @@ struct DetailContentView: View {
                 }
                 .buttonStyle(.plain).help("Edit tasks").accessibilityLabel("Edit tasks")
                 Text(
-                    model.selectedSideTask.map { model.usesMusicCard($0) } == true
+                    model.visibleHandoff?.isBrowserManager == true ? "Browser extensions" : model.selectedSideTask.map { model.usesMusicCard($0) } == true
                         ? "Music" : model.selectedSideTask?.title ?? "Orvlet"
                 )
                 .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary).lineLimit(1)
@@ -157,9 +205,10 @@ struct DetailContentView: View {
                 if let card = model.selectedSideTask {
                     Menu {
                         Button("Chat") { model.openTaskConversation(card.id) }
-                        if card.kind == .web {
+                        if card.kind == .web || model.visibleHandoff != nil {
                             Button(model.showingWeb ? "Show card" : "Open source page") {
-                                model.selectTask(card.id, expanded: true, preferSource: !model.showingWeb)
+                                if model.showingWeb { model.selectTask(card.id, expanded: true, preferSource: false) }
+                                else { model.openTaskFromDoubleClick(card.id) }
                             }
                         } else if card.kind == .timer {
                             Button("Restart timer") { model.timerAction(card.id, action: "restart") }
@@ -180,39 +229,26 @@ struct DetailContentView: View {
                     .accessibilityLabel(model.pinned ? "Unpin card" : "Keep open")
                     .accessibilityIdentifier("keep-card-open")
                 }
+                if model.compactRailTucked { PinnedTasksButton(model: model) }
             }.padding(.horizontal, 10).frame(height: 30).background {
                 WindowDragArea(
                     onDoubleClick: model.selectedSideTask.map { task in
                         { model.openTaskFromDoubleClick(task.id) }
                     })
             }
-            if model.showingWeb {
-                HStack {
-                    if let selected = model.selectedSideTask,
-                        let source = model.liveBrowsers.first(where: { $0.id == selected.id })
-                    {
-                        Button {
-                            source.webView.goBack()
-                        } label: {
-                            Image(systemName: "chevron.left").frame(width: 26, height: 22)
-                        }.help("Back").disabled(!source.webView.canGoBack)
-                        Button {
-                            source.webView.goForward()
-                        } label: {
-                            Image(systemName: "chevron.right").frame(width: 26, height: 22)
-                        }.help("Forward").disabled(!source.webView.canGoForward)
-                        Button {
-                            source.webView.reload()
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                        }.help("Reload")
-                    }
-                    Spacer()
-                    Text(model.selectedSideTask?.sourceURL.flatMap { URL(string: $0)?.host } ?? "Source page")
-                        .lineLimit(1).foregroundStyle(.secondary)
-                }.font(.system(size: 10)).buttonStyle(.plain).padding(.horizontal, 10).frame(height: 22).background {
-                    WindowDragArea()
-                }
+            if model.hasWebAddressBar {
+                SourceNavigationBar(model: model)
+                    .id(model.visibleWindowPlayer.map(ObjectIdentifier.init))
+            }
+        }
+    }
+
+    var interactionCard: some View {
+        VStack(spacing: 0) {
+            Color.clear.frame(height: reservedHeight).allowsHitTesting(false)
+            if let source = model.visibleHandoff {
+                HandoffSourceView(source: source).id(ObjectIdentifier(source))
+            } else if model.showingWeb {
                 Spacer(minLength: 0)
             } else if let task = model.selectedSideTask, let label = task.terminalLabel,
                 ![.timer, .calendar].contains(task.kind)
@@ -233,7 +269,7 @@ struct DetailContentView: View {
             } else if let task = model.selectedSideTask {
                 ZStack {
                     HTMLCardView(
-                        markup: task.presentation, compact: false, state: task.state,
+                        markup: task.presentation, compact: false, state: task.expandedDisplayState,
                         allowedActions: task.allowedActions,
                         collectFields: task.kind == .workspace, measuresContent: true, mediaActions: task.mediaActions,
                         appearance: model.settings.appearance, accent: model.settings.theme.hex,
@@ -267,18 +303,44 @@ struct DetailContentView: View {
     }
     var sourceHosts: some View {
         GeometryReader { geometry in
+            let top = reservedHeight
+            let side: CGFloat = top > 0 ? 3 : 0
+            let bottom: CGFloat = top > 0 ? 4 : 0
             ZStack {
                 ForEach(model.liveBrowsers, id: \.id) { browser in
-                    WebSurface(webView: browser.webView)
-                        .frame(width: max(1, geometry.size.width - 6), height: max(1, geometry.size.height - 56))
-                        .opacity(model.showingWeb && model.selectedSideTask?.id == browser.id ? 1 : 0)
-                        .allowsHitTesting(model.showingWeb && model.selectedSideTask?.id == browser.id)
-                        .accessibilityHidden(!model.showingWeb || model.selectedSideTask?.id != browser.id)
+                    Group {
+                        if let page = browser.systemPage {
+                            BrowserPageSurface(page: page, visible: model.visibleHandoff == nil && model.showingWeb && model.selectedSideTask?.id == browser.id)
+                        } else { WebSurface(webView: browser.webView) }
+                    }
+                        .frame(width: max(1, geometry.size.width - 2 * side), height: max(1, geometry.size.height - top - bottom))
+                        .opacity(model.visibleHandoff == nil && model.showingWeb && model.selectedSideTask?.id == browser.id ? 1 : 0)
+                        .allowsHitTesting(model.visibleHandoff == nil && model.showingWeb && model.selectedSideTask?.id == browser.id)
+                        .accessibilityHidden(model.visibleHandoff != nil || !model.showingWeb || model.selectedSideTask?.id != browser.id)
                 }
-            }.offset(x: 3, y: 52)
+            }.offset(x: side, y: top)
         }
     }
 
+}
+
+private struct RevealingControls: ViewModifier {
+    let visible: Bool
+    let height: CGFloat
+    let reduced: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .frame(height: height, alignment: .top)
+            .scaleEffect(visible || reduced ? 1 : 0.985, anchor: .top)
+            .offset(y: visible || reduced ? 0 : -9)
+            .opacity(visible ? 1 : 0)
+            .frame(height: visible ? height : 0, alignment: .top)
+            .clipped()
+            .allowsHitTesting(visible)
+            .accessibilityHidden(!visible)
+            .animation(reduced ? nil : .smooth(duration: visible ? 0.24 : 0.18), value: visible)
+    }
 }
 
 struct CommandWindowView: View {
@@ -352,6 +414,9 @@ struct CommandPanelView: View {
                             Image(systemName: "stop.circle").font(.system(size: 18))
                         }.help("Stop current request")
                     }
+                    Button { model.attachWorkFiles() } label: {
+                        Image(systemName: "paperclip").font(.system(size: 15))
+                    }.help("Attach local text files").accessibilityLabel("Attach local text files")
                     Button(action: send) {
                         Image(systemName: "arrow.up.circle.fill").font(.system(size: 22)).foregroundStyle(model.accent)
                     }

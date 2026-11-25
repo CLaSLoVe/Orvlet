@@ -410,6 +410,7 @@
                 ).write(to: URL(fileURLWithPath: "/tmp/orvlet-listening-checks.json"))
                 exit(0)
             } catch {
+                print(JSONText.encode(["ok":false,"checks":checks,"error":error.localizedDescription]))
                 try? JSONSerialization.data(
                     withJSONObject: ["ok": false, "checks": checks, "error": error.localizedDescription],
                     options: .prettyPrinted

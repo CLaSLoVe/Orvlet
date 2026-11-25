@@ -7,9 +7,11 @@
             let url = URL(fileURLWithPath: "/tmp/orvlet-model-api-checks.json")
             do {
                 let checks = try await run()
-                try JSONSerialization.data(withJSONObject: ["ok": true, "checks": checks]).write(to: url)
+                if CommandLine.arguments.contains("--report-stdout") { print(JSONText.encode(["ok":true,"checks":checks])) }
+                else { try JSONSerialization.data(withJSONObject: ["ok": true, "checks": checks]).write(to: url) }
                 exit(0)
             } catch {
+                print(error.localizedDescription)
                 try? JSONSerialization.data(withJSONObject: ["ok": false, "error": error.localizedDescription]).write(
                     to: url)
                 exit(1)
@@ -94,6 +96,23 @@
                 (chat["tool_calls"] as? [[String: Any]])?.count == 1,
                 "Chat transport sends custom authentication, reasoning, zero temperature, legacy token limit and JSON overrides"
             )
+            let heartbeat = Endpoint(baseURL:"http://127.0.0.1:19244/heartbeat/v1", model:"fixture")
+            let started = Date()
+            let recovered = try await ModelClient.complete(endpoint:heartbeat, key:"", messages:messages, tools:[],
+                reasoning:false, maximumWait:0.2, onStream:{ _,_ in })
+            try check(recovered["content"] as? String == "recovered" && Date().timeIntervalSince(started) < 2,
+                "A heartbeat-only model stream hits its absolute deadline and recovers through one buffered decision without dispatching a tool")
+            let cachedStart = Date()
+            let cached = try await ModelClient.complete(endpoint:heartbeat, key:"", messages:messages, tools:[],
+                reasoning:false, maximumWait:1, onStream:{ _,_ in })
+            try check(cached["content"] as? String == "recovered" && Date().timeIntervalSince(cachedStart) < 0.8,
+                "After a stalled automatic stream, subsequent decisions temporarily use buffered transport without repeating the timeout")
+            let terminal = Endpoint(baseURL:"http://127.0.0.1:19244/stream-finished/v1",model:"fixture")
+            let terminalStart = Date()
+            let completed = try await ModelClient.complete(endpoint:terminal,key:"",messages:messages,tools:[],
+                reasoning:false,maximumWait:1,onStream:{ _,_ in })
+            try check(completed["content"] as? String == "complete" && Date().timeIntervalSince(terminalStart) < 0.8,
+                "A stream ending its choice completes immediately without waiting for gateway heartbeats or a trailing DONE marker")
             var settings = AppSettings()
             settings.main = endpoint
             settings.ensureProfiles()
@@ -190,6 +209,7 @@
                         && !error.localizedDescription.contains("TEST_WIRE_KEY"),
                     "HTTP errors show actionable provider details with credentials redacted")
             }
+            checks += try await DecisionAPICheck.run()
             return checks
         }
     }

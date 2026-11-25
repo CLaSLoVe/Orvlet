@@ -5,6 +5,7 @@ extension ModelClient {
     static func stream(_ request: URLRequest, key: String, headers: [String: String]?,
                        notify: (String, String?) -> Void) async throws -> [String: Any] {
         let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
         guard let http = response as? HTTPURLResponse else { throw AppError.message("Missing model response.") }
         guard (200..<300).contains(http.statusCode) else {
             var data = Data()
@@ -47,7 +48,12 @@ extension ModelClient {
                         calls[i, default: [:]]["arguments", default: ""] += f["arguments"] as? String ?? ""
                     }
                 }
-                if let reason = choice["finish_reason"] as? String { finish = reason }
+                if let reason = choice["finish_reason"] as? String {
+                    // A completed choice is terminal even if a gateway keeps SSE
+                    // heartbeats alive or omits its optional trailing [DONE] marker.
+                    finish = reason
+                    break
+                }
                 continue
             }
             let i = event["index"] as? Int ?? 0

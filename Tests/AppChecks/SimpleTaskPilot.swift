@@ -61,7 +61,7 @@
             guard let got = Double(clean.substring(with: hits[0].range)) else { return false }
             return abs(got - want) < 0.005
         }
-        static func expanded(_ model: AppModel, task: SideTask, delegate: AppDelegate) async throws -> WKWebView {
+        static func expanded(_ model: AppModel, task: SideTask, window: NSWindow) async throws -> WKWebView {
             // Mount the production card document and bridge in a plain WebKit fixture.
             // This checks the generated component, not the SwiftUI shell or task shelf.
             emit(["progress": "mounting-card"])
@@ -87,7 +87,7 @@
                 }
             }
             web.navigationDelegate = coordinator
-            delegate.panel.contentView = web
+            window.contentView = web
             emit(["progress": "webview-attached"])
             let markup = task.taskSurface?.markup ?? task.presentation
             web.loadHTMLString(HTMLCardView.document(fragment: markup.html, css: markup.css), baseURL: nil)
@@ -229,7 +229,7 @@
                             model.sideTasks.first { $0.id == task.id }!.remaining < paused.remaining - 0.9,
                             "Timer resume failed")
                     } else {
-                        let web = try await expanded(model, task: task, delegate: delegate)
+                        let web = try await expanded(model, task: task, window: delegate.panel)
                         var visible = false
                         for _ in 0..<30 {
                             cardCoordinator?.state["values"]?["remaining"] =
@@ -301,7 +301,7 @@
                     emit(["checkpoint": row])
                     stage = "ui"
                     if !logicOnly {
-                        let web = try await expanded(model, task: task, delegate: delegate)
+                        let web = try await expanded(model, task: task, window: delegate.panel)
                         var outputKey: String?
                         for _ in 0..<30 {
                             for key in consistentKeys {

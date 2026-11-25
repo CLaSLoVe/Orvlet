@@ -95,19 +95,14 @@
             _ = try await player.webView.evaluateJavaScript(
                 "document.querySelector('video').play=()=>Promise.reject(new Error('Synthetic playback rejection'));true"
             )
-            let text = "Resume the test player"
-            let prepared = PreparedRequest(
-                text: text,
-                triage: RequestTriage(capability: .control, target: player.id, routeKnown: true, action: "resume"),
-                model: model)
             var reason = ""
-            do { _ = try await model.agent.run(text, taskID: player.id, prepared: prepared) } catch {
+            do { try await model.performMusicControl(player.id, operation:"play") } catch {
                 reason = error.localizedDescription
             }
             guard reason.contains("Synthetic playback rejection"), modelCalls == 0 else {
                 throw AppError.message("Playback failure was hidden or retried by the model: " + reason)
             }
-            checks.append("Playback rejection preserves its concrete error and makes zero model recovery calls")
+            checks.append("The registered player control preserves playback rejection without model recovery")
             return checks
         }
 

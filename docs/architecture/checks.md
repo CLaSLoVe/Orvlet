@@ -1,6 +1,6 @@
 # Focused checks
 
-`python3 scripts/check.py` builds once and runs the core self and consistency suites. `--skip-build` uses an existing Debug build. Repeated suite names run once. `--full` runs every distinct suite; explicit suite names select only the affected areas. Native builds/checks need a logged-in macOS desktop and run outside the restricted environment.
+`python3 scripts/check.py` builds once and runs only background-safe state-machine and model-protocol suites. `--skip-build` uses an existing Debug build. Repeated suite names run once. `--full` also stays within the background-safe set. Visible UI suites require an explicit `--show-ui` opt-in; do not use it while the user is working or has requested no windows. The native harness independently rejects other modes under `--background-checks`. Offscreen rendering starts before application windows are created and must leave no visible windows. Native builds/checks need a logged-in macOS desktop and run outside the restricted environment.
 
 Each shared group has one suite owner: consistency owns task lifecycle/routing, motion owns motion, side-screen owns rendered layout/interactions. Do not invoke the same group from multiple umbrella suites. Keep distinct negative cases that protect ownership, external side effects or current data.
 

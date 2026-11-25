@@ -5,7 +5,7 @@ extension AgentController {
         switch tool {
         case "load_tools": "Preparing task tools…"
         case "run_code": "Checking the calculation…"
-        case "present_ui", "compose_ui", "manage_task": "Building and checking the card…"
+        case "present_ui", "compose_ui", "manage_task", "build_data_tool": "Building and checking the card…"
         case "read_value", "query_api", "inspect_api": "Reading the data source…"
         case "observe", "navigate", "screenshot": "Checking the source page…"
         case "control_task", "act", "control_media": "Applying the task action…"

@@ -2,23 +2,33 @@ import Foundation
 
 @MainActor
 extension AppModel {
+    /// Playback intent belongs to the activity, independently of its site or UI generation.
+    func markPlaybackTask(_ id: UUID) {
+        if id == browser.id { upsertWebTask() }
+        guard let i = sideTasks.firstIndex(where:{ $0.id == id && $0.kind == .web }) else { return }
+        work.showView(id)
+        sideTasks[i].listening = true
+        sideTasks[i].prefersSource = false
+        sideTasks[i].hidden = false
+        if let controller = musicBrowser(id) { receiveMusicState(id, data:controller.lastState) }
+        persistSideTasks()
+    }
     func usesMusicCard(_ task: SideTask) -> Bool {
         task.usesMusicCard && !(externalBrowser && task.id == browser.id)
     }
     func musicCardHeight(_ task: SideTask) -> Double {
         let queue = task.musicQueue?.upcoming ?? []
-        return 222 + (musicErrors[task.id] == nil ? 0 : 34)
+        return (task.musicQueue == nil ? 184 : 222) + (musicErrors[task.id] == nil ? 0 : 34)
             + (musicQueueExpanded.contains(task.id) ? (queue.isEmpty ? 38 : Double(min(queue.count, 4)) * 42 + 8) : 0)
     }
 
     func receiveMusicState(_ id: UUID, data: [String: Any]) {
-        guard let index = sideTasks.firstIndex(where: { $0.id == id }), sideTasks[index].isMediaTask,
-            MusicTrack.videoID(data["url"] as? String ?? "") != nil
+        guard let index = sideTasks.firstIndex(where: { $0.id == id }), sideTasks[index].isMediaTask
         else { return }
         let state = MusicPlayback(data)
         let old = musicPlayback[id]
         if state != old { musicPlayback[id] = state }
-        if !musicLoading.contains(id), state.ready, !state.ad {
+        if !musicLoading.contains(id), state.ready, !state.ad, state.videoID != nil {
             var queue = sideTasks[index].musicQueue ?? MusicQueue()
             if let videoID = state.videoID, queue.current?.id != videoID {
                 queue.select(MusicTrack(id: videoID, title: state.title, subtitle: state.subtitle))
@@ -27,6 +37,15 @@ extension AppModel {
             queue.muted = state.muted
             queue.repeatOne = state.looping
             if sideTasks[index].musicQueue != queue { sideTasks[index].musicQueue = queue }
+        }
+        // Live evidence supersedes an old request failure, including a healthy
+        // paused player. Do not confuse an ad, another track, or a pending request
+        // with recovery of this resource.
+        if state.ready, !state.ad, !musicLoading.contains(id), musicErrors[id] == nil,
+            sideTasks[index].dataIssue == nil, data["url"] as? String == sideTasks[index].sourceURL,
+            let source = musicBrowser(id), !source.loading, !source.disposed, source.sourceAccessIssue == nil,
+            runOwning(id) == nil, !(busy && ownsRequest(id)) {
+            clearPlaybackFailure(id, playing: state.playing)
         }
         if state.ended, old?.ended != true, !state.looping, !state.ad, !musicLoading.contains(id),
             let controller = musicBrowser(id), !controller.playbackSuspended,
@@ -69,6 +88,7 @@ extension AppModel {
 
     /// The same operation powers native controls and checks. It always addresses the owning page.
     func performMusicControl(_ id: UUID, operation: String, value: Double? = nil) async throws {
+        try await wakeDormantSource(id)
         guard let task = sideTasks.first(where: { $0.id == id }), task.isMediaTask,
             let controller = musicBrowser(id), !controller.disposed
         else { throw CancellationError() }
@@ -110,6 +130,8 @@ extension AppModel {
         if op == "pause", actual.playing { throw AppError.message("The player has not paused yet.") }
         receiveMusicState(id, data: page)
         musicErrors[id] = nil
+        resolveTaskIssue(id, source: .playback)
+        clearPlaybackFailure(id, playing: actual.playing)
         persistSideTasks()
     }
 
@@ -126,7 +148,10 @@ extension AppModel {
             guard let self else { return }
             do { try await performMusicControl(id, operation: operation, value: value) } catch is CancellationError {
             } catch {
-                if sideTasks.contains(where: { $0.id == id }) { musicErrors[id] = error.localizedDescription }
+                if sideTasks.contains(where: { $0.id == id }) {
+                    musicErrors[id] = error.localizedDescription
+                    reportTaskIssue(id, source: .playback, detail: error.localizedDescription)
+                }
             }
             onResize?(windowSize)
         }
@@ -138,6 +163,7 @@ extension AppModel {
             guard let self else { return }
             do { try await playMusicTrack(track, id: id) } catch is CancellationError {} catch {
                 musicErrors[id] = error.localizedDescription
+                reportTaskIssue(id, source: .playback, detail: error.localizedDescription)
             }
             onResize?(windowSize)
         }
@@ -145,6 +171,7 @@ extension AppModel {
 
     func playMusicTrack(_ track: MusicTrack, id: UUID) async throws {
         try Task.checkCancellation()
+        try await wakeDormantSource(id)
         guard let controller = musicBrowser(id), !controller.disposed,
             let index = sideTasks.firstIndex(where: { $0.id == id })
         else { throw CancellationError() }
@@ -217,6 +244,8 @@ extension AppModel {
                     page["audible"] as? Bool == true || queue.muted || queue.volume == 0
                 {
                     receiveMusicState(id, data: page)
+                    clearPlaybackFailure(id, playing: state.playing)
+                    resolveTaskIssue(id, source: .playback)
                     Diagnostics.record(
                         "music_playback_ready", ["taskID": id.uuidString, "seconds": Date().timeIntervalSince(start)])
                     return

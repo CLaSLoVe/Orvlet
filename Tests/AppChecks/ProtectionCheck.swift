@@ -4,6 +4,106 @@
 
     @MainActor
     enum ProtectionCheck {
+        static func checkAds(_ model: AppModel, check: (Bool, String) throws -> Void) async throws {
+            func pause(_ seconds: Double) async throws { try await Task.sleep(for: .seconds(seconds)) }
+            model.settings.blockAds = true
+            let browser = BrowserController(model: model)
+            defer { browser.dispose() }
+            browser.webView.loadHTMLString(
+                "<html><body><div id='ad' class='advertisement'>Ad</div><button id='normal'>Pause music</button></body></html>",
+                baseURL: URL(string: "http://127.0.0.1:19244"))
+            for _ in 0..<60 {
+                try await pause(0.1)
+                if (try? await browser.webView.evaluateJavaScript("!!document.querySelector('#ad')")) as? Bool
+                    == true
+                {
+                    break
+                }
+            }
+            let hidden =
+                try await browser.webView.evaluateJavaScript(
+                    "getComputedStyle(document.querySelector('#ad')).display==='none' && getComputedStyle(document.querySelector('#normal')).display!=='none'"
+                ) as? Bool
+            try check(
+                hidden == true && model.adBlockingError == nil,
+                "Bundled native rules compile and hide ads before first page finishes while preserving controls")
+            let initialScripts = browser.webView.configuration.userContentController.userScripts.map(\.source)
+            model.settings.blockAds = false
+            await browser.configureAdBlocking()
+            browser.webView.loadHTMLString(
+                "<html><body><div id='ad' class='advertisement'>Ad</div></body></html>",
+                baseURL: URL(string: "http://127.0.0.1:19244"))
+            try await pause(1)
+            try check(
+                try await browser.webView.evaluateJavaScript(
+                    "getComputedStyle(document.querySelector('#ad')).display!=='none'") as? Bool == true,
+                "Disabling filtering restores normal page content after reload")
+            model.settings.blockAds = true
+            await browser.configureAdBlocking()
+            browser.webView.loadHTMLString(
+                "<html><body><div id='ad' class='advertisement'>Ad</div></body></html>",
+                baseURL: URL(string: "http://127.0.0.1:19244"))
+            try await pause(1)
+            try check(
+                try await browser.webView.evaluateJavaScript(
+                    "getComputedStyle(document.querySelector('#ad')).display==='none'") as? Bool == true,
+                "Re-enabling filtering restores native ad hiding")
+            try check(
+                browser.webView.configuration.userContentController.userScripts.map(\.source) == initialScripts,
+                "Toggling protection does not duplicate browser scripts")
+
+            let fixture = """
+                <div id="banner" class="advertisement">Ad</div>
+                <div class="html5-video-player"><button class="ytp-skip-ad-button" onclick="wrong++">Other player</button></div>
+                <div id="player" class="html5-video-player">
+                  <video></video><video id="adVideo"></video>
+                  <a class="ytp-skip-ad-button" href="#" onclick="wrong++">Visit</a>
+                  <button class="ytp-skip-ad-button" aria-disabled="true" onclick="wrong++">Countdown</button>
+                  <button class="ytp-skip-ad-button-modern" onclick="skips++">Skip</button>
+                </div>
+                <iframe srcdoc="<p>Embedded page</p>"></iframe>
+                <script>
+                  window.skips=0; window.wrong=0; window.adPaused=true;
+                  Object.defineProperty(adVideo,'paused',{get:()=>adPaused});
+                </script>
+                """
+            // The reserved .invalid domain never serves a real page.
+            let handoff = try HandoffSource(taskID: UUID(), destination: URL(string: "https://fixture.invalid")!, model: model)
+            guard let original = handoff.webView else { throw AppError.message("Missing source view") }
+            model.handoffSource = handoff
+            defer { model.handoffSource = nil }
+            for web in [browser.webView, original] {
+                web.loadHTMLString(fixture, baseURL: URL(string: "https://www.youtube.com/"))
+                for _ in 0..<60 {
+                    if (try? await web.evaluateJavaScript("document.readyState==='complete' && window.skips===0")) as? Bool == true { break }
+                    try await pause(0.1)
+                }
+                func matches(_ expression: String) async throws -> Bool {
+                    try await web.evaluateJavaScript(expression) as? Bool == true
+                }
+                try check(try await matches("getComputedStyle(banner).display==='none' && !window.__orvletAds.isAd() && !!frames[0].__orvletAds"),
+                          "Native filtering and embedded helper are installed on first load")
+                _ = try await web.evaluateJavaScript("player.classList.add('ad-showing')")
+                try await pause(0.4)
+                try check(try await matches("window.__orvletAds.isAd() && skips===0 && wrong===0"),
+                          "Paused advertisement stays paused")
+                _ = try await web.evaluateJavaScript("adPaused=false")
+                try await pause(1.4)
+                try check(try await matches("skips>0 && wrong===0"),
+                          "Playing ad skips despite paused first video and unrelated controls")
+            }
+            model.settings.blockAds = false
+            try await pause(0.3)
+            _ = try await original.evaluateJavaScript("skips=0;true")
+            try await pause(1.8)
+            try check(try await original.evaluateJavaScript("skips===0 && wrong===0") as? Bool == true,
+                      "Disabling filtering stops the open source helper")
+            model.settings.blockAds = true
+            try await pause(1.4)
+            try check(try await original.evaluateJavaScript("skips>0 && wrong===0") as? Bool == true,
+                      "Re-enabling filtering resumes the open source helper")
+        }
+
         static func run(_ model: AppModel, delegate: AppDelegate) async {
             model.isLiveTest = true
             model.persistHistory = false
@@ -75,82 +175,7 @@
                     abs(delegate.panel.alphaValue - 0.55) < 0.01,
                     "Changing opacity updates an already idle window immediately")
 
-                model.settings.blockAds = true
-                let browser = BrowserController(model: model)
-                defer { browser.dispose() }
-                browser.webView.loadHTMLString(
-                    "<html><body><div id='ad' class='advertisement'>Ad</div><button id='normal'>Pause music</button></body></html>",
-                    baseURL: URL(string: "http://127.0.0.1:19244"))
-                for _ in 0..<60 {
-                    try await pause(0.1)
-                    if (try? await browser.webView.evaluateJavaScript("!!document.querySelector('#ad')")) as? Bool
-                        == true
-                    {
-                        break
-                    }
-                }
-                let hidden =
-                    try await browser.webView.evaluateJavaScript(
-                        "getComputedStyle(document.querySelector('#ad')).display==='none' && getComputedStyle(document.querySelector('#normal')).display!=='none'"
-                    ) as? Bool
-                try check(
-                    hidden == true && model.adBlockingError == nil,
-                    "Bundled native rules compile and hide ads before first page finishes while preserving controls")
-                let initialScripts = browser.webView.configuration.userContentController.userScripts.map(\.source)
-                model.settings.blockAds = false
-                await browser.configureAdBlocking()
-                browser.webView.loadHTMLString(
-                    "<html><body><div id='ad' class='advertisement'>Ad</div></body></html>",
-                    baseURL: URL(string: "http://127.0.0.1:19244"))
-                try await pause(1)
-                try check(
-                    try await browser.webView.evaluateJavaScript(
-                        "getComputedStyle(document.querySelector('#ad')).display!=='none'") as? Bool == true,
-                    "Disabling filtering restores normal page content after reload")
-                model.settings.blockAds = true
-                await browser.configureAdBlocking()
-                browser.webView.loadHTMLString(
-                    "<html><body><div id='ad' class='advertisement'>Ad</div></body></html>",
-                    baseURL: URL(string: "http://127.0.0.1:19244"))
-                try await pause(1)
-                try check(
-                    try await browser.webView.evaluateJavaScript(
-                        "getComputedStyle(document.querySelector('#ad')).display==='none'") as? Bool == true,
-                    "Re-enabling filtering restores native ad hiding")
-                try check(
-                    browser.webView.configuration.userContentController.userScripts.map(\.source) == initialScripts,
-                    "Toggling protection does not duplicate browser scripts")
-
-                let config = WKWebViewConfiguration()
-                config.websiteDataStore = .nonPersistent()
-                config.userContentController.addUserScript(
-                    WKUserScript(
-                        source: AdBlocker.helper(enabled: true), injectionTime: .atDocumentStart, forMainFrameOnly: true
-                    ))
-                let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 200), configuration: config)
-                web.loadHTMLString(
-                    "<html><body><div class='html5-video-player'><video></video><button class='ytp-skip-ad-button' onclick='window.clicks++'>Skip</button></div><script>window.clicks=0;window.paused=true;Object.defineProperty(document.querySelector('video'),'paused',{get:()=>window.paused});</script></body></html>",
-                    baseURL: URL(string: "https://www.youtube.com/"))
-                try await pause(1.3)
-                try check(
-                    try await web.evaluateJavaScript("window.clicks===0 && !window.__orvletAds.isAd()") as? Bool
-                        == true, "Skip helper ignores ordinary content")
-                _ = try await web.evaluateJavaScript("document.querySelector('div').classList.add('ad-showing')")
-                try await pause(1.2)
-                try check(
-                    try await web.evaluateJavaScript("window.clicks===0 && window.__orvletAds.isAd()") as? Bool == true,
-                    "Paused advertisement is detected but never resumed by skipping")
-                _ = try await web.evaluateJavaScript("window.paused=false")
-                try await pause(1.2)
-                try check(
-                    try await web.evaluateJavaScript("window.clicks>0") as? Bool == true,
-                    "Playing skippable advertisement uses the available skip button")
-                _ = try await web.evaluateJavaScript("window.__orvletAds.setEnabled(false);window.clicks=0")
-                try await pause(1.8)
-                try check(
-                    try await web.evaluateJavaScript("window.clicks===0") as? Bool == true,
-                    "Disabled helper stops clicking skip controls")
-                web.loadHTMLString("", baseURL: nil)
+                try await checkAds(model, check: check)
                 delegate.showSettings()
                 try await pause()
                 if let settings = delegate.settingsWindow {

@@ -116,6 +116,18 @@
                       "One field patch repairs the retained form and its numeric verification passes")
             try check(corrected?.taskSurface?.markup.compactHTML.contains("data-bind='title'") == true,
                       "A metric sharing words with the task title cannot replace the named instance")
+            let ranking = TaskForm(inputs: [], outputs: [.init(key: "winner", label: "Winner"),
+                .init(key: "east", label: "East"), .init(key: "west", label: "West")], buttons: [],
+                compactSubject: "East / West", compactKey: "winner")
+            let rankedMarkup = try ranking.markup()
+            var nameOnlyRejected = false
+            do {
+                try rankedMarkup.validateMeasuredResult(primary: "winner", subjects: ["East / West"],
+                    state: ["winner": "East", "east": "32 min", "west": "47 min"], fieldPath: "$.form.compactKey")
+            } catch let issue as ToolArgumentError { nameOnlyRejected = issue.path == "$.form.compactKey" }
+            try check(nameOnlyRejected, "An option name alone cannot summarize two measured outcomes")
+            try rankedMarkup.validateMeasuredResult(primary: "winner", subjects: ["East / West"],
+                state: ["winner": "East", "east": "Open", "west": "Closed"], fieldPath: "$.form.compactKey")
             let oneOutput = try ToolContract.arguments("present_ui", [
                 "title": "Result", "state": ["result": 10], "form": ["outputs": [["key": "result", "label": "Result"]]]
             ])
@@ -158,10 +170,17 @@
                     "Execution clarification stops without failure or fabricated success on " + route.rawValue)
             }
             var surface = try JSONDecoder().decode(TaskSurface.self, from: JSONSerialization.data(withJSONObject: spec))
+            surface.state["unit"] = "cm"
+            surface.checks![0].expected["unit"] = "cm"
             surface.checks!.append(
                 TaskActionCheck(action: "calculate", input: ["value": "invalid"], expectedError: "Enter a number"))
             try await TaskVerification.validateActions(surface, runtime: model.taskCode, required: true)
             try check(true, "Invalid-input rejection is verified alongside successful changed inputs")
+            var withReset = surface
+            withReset.actions.append(.init(id: "reset", kind: .code, code: "return {state:{result:'0'}};"))
+            withReset.checks!.append(.init(action: "reset", input: [:], expected: ["result": "0", "unit": "cm"]))
+            try await TaskVerification.validateActions(withReset, runtime: model.taskCode, required: true)
+            try check(true, "A state-only action updates a visible output while preserving other values")
             var negativeOnly = surface
             negativeOnly.checks = [surface.checks!.last!]
             var negativeRejected = false

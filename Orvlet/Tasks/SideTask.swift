@@ -15,6 +15,8 @@ struct SideTask: Identifiable, Codable {
     var plan: SurfacePlan? = nil
     var markup: CardMarkup? = nil
     var taskSurface: TaskSurface? = nil
+    var artifactIDs: [UUID]? = nil
+    var workFile: WorkFile? = nil
     var runtimeState: TaskRuntimeState? = nil
     var resumeOnHistoryRestore: Bool? = nil
     var dataUpdatedAt: Date? = nil
@@ -29,6 +31,8 @@ struct SideTask: Identifiable, Codable {
     var finished = false
     var muted: Bool? = nil
     var musicQueue: MusicQueue? = nil
+    // nil is a legacy or ordinary web task. Music requests record their session policy here.
+    var musicSessionRole: MusicSessionRole? = nil
     var playing = false
     var hasMedia = false
     var mediaPrimary: Bool? = nil
@@ -74,6 +78,10 @@ struct SideTask: Identifiable, Codable {
         guard let duration, label.isEmpty || label.caseInsensitiveCompare("Timer") == .orderedSame else { return title }
         let seconds = Int(duration)
         return seconds % 60 == 0 ? "\(seconds / 60) min" : "\(seconds) s"
+    }
+    var expandedDisplayState: [String: String] {
+        guard let workFile else { return state }
+        return state.merging(["preview": workFile.preview]) { _, preview in preview }
     }
     var remaining: Double { max(0, deadline?.timeIntervalSinceNow ?? pausedSeconds ?? 0) }
     var state: [String: String] {

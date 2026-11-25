@@ -1,5 +1,17 @@
 import Foundation
 
+enum ModelProvider: String, CaseIterable {
+    case gpt, custom
+    var title: String { self == .gpt ? "GPT" : "Custom" }
+    static func provider(for endpoint: Endpoint) -> Self {
+        let url = endpoint.completionURL
+        return url?.host == "api.openai.com" && url?.scheme == "https" && url?.port == nil
+            && !endpoint.options.exactURL ? .gpt : .custom
+    }
+    // Official tool-capable models; retain saved model IDs outside this list.
+    static let gptModels = ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra", "gpt-6-luna"]
+}
+
 struct ModelProfile: Codable, Identifiable {
     var id = UUID().uuidString
     var name: String
@@ -19,12 +31,47 @@ struct ModelConnection {
 }
 
 extension AppSettings {
+    var modelProvider: ModelProvider { ModelProvider.provider(for: main) }
+    mutating func selectModelProvider(_ provider: ModelProvider) {
+        storeActiveProfile()
+        preferredModelProfiles[modelProvider.rawValue] = activeProfileID
+        let matching = profiles.filter { ModelProvider.provider(for: $0.endpoint) == provider }
+        if let selected = matching.first(where: { $0.id == preferredModelProfiles[provider.rawValue] }) ?? matching.first {
+            _ = selectProfile(selected.id)
+        } else {
+            var endpoint = Endpoint()
+            if provider == .gpt {
+                endpoint = Endpoint(baseURL: "https://api.openai.com/v1", model: ModelProvider.gptModels[0])
+                endpoint.options.api = .responses
+                endpoint.vision = true
+            }
+            let profile = ModelProfile(name: provider == .gpt ? "GPT" : "Custom", endpoint: endpoint)
+            profiles.append(profile)
+            activeProfileID = profile.id
+            main = endpoint
+        }
+        configureModelProvider()
+    }
+    mutating func configureModelProvider() {
+        storeActiveProfile()
+        preferredModelProfiles[modelProvider.rawValue] = activeProfileID
+        selectDecisionAPI(modelProvider == .gpt ? .openAI : .jev)
+        if modelProvider == .gpt {
+            main.options.api = .responses
+            storeActiveProfile()
+            fast = DecisionAPI.openAI.defaultEndpoint
+            fastKeyReference = mainConnection.keyAccount
+        }
+        useFast = true
+    }
     var mainConnection: ModelConnection {
         ModelConnection(
-            endpoint: main, keyAccount: profiles.first(where: { $0.id == activeProfileID })?.keyAccount ?? "main")
+            endpoint: main.toolCompatible, keyAccount: profiles.first(where: { $0.id == activeProfileID })?.keyAccount ?? "main")
     }
-    var fastKeyAccount: String { fastCredentialID.map { "fast." + $0 } ?? "fast" }
+    var fastKeyAccount: String { decisionKeyReference ?? fastCredentialID.map { "fast." + $0 } ?? "fast" }
     mutating func ensureProfiles() {
+        main = main.toolCompatible
+        for index in profiles.indices { profiles[index].endpoint = profiles[index].endpoint.toolCompatible }
         if profiles.isEmpty {
             profiles = [
                 ModelProfile(

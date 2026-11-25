@@ -31,7 +31,9 @@ extension TaskSurface {
 
 extension AppModel {
     func configureClock(_ id: UUID, fields: [String: String]) {
-        guard let i = sideTasks.firstIndex(where: { $0.id == id }), var surface = sideTasks[i].taskSurface,
+        let artifact = work.artifact(id) ?? work.view(id).flatMap { work.artifact($0.selected) }
+        let i = sideTasks.firstIndex(where: { $0.id == id })
+        guard var surface = artifact.flatMap({ try? workSurface($0) }) ?? i.flatMap({ sideTasks[$0].taskSurface }),
             var runtime = surface.runtime, runtime.refresh == nil,
             runtime.sources.allSatisfy({ $0.kind == .clock && [.time, .date].contains($0.format) })
         else { return }
@@ -57,11 +59,30 @@ extension AppModel {
             }
         }
         surface.runtime = runtime
+        if zip(clocks, runtime.sources.filter({ $0.kind == .clock && $0.format == .time })).contains(where: { $0.timeZone != $1.timeZone }) {
+            var seen = Set<String>()
+            surface.title = runtime.sources.filter { $0.kind == .clock && $0.format == .time }.map {
+                (($0.timeZone ?? TimeZone.current.identifier).split(separator: "/").last.map(String.init) ?? "Local").replacingOccurrences(of: "_", with: " ")
+            }.filter { seen.insert($0).inserted }.joined(separator: " · ")
+        }
         surface.state.merge(surface.clockControlState) { _, fresh in fresh }
         if surface.preset == "clock" { surface = surface.withClockControls }
         for source in runtime.sources { surface.state[source.key] = source.value(at: Date()) }
         guard let checked = try? surface.validated() else { return }
+        if let artifact {
+            if work.update(artifact.id, expecting: artifact.revision, {
+                $0.definition = WorkDefinition(surface: checked)
+                $0.values = checked.state; $0.title = checked.title
+            }) {
+                projectWorkResult(artifact.id)
+                taskRuntime.attach(artifact.id)
+            }
+            persistSideTasks()
+            return
+        }
+        guard let i else { return }
         taskRuntime.detach(id)
+        sideTasks[i].title = checked.title
         sideTasks[i].taskSurface = checked
         sideTasks[i].markup = checked.markup
         sideTasks[i].liveValues = checked.state

@@ -5,16 +5,22 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = {
+    'state-machines': ('--state-machine-check', 'orvlet-state-machine-checks.json'),
+    'system-browser': ('--system-browser-check', 'orvlet-system-browser-checks.json'),
+    'native-browser': ('--native-browser-check', 'orvlet-native-browser-checks.json'),
     'model-api': ('--model-api-check', 'orvlet-model-api-checks.json'),
     'local-data': ('--local-data-check', 'orvlet-local-data-checks.json'),
     'builtin-cards': ('--builtin-cards-check', 'orvlet-builtin-cards-checks.json'),
@@ -34,6 +40,9 @@ SUITES = {
 }
 
 
+# Only these suites are audited to avoid visible windows, activation and user media.
+BACKGROUND_SUITES = ('state-machines', 'model-api')
+
 def verify_report(path: Path, started: float) -> int:
     if not path.is_file() or path.stat().st_mtime < started:
         raise RuntimeError('Missing or stale suite report')
@@ -48,14 +57,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--skip-build', action='store_true')
     parser.add_argument('--app', type=Path, help='Explicit native test executable')
-    parser.add_argument('--full', action='store_true', help='Run every distinct suite; default is core behavior only')
+    parser.add_argument('--full', action='store_true', help='Run all background-safe suites; add --show-ui for visible UI suites')
+    parser.add_argument('--show-ui', action='store_true', help='Explicitly allow test windows and focus changes')
     parser.add_argument('suites', nargs='*', help=', '.join(SUITES))
     args = parser.parse_args()
     if args.full and args.suites:
         parser.error('Choose --full or explicit suites, not both')
-    selected = list(dict.fromkeys(args.suites or (list(SUITES) if args.full else ['self', 'consistency'])))
+    selected = list(dict.fromkeys(args.suites or (list(SUITES) if args.full and args.show_ui else BACKGROUND_SUITES)))
     if any(name not in SUITES for name in selected):
         parser.error('Only local suite names are accepted: ' + ', '.join(SUITES))
+    if not args.show_ui and any(name not in (*BACKGROUND_SUITES, 'system-browser', 'native-browser') for name in selected):
+        parser.error('This suite may show windows. Use background suites by default; --show-ui is an explicit opt-in.')
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupted)
     if sys.platform != 'darwin':
         parser.error('Native checks require a logged-in macOS desktop session')
     if not args.skip_build:
@@ -95,14 +110,32 @@ def main() -> int:
                 report = Path('/tmp') / filename
                 started = time.time()
                 try:
-                    with (output / f'{name}.log').open('w') as suite_log:
-                        subprocess.run([str(app), flag], cwd=ROOT, stdout=suite_log, stderr=suite_log, timeout=240, check=True)
-                    count = verify_report(report, started)
+                    command = [str(app), flag] + ([] if args.show_ui else ['--background-checks'])
+                    count = 0
+                    with tempfile.TemporaryDirectory(prefix='orvlet-native-check-') as profile:
+                        for phase in range(4 if name == 'native-browser' else 1):
+                            phase_started = time.time()
+                            suffix = ['', '-restart', '-disabled', '-saved'][phase]
+                            with (output / f'{name}{suffix}.log').open('w') as suite_log:
+                                try:
+                                    phase_flags = ['--verify-native-persistence'] if phase else []
+                                    if phase >= 2: phase_flags.append('--verify-native-disabled')
+                                    if phase == 3: phase_flags.append('--verify-saved-logins')
+                                    subprocess.run(command + phase_flags, cwd=ROOT,
+                                        env={**os.environ, 'ORVLET_NATIVE_CHECK_PROFILE': profile},
+                                        stdout=suite_log, stderr=suite_log, timeout=240, check=True)
+                                finally:
+                                    native_log = Path(profile) / 'chromium.log'
+                                    if name == 'native-browser' and native_log.is_file():
+                                        shutil.copy2(native_log, output / f'chromium{suffix}.log')
+                            count += verify_report(report, phase_started)
+                            shutil.copy2(report, output / (Path(filename).stem + suffix + '.json'))
                     total += count
                     print(f'{name}: {count} checks passed', flush=True)
                 except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
                     failed.append(name)
-                    print(f'{name}: FAILED ({type(error).__name__}); continuing independent suites', flush=True)
+                    code = f', exit {error.returncode}' if isinstance(error, subprocess.CalledProcessError) else ''
+                    print(f'{name}: FAILED ({type(error).__name__}{code}); continuing independent suites', flush=True)
                 finally:
                     if report.is_file() and report.stat().st_mtime >= started:
                         shutil.copy2(report, output / filename)
@@ -122,6 +155,9 @@ def main() -> int:
 if __name__ == '__main__':
     try:
         sys.exit(main())
+    except KeyboardInterrupt:
+        print('Check run interrupted; test processes stopped.', file=sys.stderr)
+        sys.exit(130)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
         print(f'Check run failed ({type(error).__name__}); inspect .local/checks for details.', file=sys.stderr)
         sys.exit(1)

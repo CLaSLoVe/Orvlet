@@ -10,6 +10,9 @@ struct ModelServiceFailure: LocalizedError {
 @MainActor
 enum ModelClient {
     nonisolated static let defaultTimeout: TimeInterval = 600
+    // A transport fallback is temporary and local to this process. User-specified
+    // stream parameters remain authoritative; no profile or model is changed.
+    private static var bufferedUntil: [String: Date] = [:]
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
@@ -19,20 +22,26 @@ enum ModelClient {
     }()
     static func complete(
         endpoint: Endpoint, key: String, messages: [[String: Any]], tools: [[String: Any]], reasoning: Bool = true,
-        requiredTool: String? = nil, timeout: TimeInterval? = nil, budget: ThinkingBudget = .standard,
+        requiredTool: String? = nil, timeout: TimeInterval? = nil, maximumWait: TimeInterval? = nil, budget: ThinkingBudget = .standard,
         onStream: ((String, String?) -> Void)? = nil
     ) async throws -> [String: Any] {
+        let endpoint = endpoint.toolCompatible
         guard let url = endpoint.completionURL else { throw AppError.message("Enter a model endpoint in Settings.") }
         var body = try ModelWire.body(
             endpoint: endpoint, messages: messages, tools: tools,
             reasoning: reasoning, requiredTool: requiredTool, budget: budget)
-        if onStream != nil, try endpoint.options.object(endpoint.options.parameters, label: "Request parameters")["stream"] == nil {
-            body["stream"] = true
+        let streamingKey = url.absoluteString + "|" + endpoint.model
+        let streamOption = try endpoint.options.object(endpoint.options.parameters, label: "Request parameters")["stream"]
+        let automaticStream = onStream != nil && streamOption == nil
+        if automaticStream {
+            bufferedUntil = bufferedUntil.filter { $0.value > Date() }
+            body["stream"] = bufferedUntil[streamingKey] == nil
         }
         let headers = try ModelWire.headers(endpoint: endpoint, key: key)
         let started = Date()
         let callID = UUID().uuidString
-        let requestTimeout = Double(endpoint.options.timeout) ?? timeout ?? defaultTimeout
+        let configuredTimeout = Double(endpoint.options.timeout) ?? timeout ?? defaultTimeout
+        let requestTimeout = maximumWait.map { min(configuredTimeout, $0) } ?? configuredTimeout
         #if DEBUG
             // Explicit isolated live harness only, including opt-in saved-context replay. Never log headers.
             let capture =
@@ -56,12 +65,36 @@ enum ModelClient {
                 "messageBytes": JSONText.encode(messages).utf8.count,
                 "toolBytes": JSONText.encode(tools).utf8.count, "toolCount": tools.count,
                 "inputBytes": JSONText.encode(body).utf8.count,
-                "timeoutSeconds": requestTimeout,
+                "timeoutSeconds": requestTimeout, "stage": requiredTool ?? "execution",
             ])
         let json: [String: Any]
         do {
             func decisionRequest() async throws -> [String: Any] {
-                try await request(url: url, key: key, body: body, timeout: requestTimeout, headers: headers, onStream: onStream)
+                guard let maximumWait else {
+                    return try await request(url: url, key: key, body: body, timeout: requestTimeout, headers: headers, onStream: onStream)
+                }
+                // URLSession's timeout is an inactivity timeout. A stalled stream
+                // can keep it alive with heartbeats, so advisory stages need a wall limit.
+                var expired = false
+                let payload = body
+                let network = Task { @MainActor in
+                    try await request(url: url, key: key, body: payload, timeout: requestTimeout, headers: headers, onStream: onStream)
+                }
+                let deadline = Task { @MainActor in
+                    do {
+                        try await Task.sleep(for: .seconds(maximumWait))
+                        expired = true
+                        network.cancel()
+                    } catch {}
+                }
+                defer { deadline.cancel() }
+                do {
+                    return try await withTaskCancellationHandler(operation: { try await network.value }, onCancel: { network.cancel() })
+                } catch {
+                    try Task.checkCancellation()
+                    if expired { throw URLError(.timedOut) }
+                    throw error
+                }
             }
             do { json = try await decisionRequest() }
             catch {
@@ -69,10 +102,19 @@ enum ModelClient {
                 let service = error as? ModelServiceFailure
                 let transport = (error as? URLError)?.code
                 guard (service.map { [502, 503, 504].contains($0.status) && !$0.retryAfter } ?? false)
-                    || transport == .networkConnectionLost else { throw error }
+                    || transport == .networkConnectionLost || (maximumWait != nil && onStream != nil && transport == .timedOut) else { throw error }
                 // Tool calls are dispatched only after an entire decision has arrived.
                 Diagnostics.record("decision_retry", ["category": Diagnostics.category(error)])
                 try await Task.sleep(for: .milliseconds(300))
+                // A stalled streamed decision can use one buffered retry. No
+                // returned tool has been dispatched yet, so this cannot replay a write.
+                if transport == .timedOut {
+                    if automaticStream, body["stream"] as? Bool == true {
+                        if bufferedUntil.count >= 32 { bufferedUntil.removeAll() }
+                        bufferedUntil[streamingKey] = Date().addingTimeInterval(300)
+                    }
+                    body["stream"] = false
+                }
                 json = try await decisionRequest()
             }
         } catch {

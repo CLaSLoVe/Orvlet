@@ -7,10 +7,10 @@ extension AppModel {
         guard isLiveTest || mainServiceState != "checking" else { return }
         let text = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        let editing = forceNewTask ? nil : (editingInterfaceID ?? conversationTaskID)
+        let revisionID = forceNewTask ? nil : editingInterfaceID
+        let editing = forceNewTask ? nil : (revisionID ?? conversationTaskID)
         command = ""
         backgroundRequest = true
-        hasUnreadReply = false
         dismissFeedback()
         if commandPanelVisible && (forceNewTask || conversationTaskID == nil) { selectChat(false) }
         // A completed card supplies conversation context. Start with a provisional
@@ -18,10 +18,18 @@ extension AppModel {
         let reference = editing.flatMap { id in
             sideTasks.first { $0.id == id && $0.kind != .result && $0.terminalLabel == nil }?.id
         }
-        let draftID = reference == nil ? (editing ?? UUID()) : UUID()
-        let messageID = appendMessage(text, isUser: true, taskID: draftID)
+        let draftID = revisionID ?? (reference == nil ? (editing ?? UUID()) : UUID())
+        let messageID = appendMessage(text, isUser: true, taskID: draftID, editsInterface: revisionID != nil)
+        if !forceNewTask, revisionID == nil, let editing, localTaskControl(text, taskID: editing) {
+            if let index = messages.firstIndex(where: { $0.id == messageID }) { messages[index].taskID = editing }
+            return
+        }
         if forceNewTask {
             startCommand(text, messageID: messageID, forceNewTask: true)
+            return
+        }
+        if let revisionID {
+            submitTaskRequest(text, taskID: revisionID, messageID: messageID)
             return
         }
         if let reference {
@@ -83,8 +91,12 @@ extension AppModel {
             return
         }
         let run = RequestRun(model: self, forceNewTask: forceNewTask)
+        work.begin(goalID: run.goalID, runID: run.runID, request: text)
+        run.editsInterface = messages.first(where: { $0.id == messageID })?.editsInterface == true
         run.initialFamilies = initialFamilies
         run.conversationReference = conversationReference
+        let original = assignment?.original ?? text
+        run.attachments = attachedWorkFiles.filter { original.contains($0.key) }
         run.assignment = assignment
         run.receivedAt = receivedAt ?? messageID.flatMap { id in messages.first { $0.id == id }?.date } ?? Date()
         #if DEBUG
@@ -109,6 +121,8 @@ extension AppModel {
         beginAmbientRequest(text, taskID: taskID, messageID: messageID)
         agentTask = Task {
             defer {
+                work.finish(goalID: run.goalID, runID: run.runID,
+                    status: Task.isCancelled ? .stopped : taskFailed || run.awaitingPresentation ? .partial : agent.replyKind == .needsInput ? .waiting : .completed)
                 if taskFailed, let page = requestPageID { adaptive.suspendAutomaticUpdates(page) }
                 finishAmbientRequest()
                 if browserRun === run { browserRun = nil }
@@ -143,13 +157,28 @@ extension AppModel {
             } catch is CancellationError { taskFailed = true } catch {
                 taskFailed = true
                 if !Task.isCancelled {
-                    if error is ModelAccessError {
+                    if error is ModelAccessError && agent.retainedReading == nil {
                         agent.replyKind = .authorization
                         reportModelAccessIssue(error)
                     } else {
-                        let message = friendlyFailure(error)
-                        failAmbientRequest(message)
-                        deliverReply(message, kind: .failure)
+                        if let reading = agent.retainedReading {
+                            let message = reading + "\n" + userText("已保留核实的读数。其余部分未完成。", "Verified reading saved. The rest of the request is incomplete.")
+                            if let snapshot = agent.retainedSnapshot,
+                                let id = requestCardID ?? activeRequest?.owner?.id, id == agent.activeTaskID,
+                                sideTasks.contains(where: { $0.id == id && $0.kind == .result }) {
+                                publishTaskSurface(snapshot, id: id)
+                                if let i = sideTasks.firstIndex(where: { $0.id == id }) {
+                                    sideTasks[i].interfaceIssue = userText("已保存快照。其余操作未完成。", "Snapshot saved. Further actions are incomplete.")
+                                }
+                                Diagnostics.record("verified_snapshot_retained", ["taskID": id.uuidString])
+                            }
+                            agent.replyKind = .needsInput
+                            deliverReply(message, kind: .needsInput)
+                        } else {
+                            let message = friendlyFailure(error)
+                            failAmbientRequest(message)
+                            deliverReply(message, kind: .failure)
+                        }
                     }
                 }
             }
@@ -164,7 +193,7 @@ extension AppModel {
             ][normalized]
         {
             if busy && ownsRequest(task.id) { stopCommand(for: task.id) }
-            taskRuntime.control(task.id, operation: operation)
+            taskRuntime.control(work.view(task.id)?.selected ?? task.id, operation: operation)
             if let index = messages.indices.last { messages[index].taskID = task.id }
             return true
         }

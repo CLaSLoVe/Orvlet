@@ -172,7 +172,7 @@ final class LocalBridge {
         }
         guard path == "/rpc", let name = input["tool"] as? String else { throw AppError.message("Unknown endpoint.") }
         guard
-            !["calendar_create", "calendar_clarify", "timer_start", "run_code", "present_ui", "reuse_saved_ui"]
+            !["calendar_create", "calendar_clarify", "timer_start", "run_code", "write_document", "present_ui", "reuse_saved_ui"]
                 .contains(name)
         else {
             throw AppError.message("Task execution must be requested through Orvlet's input window or task controls.")

@@ -30,7 +30,7 @@
                 !model.busy && !model.shellExpanded && model.hasUnreadReply
                     && model.messages.last?.text == "Background reply",
                 "Background completion leaves a quiet unread result without reopening the interface")
-            model.selectChat(true)
+            model.openComposerOrUnreadReply()
             try check(!model.hasUnreadReply, "Reopening input reads the result and clears its indicator")
             model.selectChat(false, restoreFocus: false)
             model.agent.completionOverride = nil

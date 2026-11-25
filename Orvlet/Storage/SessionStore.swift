@@ -10,6 +10,7 @@ struct SavedSession: Codable, Identifiable {
     var listening = false
     var wasPlaying = false
     var updated = Date()
+    var taskID: UUID?
     var id: String { url }
     var isMedia: Bool { listening || plan?.hasMediaControls == true }
 }

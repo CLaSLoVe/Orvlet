@@ -17,14 +17,29 @@ nonisolated final class LocalCredentials: @unchecked Sendable {
     init(directory: URL) { self.directory = directory }
 
     func load(_ account: String) throws -> String {
-        try access { dir in try read(dir)[account] ?? "" }
+        // Writers publish by atomic rename. An open descriptor sees one complete snapshot,
+        // so readers never need the cross-process writer lock.
+        try access(exclusive: false) { dir in try read(dir)[account] ?? "" }
     }
 
     func save(_ value: String, account: String) throws {
+        try update { entries in entries[account] = value.isEmpty ? nil : value }
+    }
+
+    /// Recovery may fill missing accounts, but must never replace a newer saved key.
+    func importMissing(_ recovered: [String: String]) throws {
+        try update { entries in
+            for (account, value) in recovered where !value.isEmpty && (entries[account] ?? "").isEmpty {
+                entries[account] = value
+            }
+        }
+    }
+
+    private func update(_ edit: (inout [String: String]) -> Void) throws {
         try access { dir in
             // A malformed file is never silently replaced, losing other profiles.
             var entries = try read(dir)
-            entries[account] = value.isEmpty ? nil : value
+            edit(&entries)
             let data = try JSONEncoder().encode(entries)
             guard data.count <= 1_048_576 else { throw ModelAccessError.authorizationRequired }
             let temporary = ".credentials-\(UUID().uuidString).tmp"
@@ -50,9 +65,9 @@ nonisolated final class LocalCredentials: @unchecked Sendable {
         }
     }
 
-    private func access<T>(_ body: (Int32) throws -> T) throws -> T {
-        lock.lock()
-        defer { lock.unlock() }
+    private func access<T>(exclusive: Bool = true, _ body: (Int32) throws -> T) throws -> T {
+        if exclusive { lock.lock() }
+        defer { if exclusive { lock.unlock() } }
         do {
             // Parent is the application's existing Application Support directory.
             try FileManager.default.createDirectory(
@@ -65,28 +80,39 @@ nonisolated final class LocalCredentials: @unchecked Sendable {
             guard fstat(dir, &info) == 0, info.st_uid == getuid(), fchmod(dir, 0o700) == 0 else {
                 throw ModelAccessError.authorizationRequired
             }
-            // Serialize independent app instances as well as threads.
-            let gate = openat(dir, ".credentials.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
-            guard gate >= 0 else { throw ModelAccessError.authorizationRequired }
-            defer { close(gate) }
-            try validateFile(gate)
-            guard flock(gate, LOCK_EX | LOCK_NB) == 0 else { throw ModelAccessError.authorizationPending }
-            defer { flock(gate, LOCK_UN) }
+            // Only read-modify-write transactions serialize across processes.
+            var gate: Int32 = -1
+            defer { if gate >= 0 { flock(gate, LOCK_UN); close(gate) } }
+            if exclusive {
+                gate = openat(dir, ".credentials.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+                guard gate >= 0 else { throw ModelAccessError.authorizationRequired }
+                try validateFile(gate)
+                let deadline = ProcessInfo.processInfo.systemUptime + 2
+                while flock(gate, LOCK_EX | LOCK_NB) != 0 {
+                    if errno == EINTR { continue }
+                    guard errno == EWOULDBLOCK || errno == EAGAIN else { throw ModelAccessError.authorizationRequired }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else { throw ModelAccessError.authorizationPending }
+                    usleep(10_000)
+                }
+            }
             var url = directory
             var values = URLResourceValues()
             values.isExcludedFromBackup = true
             try? url.setResourceValues(values)
             return try body(dir)
+        } catch let error as ModelAccessError {
+            throw error
         } catch {
             // Foundation errors may contain paths/data; surface only a safe message.
             throw ModelAccessError.authorizationRequired
         }
     }
 
-    private func validateFile(_ fd: Int32) throws {
+    private func validateFile(_ fd: Int32, allowReplacedSnapshot: Bool = false) throws {
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_uid == getuid(),
-            info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1,
+            info.st_mode & S_IFMT == S_IFREG,
+            info.st_nlink == 1 || (allowReplacedSnapshot && info.st_nlink == 0),
             info.st_size <= 1_048_576, fchmod(fd, 0o600) == 0
         else {
             throw ModelAccessError.authorizationRequired
@@ -98,7 +124,9 @@ nonisolated final class LocalCredentials: @unchecked Sendable {
         if fd < 0 && errno == ENOENT { return [:] }
         guard fd >= 0 else { throw ModelAccessError.authorizationRequired }
         defer { close(fd) }
-        try validateFile(fd)
+        // A writer can replace the directory entry after open(). The old descriptor
+        // remains a safe complete snapshot even though its link count becomes zero.
+        try validateFile(fd, allowReplacedSnapshot: true)
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
         while true {
@@ -113,7 +141,7 @@ nonisolated final class LocalCredentials: @unchecked Sendable {
 }
 
 nonisolated enum SecretStore {
-    private static let store = LocalCredentials(
+    static let store = LocalCredentials(
         directory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Orvlet/Private", isDirectory: true))
     static func load(_ account: String) async throws -> String {

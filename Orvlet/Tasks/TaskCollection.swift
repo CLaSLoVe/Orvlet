@@ -66,7 +66,7 @@ extension AppModel {
                     ? "Waiting for model" : outcome == .succeeded ? "Ready" : outcome.label
             }
         }
-        if !taskFailed, agent.replyKind == .information, activeRequest?.owner == nil, let id = requestCardID {
+        if !taskFailed, agent.replyKind == .information, let id = activeRequest?.owner?.id ?? requestCardID {
             // The conversation and its receipt already carry this answer.
             sideTasks.removeAll { $0.id == id && $0.kind == .result }
             if ambientRequestID == id { ambientRequestID = nil }
@@ -84,7 +84,9 @@ extension AppModel {
             let task = sideTasks.first(where: { $0.id == id }), task.terminalLabel == nil,
             task.kind == .web || task.kind == .workspace
         {
-            interfaceMemory.remember(task, purpose: task.intent ?? activeRequest?.input ?? task.title)
+            if task.workFile == nil && task.taskSurface?.actions.contains(where: { $0.kind == .openRecord }) != true {
+                interfaceMemory.remember(task, purpose: task.intent ?? activeRequest?.input ?? task.title)
+            }
         }
         refreshTaskClock()
         activeRequest = nil
@@ -119,33 +121,56 @@ extension AppModel {
         default: return "Preparing…"
         }
     }
-    var visibleTasks: [SideTask] { sideTasks.filter { !$0.hidden } }
+    var listedTasks: [SideTask] { sideTasks.filter { work.view($0.id)?.closed != true } }
+    var visibleTasks: [SideTask] { listedTasks.filter { !$0.hidden } }
     var selectedSideTask: SideTask? { visibleTasks.first { $0.id == selectedTaskID } ?? visibleTasks.first }
     func loadSideTasks() {
         taskOrder = (preferences.stringArray(forKey: "taskOrder.v1") ?? []).compactMap(UUID.init(uuidString:))
         if let data = preferences.data(forKey: "sideTasks.v1") {
-            sideTasks = shelfArchive.read(data).map { original in
-                var task = original
-                if task.kind == .web {
-                    task.hidden = true
-                    task.playing = false
-                    task.status = "Resume page"
-                }
-                if [.workspace, .result].contains(task.kind),
-                    ["Preparing…", "Working…", "Queued", "Calculating…"].contains(task.status)
-                {
-                    task.status = "Interrupted · retry"
-                }
-                return task
+            sideTasks = shelfArchive.read(data)
+        }
+        for artifact in work.snapshot.artifacts.values {
+            guard var task = artifact.native, !sideTasks.contains(where: { $0.id == task.id }) else { continue }
+            task.hidden = true
+            sideTasks.append(task)
+        }
+        let retiredPlayers = consolidateSavedMusicPlayers()
+        for i in sideTasks.indices {
+            if sideTasks[i].kind == .web {
+                sideTasks[i].hidden = true
+                sideTasks[i].playing = false
+                sideTasks[i].status = "Resume page"
+            }
+            if [.workspace, .result].contains(sideTasks[i].kind),
+                ["Preparing…", "Working…", "Queued", "Calculating…"].contains(sideTasks[i].status) {
+                sideTasks[i].status = "Interrupted · retry"
             }
         }
-        for task in sideTasks where task.taskSurface?.apiData != nil { upgradeStandardCard(task.id) }
+        for task in sideTasks where task.taskSurface != nil { migrateWorkSurface(task) }
+        // Restore executors independently of visible views. Never autoplay a page
+        // solely because its last persisted resource snapshot was playing.
+        for task in sideTasks where [.timer,.calendar,.web].contains(task.kind) {
+            if let view = work.view(task.id), let native = work.artifact(view.selected)?.native, native.id != task.id { continue }
+            _ = work.syncNative(task,goalID:nil)
+        }
+        for id in retiredPlayers { work.closeView(id) }
+        for view in work.snapshot.views.values { try? projectWorkView(view.id) }
+        work.save()
         scheduleDataRefresh()
-        for task in sideTasks where task.taskSurface?.runtime != nil { taskRuntime.attach(task.id) }
+        for artifact in work.snapshot.artifacts.values where artifact.definition.runtime != nil { taskRuntime.attach(artifact.id) }
         reconcileTasks()
         refreshTaskClock()
     }
     func persistSideTasks() {
+        // Native adapters publish resource state; secondary views never write it back.
+        for task in sideTasks where [.timer,.calendar,.web].contains(task.kind) {
+            if let view = work.view(task.id), let resource = work.artifact(view.selected)?.native, resource.id != task.id { continue }
+            let relevant = work.view(task.id) == nil || RequestRun.current?.owns(task.id) == true
+            let id = work.syncNative(task,goalID:relevant ? RequestRun.current?.goalID : nil)
+            if relevant { RequestRun.current?.retainResult(id,needsView:false) }
+            projectWorkResult(id)
+        }
+        work.save()
         scheduleDataRefresh()
         guard persistHistory, !isLiveTest else { return }
         let preparing = Set(commandRuns.compactMap { $0.context?.placeholderID } + [requestCardID].compactMap { $0 })
@@ -176,9 +201,38 @@ extension AppModel {
     func taskClickWillCollapse(_ id: UUID) -> Bool {
         !collapsed && !taskShelfVisible && !commandPanelVisible && selectedTaskID == id
     }
+    func openHandoff(_ url: URL, taskID: UUID) {
+        if selectedTaskID == taskID, let source = handoffSource, source.taskID == taskID, source.destination == url {
+            taskShelfVisible = false
+            showPage()
+            return
+        }
+        guard selectTask(taskID, expanded: true, preferSource: false) else { return }
+        do {
+            handoffSource = try HandoffSource(taskID: taskID, destination: url, model: self)
+            webExpanded = true
+            onResize?(windowSize)
+        } catch {
+            deliverReply(userText("无法读取这份原件。", "Could not read this source."), kind: .attention, taskID: taskID)
+        }
+    }
     func openTaskFromDoubleClick(_ id: UUID) {
         guard let task = sideTasks.first(where: { $0.id == id }) else { return }
         taskRanking.record(id, .open)
+        if let file = task.workFile {
+            guard let url = try? file.existingURL() else {
+                deliverReply(userText("找不到或无法打开这份文件。", "This file is missing or could not be opened."), kind: .attention, taskID: id)
+                return
+            }
+            openHandoff(url, taskID: id)
+            return
+        }
+        if task.kind == .workspace, task.taskSurface?.apiData?.recordPagePointer != nil,
+            let raw = task.liveValues?["recordPageURL"], let url = try? PublicDataClient.url(raw) {
+            openHandoff(url, taskID: id)
+            return
+        }
+        if task.kind == .web { stopCommand(for: id) }
         selectTask(id, expanded: true, preferSource: task.kind == .web)
     }
     @discardableResult
@@ -187,8 +241,10 @@ extension AppModel {
             openTaskConversation(id)
             return true
         }
+        if handoffSource?.taskID != id || !collapsed { handoffSource = nil }
         upgradeStandardCard(id)
         guard let task = sideTasks.first(where: { $0.id == id }) else { return false }
+        let openingSource = expanded && (preferSource ?? task.opensSourceByDefault) && task.kind == .web
         lastActionError = nil
         if task.taskSurface?.apiData != nil, taskActionJobs[id] == nil,
             Date().timeIntervalSince(task.dataUpdatedAt ?? .distantPast) >= 60
@@ -196,15 +252,17 @@ extension AppModel {
             refreshAPIData(id)
         }
         if feedback?.kind == .success { dismissFeedback() }
-        if task.kind == .web, id != browser.id, parkedBrowsers[id] == nil {
+        if task.kind == .web, dormantLaunchSession?.taskID == id || (id != browser.id && parkedBrowsers[id] == nil) {
             do { _ = try beginTaskSourceRestore(task) } catch {
                 lastActionError = error.localizedDescription
                 return false
             }
         }
         if task.hidden, let i = sideTasks.firstIndex(where: { $0.id == id }) {
+            work.showView(id)
             sideTasks[i].hidden = false
             sideTasks[i].expires = nil
+            persistSideTasks()
         }
         if commandPanelVisible { selectChat(false, restoreFocus: false) }
         taskShelfVisible = false
@@ -213,7 +271,7 @@ extension AppModel {
             activateSelectedSource()
             if !hasCustomSurface { adaptive.changed() }
         }
-        webExpanded = expanded && (preferSource ?? task.opensSourceByDefault) && task.kind == .web
+        webExpanded = openingSource
         collapsed = !expanded
         clickExpanded = expanded
         onResize?(windowSize)
@@ -224,6 +282,7 @@ extension AppModel {
     }
 
     func dismissTask(_ id: UUID) {
+        if work.view(id) != nil { work.hideView(id) }
         taskRanking.record(id, .hide)
         guard let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
         // Hiding a card does not stop its underlying task.
@@ -232,22 +291,31 @@ extension AppModel {
         persistSideTasks()
         reconcileTasks()
     }
+    func showTask(_ id: UUID) {
+        guard let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
+        work.showView(id)
+        sideTasks[i].hidden = false
+        sideTasks[i].expires = nil
+        persistSideTasks()
+        reconcileTasks()
+    }
     func upsertWebTask(_ plan: SurfacePlan? = nil, activate: Bool = false) {
         guard !webURL.isEmpty else { return }
         let id = browser.id
         guard !sideTasks.contains(where: { $0.id == id && $0.terminalLabel != nil }) else { return }
-        if let old = sideTasks.firstIndex(where: {
-            $0.kind == .web && $0.sourceURL == webURL && $0.id != id && parkedBrowsers[$0.id] == nil
-        }) {
-            archiveTaskHistory(sideTasks[old])
-            sideTasks.remove(at: old)
-        }
         let index = sideTasks.firstIndex { $0.id == id }
         var card = index.map { sideTasks[$0] } ?? SideTask(id: id, kind: .web, title: trackTitle)
         if let previous = card.sourceURL, URL(string: previous)?.host != URL(string: webURL)?.host {
             endBackgroundListening(clearTaskIntent: true)
         }
         card.updateMediaRole(primary: browser.lastState["mediaPrimary"] as? Bool, url: webURL)
+        if requestPageID == id, activeRequest?.expectsPlayback == true {
+            card.listening = true
+            card.prefersSource = false
+            if let role = activeRequest?.musicSessionRole {
+                card.musicSessionRole = card.musicSessionRole ?? role
+            }
+        }
         if backgroundListening {
             card.listening = true
             card.prefersSource = false
@@ -259,7 +327,8 @@ extension AppModel {
             card.customCompact = nil
             card.interfaceRecipeID = nil
         }
-        card.title = trackTitle
+        if browser.sourceAccessIssue == nil { card.title = trackTitle }
+        else if index == nil { card.title = activeRequest?.input ?? "Media source" }
         card.sourceURL = webURL
         if requestPageID == id { card.intent = activeRequest?.input }
         card.hasMedia = hasMedia
@@ -268,14 +337,17 @@ extension AppModel {
         card.plan = plan ?? card.plan ?? surface
         card.markup = nil
         card.generated = card.plan?.markup != nil
-        if plan?.markup != nil { card.interfaceIssue = nil }
+        if plan?.markup != nil {
+            card.interfaceIssue = nil
+            resolveTaskIssue(id, source: .interface)
+        }
         if let recipeID = card.plan?.interfaceRecipeID {
             card.interfaceRecipeID = recipeID
             card.customCompact = true
         }
         card.status =
             card.isMediaTask
-            ? (hasMedia ? (isPlaying ? "Playing" : "Paused") : "Loading…") : (URL(string: webURL)?.host ?? "Ready")
+            ? (browser.sourceAccessIssue != nil ? "Access needed" : hasMedia ? (isPlaying ? "Playing" : "Paused") : "Loading…") : (URL(string: webURL)?.host ?? "Ready")
         if activate { card.hidden = false }
         if let index { sideTasks[index] = card } else { sideTasks.append(card) }
         if selectedTaskID == nil || (activate && !backgroundRequest) { selectedTaskID = id }
@@ -292,7 +364,7 @@ extension AppModel {
     func updateBackgroundTask(_ id: UUID, data: [String: Any]) {
         guard let i = sideTasks.firstIndex(where: { $0.id == id }), sideTasks[i].terminalLabel == nil else { return }
         sideTasks[i].updateMediaRole(primary: data["mediaPrimary"] as? Bool, url: data["url"] as? String)
-        if let title = data["title"] as? String { sideTasks[i].title = title }
+        if let title = data["title"] as? String, parkedBrowsers[id]?.sourceAccessIssue == nil { sideTasks[i].title = title }
         if let url = data["url"] as? String {
             if sideTasks[i].sourceURL != url {
                 sideTasks[i].plan = nil
@@ -319,18 +391,49 @@ extension AppModel {
             }
         }
     }
+    static let missingPageReadingsIssue = "The source is unavailable. Open the page to reconnect."
+
     func updateLiveReadings(_ id: UUID, data: [String: Any]) {
         guard let i = sideTasks.firstIndex(where: { $0.id == id }), sideTasks[i].terminalLabel == nil,
-            let readings = sideTasks[i].plan?.readings, !readings.isEmpty,
-            let values = data["readings"] as? [String: String]
+            let url = data["url"] as? String, url == sideTasks[i].sourceURL
         else { return }
+        // A new surface can drop the old DOM bindings (for example, the native
+        // music player). Their persisted error must not outlive those bindings.
+        guard let readings = sideTasks[i].plan?.readings, !readings.isEmpty else {
+            if sideTasks[i].dataIssue == Self.missingPageReadingsIssue {
+                sideTasks[i].dataIssue = nil
+                resolveTaskIssue(id, source: .readings)
+            }
+            return
+        }
+        guard let values = data["readings"] as? [String: String] else { return }
         let bound = Dictionary(readings.map { ($0.key, values[$0.key] ?? "—") }, uniquingKeysWith: { first, _ in first })
         let missing = bound.values.contains { $0 == "—" || $0.isEmpty }
-        sideTasks[i].dataIssue = missing ? "The source is unavailable. Open the page to reconnect." : nil
+        if missing, sideTasks[i].dataIssue == nil || sideTasks[i].dataIssue == Self.missingPageReadingsIssue {
+            sideTasks[i].dataIssue = Self.missingPageReadingsIssue
+            let unavailable = readings.filter { bound[$0.key] == "—" || bound[$0.key]?.isEmpty == true }.map(\.key)
+            reportTaskIssue(id, source: .readings,
+                detail: "The page no longer provides these readings: " + unavailable.joined(separator: ", ") + ". Reopen the source or update this view.")
+        } else if !missing, sideTasks[i].dataIssue == Self.missingPageReadingsIssue {
+            sideTasks[i].dataIssue = nil
+            resolveTaskIssue(id, source: .readings)
+        }
         if !missing { sideTasks[i].dataUpdatedAt = Date() }
         if sideTasks[i].liveValues != bound { sideTasks[i].liveValues = bound }
     }
     func closeTask(_ id: UUID) {
+        if work.view(id) != nil {
+            work.closeView(id)
+            if let task = sideTasks.first(where: { $0.id == id }) { archiveTaskHistory(task) }
+            if let view = work.view(id), work.artifact(view.selected)?.native?.id == id,
+                let index = sideTasks.firstIndex(where: { $0.id == id }) {
+                sideTasks[index].hidden = true
+            } else { sideTasks.removeAll { $0.id == id } }
+            if selectedTaskID == id && !taskShelfVisible { collapse() }
+            persistSideTasks()
+            reconcileTasks()
+            return
+        }
         adaptive.blockedSources.remove(id)
         stopTaskActions(id)
         if ownsRequest(id) && busy { stopCommand(for: id) }
@@ -354,7 +457,13 @@ extension AppModel {
         // An unresolved new owner is an independent activity, even at the same URL.
         // Existing-task navigation is prepared by the dispatcher before reaching here.
         let independent = activeRequest != nil && activeRequest?.owner == nil
-        if !independent, let destination, let target = SurfaceCache.pageKey(destination) {
+        let engineChanged = (browser.systemPage != nil) != (settings.browserEngine == .systemBrowser)
+        if engineChanged && webURL.isEmpty {
+            browser.dispose()
+            browser = BrowserController(model: self)
+            browserRevision += 1
+        }
+        if !independent, !engineChanged, let destination, let target = SurfaceCache.pageKey(destination) {
             if target == SurfaceCache.pageKey(webURL) { return }
             if let existing = sideTasks.first(where: {
                 $0.kind == .web && SurfaceCache.pageKey($0.sourceURL ?? "") == target && parkedBrowsers[$0.id] != nil
@@ -363,7 +472,7 @@ extension AppModel {
                 return
             }
         }
-        guard !externalBrowser, !webURL.isEmpty, independent || hasCustomSurface || hasMedia else { return }
+        guard !externalBrowser, !webURL.isEmpty, independent || hasCustomSurface || hasMedia || engineChanged else { return }
         upsertWebTask(surface, activate: true)
         guard parkedBrowsers.count < 2 else {
             throw AppError.message(
@@ -390,20 +499,28 @@ extension AppModel {
     /// UI opening and execution share the same restoration job and task identity.
     private func beginTaskSourceRestore(_ task: SideTask) throws -> Task<Void, Error> {
         if let job = taskSourceRestorations[task.id] { return job }
-        guard parkedBrowsers.count < 2 else {
-            throw AppError.message("Three pages are already open. Close one from the task list, then try again.")
-        }
         guard let raw = task.sourceURL, let url = URL(string: raw),
             ["https", "http"].contains(url.scheme?.lowercased() ?? "")
         else {
             throw AppError.message("This task no longer has a usable page address.")
         }
         let id = task.id
-        let restored = BrowserController(model: self, id: task.id)
-        parkedBrowsers[id] = restored
-        browserRevision += 1
+        let saved = dormantLaunchSession.flatMap { $0.taskID == task.id && $0.url == raw ? $0 : nil }
+        let restored: BrowserController
+        if let existing = id == browser.id ? browser : parkedBrowsers[id] {
+            restored = existing
+        } else {
+            guard parkedBrowsers.count < 2 else {
+                throw AppError.message("Three pages are already open. Close one from the task list, then try again.")
+            }
+            restored = BrowserController(model: self, id: id)
+            parkedBrowsers[id] = restored
+            browserRevision += 1
+        }
         let job = Task { @MainActor in
-            defer { taskSourceRestorations[id] = nil }
+            defer {
+                if browser === restored || parkedBrowsers[id] === restored { taskSourceRestorations[id] = nil }
+            }
             do {
                 try Task.checkCancellation()
                 guard !restored.disposed else { throw CancellationError() }
@@ -411,25 +528,36 @@ extension AppModel {
                     restored.setUserPlaybackPaused(true, origin: "restore_saved_task")
                     await restored.applyPlaybackPolicy()
                 }
-                let page = try await restored.action(["action": "navigate", "url": raw])
+                var page = try await restored.action(["action": "navigate", "url": raw])
+                if let saved {
+                    page = try await restoredObservation(page, entry: saved, browser: restored)
+                    await restoreMediaSettings(saved, page: page, browser: restored)
+                }
                 try Task.checkCancellation()
                 guard !restored.disposed, let i = sideTasks.firstIndex(where: { $0.id == id }) else {
                     throw CancellationError()
                 }
-                if let plan = task.plan, let checked = try? plan.validated(observation: page) {
+                if let plan = saved?.plan ?? task.plan, let checked = try? plan.validated(observation: page) {
                     sideTasks[i].plan = checked
                     restored.rememberMediaSurface(checked, url: raw)
                     try await restored.bindReadings(checked.readings ?? [])
+                    try Task.checkCancellation()
                 } else {
                     sideTasks[i].plan = nil
                     sideTasks[i].status = "Page restored"
                 }
-                if browser.id == id {
-                    surface = sideTasks[i].plan ?? .webpage
-                    hasCustomSurface = sideTasks[i].plan != nil
+                guard !restored.disposed, let current = sideTasks.first(where: { $0.id == id }) else {
+                    throw CancellationError()
+                }
+                if dormantLaunchSession?.taskID == id { dormantLaunchSession = nil }
+                if browser === restored {
+                    surface = current.plan ?? .webpage
+                    hasCustomSurface = current.plan != nil
                 }
             } catch {
-                if let i = sideTasks.firstIndex(where: { $0.id == id }) {
+                if !Task.isCancelled, !restored.disposed,
+                    browser === restored || parkedBrowsers[id] === restored,
+                    let i = sideTasks.firstIndex(where: { $0.id == id }) {
                     sideTasks[i].status = "Open page to continue"
                 }
                 throw error
@@ -438,11 +566,21 @@ extension AppModel {
         taskSourceRestorations[id] = job
         return job
     }
+    func wakeDormantSource(_ id: UUID) async throws {
+        guard dormantLaunchSession?.taskID == id else { return }
+        guard let task = listedTasks.first(where: { $0.id == id }) else { throw CancellationError() }
+        try await beginTaskSourceRestore(task).value
+        try Task.checkCancellation()
+        // A direct Play from the restored capsule becomes the active session
+        // when the shell has no other page open, so its progress is saved.
+        if webURL.isEmpty { try activateTaskSource(id) }
+    }
+
     func prepareTaskSource(_ id: UUID) async throws {
         guard let task = sideTasks.first(where: { $0.id == id }), task.kind == .web else { throw CancellationError() }
         if let job = taskSourceRestorations[id] {
             try await job.value
-        } else if browser.id != id && parkedBrowsers[id] == nil {
+        } else if dormantLaunchSession?.taskID == id || (browser.id != id && parkedBrowsers[id] == nil) {
             try await beginTaskSourceRestore(task).value
         }
         try Task.checkCancellation()
@@ -466,7 +604,7 @@ extension AppModel {
         else { return }
         adaptive.invalidate()
         cancelRestoration()
-        if !webURL.isEmpty { parkedBrowsers[browser.id] = browser }
+        if !webURL.isEmpty { parkedBrowsers[browser.id] = browser } else { browser.dispose() }
         browser = selected
         backgroundListening = task.listening == true
         webURL = task.sourceURL ?? ""
@@ -492,6 +630,18 @@ extension AppModel {
             let task = sideTasks.first(where: { $0.id == id }), task.isMediaTask
         else { return }
         let operation = operation == "toggle" ? (task.playing ? "pause" : "play") : operation
+        if dormantLaunchSession?.taskID == id {
+            Task {
+                do {
+                    try await wakeDormantSource(id)
+                    try Task.checkCancellation()
+                    controlMedia(id, operation: operation)
+                } catch is CancellationError {} catch {
+                    reportTaskIssue(id, source: .playback, detail: error.localizedDescription)
+                }
+            }
+            return
+        }
         let controller = id == browser.id ? browser : parkedBrowsers[id]
         // User intent wins over pending restoration, model work and page autoplay.
         if operation == "pause" {
@@ -562,6 +712,11 @@ extension AppModel {
         reconcileTasks()
     }
     func cardAction(_ id: UUID, action: String, value: String?) {
+        if !["expand","dismiss","source","calendar"].contains(action), let view = work.view(id),
+            let native = work.artifact(view.selected)?.native, native.id != id {
+            cardAction(native.id,action:action,value:value)
+            return
+        }
         taskRanking.record(id, .control)
         guard let task = sideTasks.first(where: { $0.id == id }), task.allowedActions.contains(action) else { return }
         switch action {
@@ -684,7 +839,9 @@ extension AppModel {
         return task.id
     }
     func timerAction(_ id: UUID, action: String) {
-        guard let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
+        guard ["toggle", "stop", "restart", "addMinute"].contains(action),
+            let i = sideTasks.firstIndex(where: { $0.id == id && $0.kind == .timer }) else { return }
+        guard action != "addMinute" || !sideTasks[i].finished else { return }
         var task = sideTasks[i]
         task.resumeOnHistoryRestore = nil
         if action == "addMinute", !task.finished {
@@ -736,6 +893,8 @@ extension AppModel {
     func tickTasks() {
         var changed = false
         for i in sideTasks.indices {
+            if let view = work.view(sideTasks[i].id), let native = work.artifact(view.selected)?.native,
+                native.id != sideTasks[i].id { continue }
             if sideTasks[i].terminalLabel != nil, !sideTasks[i].hidden, pointerInside || menuTracking,
                 let expiry = sideTasks[i].expires
             {

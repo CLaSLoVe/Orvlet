@@ -1,5 +1,7 @@
 import Foundation
 
+enum MusicSessionRole: String, Codable { case shared, independent }
+
 struct MusicTrack: Codable, Equatable, Identifiable {
     let id: String
     var title: String
@@ -24,6 +26,8 @@ struct MusicTrack: Codable, Equatable, Identifiable {
 
 /// Queue entries are chosen tracks, never alternate search results for the same song.
 struct MusicQueue: Codable, Equatable {
+    static let upcomingLimit = 50
+    static let historyLimit = 30
     var current: MusicTrack?
     var upcoming: [MusicTrack] = []
     var previous: [MusicTrack] = []
@@ -35,10 +39,10 @@ struct MusicQueue: Codable, Equatable {
         var seen = Set(upcoming.map(\.id))
         if let current { seen.insert(current.id) }
         let additions = tracks.filter { seen.insert($0.id).inserted }
-        upcoming = Array((next ? additions + upcoming : upcoming + additions).prefix(50))
+        upcoming = Array((next ? additions + upcoming : upcoming + additions).prefix(Self.upcomingLimit))
     }
     mutating func select(_ track: MusicTrack) {
-        if let current, current.id != track.id { previous = Array((previous + [current]).suffix(30)) }
+        if let current, current.id != track.id { previous = Array((previous + [current]).suffix(Self.historyLimit)) }
         upcoming.removeAll { $0.id == track.id }
         current = track
     }
@@ -93,7 +97,37 @@ struct MusicPlayback: Equatable {
 }
 
 extension SideTask {
+    var isMusicSession: Bool {
+        guard kind == .web, prefersSource != true else { return false }
+        if musicSessionRole != nil { return true }
+        guard listening == true else { return false }
+        if let queue = musicQueue {
+            // Discovery supplies these fields even when false. Passive page observations do not.
+            let tracks = [queue.current].compactMap { $0 } + queue.upcoming + queue.previous
+            if tracks.contains(where: { $0.verifiedArtist != nil || $0.isLive != nil }) { return true }
+        }
+        return false
+    }
+
     var usesMusicCard: Bool {
-        isMediaTask && customCompact != true && MusicTrack.videoID(sourceURL ?? "") != nil
+        isMediaTask && customCompact != true
+    }
+}
+
+extension AppModel {
+    func reusableMusicSession(preferred: UUID?, eligible: Set<UUID>? = nil) -> SideTask? {
+        let candidates = sideTasks.filter { task in
+            guard task.isMusicSession, task.terminalLabel == nil, eligible?.contains(task.id) != false else { return false }
+            if let view = work.view(task.id) {
+                if view.closed == true { return false }
+                if let native = work.artifact(view.selected)?.native, native.id != task.id { return false }
+            }
+            return true
+        }
+        if let preferred, let choice = candidates.first(where: { $0.id == preferred }) { return choice }
+        let shared = candidates.filter { $0.musicSessionRole != .independent }
+        return shared.first(where: { $0.playing }) ?? shared.first(where: { $0.id == preferredMediaTaskID })
+            ?? shared.first(where: { $0.id == browser.id })
+            ?? shared.first(where: { !$0.hidden }) ?? shared.first
     }
 }

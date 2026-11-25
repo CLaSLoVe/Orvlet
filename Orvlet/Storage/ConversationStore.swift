@@ -130,6 +130,16 @@ extension AppModel {
     }
     @discardableResult
     func restoreHistoryTask(_ id: UUID, showCard: Bool = true) -> Bool {
+        if let view = work.view(id), let artifact = work.artifact(view.selected), artifact.native == nil {
+            work.showView(id)
+            do { try projectWorkView(id) } catch { return false }
+            if artifact.definition.runtime != nil, taskRuntime.receipts[artifact.id] == nil,
+                artifact.runtimeState == nil || artifact.runtimeState?.phase == .running || artifact.runtimeState?.phase == .stale {
+                taskRuntime.attach(artifact.id)
+            }
+            return showCard ? selectTask(id, expanded: true, preferSource: false) : true
+        }
+        if showCard { work.showView(id) }
         if !sideTasks.contains(where: { $0.id == id }) {
             guard let item = taskHistoryItems.first(where: { $0.id == id }) else { return false }
             var task =
@@ -212,8 +222,8 @@ extension AppModel {
         }
     }
     @discardableResult
-    func appendMessage(_ text: String, isUser: Bool, taskID: UUID? = nil, requestID: UUID? = nil) -> UUID {
-        let message = ChatMessage(taskID: taskID ?? UUID(), requestID: requestID, text: text, isUser: isUser)
+    func appendMessage(_ text: String, isUser: Bool, taskID: UUID? = nil, requestID: UUID? = nil, editsInterface: Bool = false) -> UUID {
+        let message = ChatMessage(taskID: taskID ?? UUID(), requestID: requestID, text: text, isUser: isUser, editsInterface: editsInterface ? true : nil)
         let retained = Set(messages.filter { $0.taskID == message.taskID }.suffix(499).map(\.id))
         messages = messages.filter { $0.taskID != message.taskID || retained.contains($0.id) } + [message]
         return message.id
@@ -253,6 +263,7 @@ extension AppModel {
                     if let request = activeRequest {
                         associateMessages(requestID: request.id, messageID: messageID, taskID: taskID)
                         activeRequest?.submittedTaskID = taskID
+                        owner.editsInterface = messages.first(where: { $0.id == messageID })?.editsInterface == true
                         agent.steer(text, prepared: prepared)
                     }
                 }
@@ -269,11 +280,12 @@ extension AppModel {
                 "暂停": "pause", "pause": "pause", "继续": "resume", "resume": "resume", "播放": "resume", "play": "resume",
                 "停止": "stop", "stop": "stop", "重新开始": "restart", "重置": "restart", "reset": "restart",
             ][normalized],
+            restoreHistoryTask(taskID, showCard: false),
             let task = sideTasks.first(where: { $0.id == taskID })
         else { return false }
         if task.taskSurface?.runtime != nil {
             if busy && ownsRequest(taskID) { stopCommand(for: taskID) }
-            taskRuntime.control(taskID, operation: operation)
+            taskRuntime.control(work.view(taskID)?.selected ?? taskID, operation: operation)
             return true
         }
         if task.kind == .timer {
@@ -450,6 +462,17 @@ extension AppModel {
     }
     func endTask(_ id: UUID, action: RequestIntent.TaskAction) async throws -> String {
         guard let task = sideTasks.first(where: { $0.id == id }) else { throw PipelineFailure.targetUnavailable }
+        if let view = work.view(id), let artifact = work.artifact(view.selected) {
+            if let native = artifact.native, native.id != id { return try await endTask(native.id,action:action) }
+            workJobTokens[artifact.id] = nil
+            workJobs.removeValue(forKey:artifact.id)?.cancel()
+            if artifact.definition.runtime != nil {
+                taskRuntime.control(artifact.id, operation: "stop")
+            } else {
+                _ = work.update(artifact.id,expecting:artifact.revision) { $0.status = "Stopped" }
+            }
+            projectWorkResult(artifact.id)
+        }
         if task.kind == .calendar && action == .cancel {
             return userText(
                 "这个日程已经写入日历。结束这里的任务不会删除它，请在日历中取消。",

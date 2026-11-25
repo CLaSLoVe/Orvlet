@@ -774,7 +774,7 @@
                 delegate.panel.setFrameOrigin(NSPoint(x: screen.maxX - 320, y: screen.maxY - 400))
             }
             delegate.panel.orderFrontRegardless()
-            let web = try await SimpleTaskPilot.expanded(model, task: spec.task, delegate: delegate)
+            let web = try await SimpleTaskPilot.expanded(model, task: spec.task, window: delegate.panel)
             let keys = try inputKeys(spec)
             let action = spec.task.taskSurface!.actions.first { $0.kind == .code }!.id
             var checks: [[String: Any]] = []

@@ -78,6 +78,7 @@ extension AgentController {
                 guard ticket == self.steeringRevision else { throw CancellationError() }
                 if name == "finish" { scope.verification?.finalCheck = true }
                 let receipt = RequestExecutionLedger.Receipt(result: result, verification: scope.verification)
+                if let run = RequestRun.current { self.model.work.record(runID: run.runID, operation: name) }
                 if mutation { ledger.entries[signature] = .succeeded(receipt) }
                 ledger.record(receipt, goal: goal)
                 Diagnostics.record(

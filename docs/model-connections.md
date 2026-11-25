@@ -1,86 +1,39 @@
-# Model connections
+# Model and decision connections
 
-Settings → Models → Connection details accepts any provider implementing one of
-these wire formats, without a provider or model-name allowlist:
+The main model generates tool calls and task interfaces. The decision service only scores bounded questions and selects from allowed choices; it does not execute tools.
 
-- **Chat Completions**: appends `/chat/completions`; default authentication is Bearer.
-- **Responses**: appends `/responses`; default authentication is Bearer.
-- **Anthropic Messages**: appends `/messages`; default authentication is `x-api-key`
-  with `anthropic-version: 2023-06-01`.
+## Main-model compatibility
 
-Enter the provider's documented base URL (usually including `/v1`) and exact model
-ID. A full standard endpoint is accepted too. **Use URL exactly as entered** supports
-custom gateway routes and Azure-style deployment URLs. Query parameters are preserved.
-HTTPS and loopback HTTP work by default; remote HTTP requires the per-profile option.
+Official OpenAI GPT-6 profiles using a standard Chat Completions URL are migrated to Responses. The same model, credential reference, and conversation are retained. The runtime also normalizes unsaved connection tests. Other providers and explicitly pinned URLs retain their selected protocol.
 
-## Advanced settings
+Automatic reasoning on Responses uses a supported low effort for connection checks and short extraction calls, and medium/high for corresponding planning budgets. Ordinary requests retain the provider default. It never sets `none` merely to get function tools through Chat Completions. Explicit reasoning settings remain user-controlled. Response reasoning items and function-call results continue through the existing stateless Responses history adapter.
 
-Each profile saves its protocol, authentication, reasoning, output limit, temperature,
-timeout, tool-choice behavior, and JSON overrides. Existing profiles retain Chat
-Completions and their existing credential references. An empty API Key field keeps the
-saved key. No authentication works with local services that do not require credentials.
+## Models settings
 
-**Reasoning** selects `reasoning_effort` for Chat Completions and `reasoning.effort`
-for Responses. **Automatic (Orvlet)** preserves the existing task-budget optimizations
-for compatible Chat providers; elsewhere it leaves the provider default. **Provider
-default** omits those optimizations. Explicit efforts are sent as selected, so use
-only values supported by your provider/model. Messages-specific thinking controls
-belong in request parameters because their shape and budget requirements differ.
+Settings → Models offers **GPT** and **Custom**.
 
-An empty output limit omits the parameter, except Messages which requires a limit
-and defaults to 8192. Chat providers can choose `max_completion_tokens` or `max_tokens`.
-Temperature is omitted when blank, including on models that reject it. An explicit
-request timeout overrides the default 600-second model-request timeout and any
-explicit connection-test timeout. Connection tests retain their short explicit
-timeout when the profile leaves this field blank. Jev routing keeps its separate
-short timeout.
+- GPT shows one secure OpenAI API Key field and a model picker. The main model uses Responses; OpenAI Decisions automatically uses `gpt-6-luna` with the same credential reference. One connection test checks both services and identifies which service failed.
+- Custom shows the main model's base URL, model ID and key, followed by the Jev key. Protocol, authentication and custom Jev endpoint/model settings remain under Advanced.
+- Switching modes preserves saved connections, each provider's credentials and the last selected model. Unsubmitted key edits are retained per credential account. An empty key field keeps the saved key. Third-party GPT gateways remain Custom connections.
+- The built-in GPT list follows the [official model catalog](https://developers.openai.com/api/docs/models); saved model IDs outside that list remain selectable.
 
-**Force required tool calls** can be turned off for gateways supporting only automatic
-tool choice. The result still has to pass Orvlet's normal tool and argument validation.
+## Decisions
 
-Request parameters are a JSON object, recursively merged after the options above.
-`null` removes a generated default. For example, a Chat gateway can use:
+The selected mode chooses the decision provider. Switching saves each provider's endpoint, model and credential reference separately.
 
-```json
-{"reasoning_effort":"none","parallel_tool_calls":null}
-```
+| Provider | Default base | Model | Request path |
+| --- | --- | --- | --- |
+| Jev | `https://api.typesafe.ai/v1` | `jev-latest` | `/systemone` |
+| OpenAI Decisions | `https://api.openai.com/v1` | `gpt-6-luna` | `/decisions` |
 
-A provider using a different reasoning switch can use:
+OpenAI uses named predicate/choice questions, structured JSON evidence, and an answers array. The adapter validates probabilities, names, duplicate entries and complete choice distributions before passing results to the existing routing thresholds. Refusals provide no actionable decision. A service failure retains the existing main-model/local fallback.
 
-```json
-{"enable_thinking":false}
-```
+GPT mode shares the active official OpenAI profile's key by reference; it never copies the secret into settings. Existing independent credential slots remain in local storage. Changing a destination invalidates an incompatible shared reference. Switching back to Custom restores Jev and its original credential slot.
 
-Select **Provider default** when replacing Orvlet's automatic reasoning behavior.
-The host owns model, conversation, tool definitions, non-streaming execution and
-conversation chaining; those fields cannot be replaced through JSON overrides.
+Routing, reading review, card grouping, connection checks and anonymous task ranking all use the selected provider. Background requests keep the existing eligibility/privacy checks and require the selected provider's official HTTPS host. No documents, credential values, or new categories of task context are added.
 
-Request headers are a JSON object with text values. Use `${API_KEY}` to insert the
-profile's saved key, rather than writing credentials in the JSON editor:
+References: [OpenAI reasoning guide](https://developers.openai.com/api/docs/guides/reasoning), [Decisions guide](https://developers.openai.com/api/docs/guides/decisions), [Decisions wire reference](https://developers.openai.com/api/reference/resources/decisions/methods/create).
 
-```json
-{"api-key":"${API_KEY}","X-Provider-Feature":"tools"}
-```
+## Verification
 
-**Custom header** authentication also accepts a header name and optional key prefix.
-Provider headers override default headers case-insensitively. Transport-owned headers
-such as Content-Type and Host cannot be overridden. Redirects are rejected so custom
-credentials cannot be forwarded to another destination; enter the final endpoint URL.
-
-## Compatibility and verification
-
-The selected model must support function/tool calling. More configurable parameters
-cannot add that capability or translate an unrelated proprietary protocol. Native
-Gemini `generateContent`, streaming-only servers and asynchronous job APIs are not
-implemented; use a supported compatibility endpoint for these services.
-
-Responses retains output items, including encrypted reasoning, across tool rounds.
-Messages retains signed thinking blocks and groups parallel tool results correctly.
-Screenshots are translated to the selected protocol's image format. HTTP errors show
-the status and provider's JSON error message, with current credentials/header values
-redacted and bounded text. Connection tests validate an actual tool response, not
-merely a successful HTTP status.
-
-`python3 scripts/check.py model-api` tests protocol requests, two-round tool results,
-reasoning continuity, images, profile persistence, overrides, validation and error
-redaction against a local server. It uses no real credentials or paid model APIs.
+Local HTTP fixtures cover both decision protocols, choice routing, credential-preserving migration, mode round trips, refusals and malformed responses. The complete Models pages are rendered offscreen at production size in both appearances. Tests do not use real credentials or live providers. Run `scripts/check.py model-api state-machines` against a freshly built Debug app.

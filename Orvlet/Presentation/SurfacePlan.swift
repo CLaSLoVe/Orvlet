@@ -200,20 +200,22 @@ struct SurfacePlan: Codable {
         if let submit = checked.submit { checked.submit = try submit.validated(observation: observation) }
         return checked
     }
-    static func sourceFallback(readings: [CardReading], primary: String, observation: [String: Any]) throws
+    static func sourceFallback(readings: [CardReading], primary: String, observation: [String: Any], subject: String? = nil) throws
         -> SurfacePlan
     {
         guard readings.contains(where: { $0.key == primary }), !readings.isEmpty, readings.count <= 8,
             readings.allSatisfy({ $0.key.range(of: "^[a-zA-Z][a-zA-Z0-9_]{0,30}$", options: .regularExpression) != nil }
             )
         else { throw AppError.message("Use valid observed result keys.") }
+        let subjectLabel = subject.map { "<small class='calm-label'>" + BuiltinCards.escape(String($0.prefix(80))) + "</small>" }
+            ?? "<small class='calm-label' data-bind='title'></small>"
         let rows = readings.map { "<div data-bind='" + $0.key + "'></div>" }.joined()
         let markup = CardMarkup(
             html: "<section class='source-result'>" + rows + "</section>",
-            compactHTML: "<div class='calm-glance'><small class='calm-label' data-bind='title'></small><strong class='calm-value' data-bind='" + primary + "'></strong></div>",
+            compactHTML: "<div class='calm-glance'>" + subjectLabel + "<strong class='calm-value' data-bind='" + primary + "'></strong></div>",
             css: ".source-result{display:grid;gap:8px;font-variant-numeric:tabular-nums}")
         return try SurfacePlan(
-            components: [], width: 320, height: 180, title: observation["title"] as? String, markup: markup,
+            components: [], width: 320, height: 180, title: subject ?? observation["title"] as? String, markup: markup,
             actions: [], readings: readings
         ).validated(observation: observation)
     }

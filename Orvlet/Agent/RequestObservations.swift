@@ -16,7 +16,20 @@ struct RequestObservations {
         return id
     }
 
+    func sourceNotes(for bindings: [[String: String]]) -> String {
+        let references = Set(bindings.compactMap { $0["observation"] })
+        let notes = samples.compactMap { entry -> String? in
+            guard references.contains(entry.id) || references.contains(entry.sample.url),
+                let host = URL(string: entry.sample.url)?.host else { return nil }
+            return host + " · " + entry.sample.checked.formatted(date: .abbreviated, time: .shortened)
+        }
+        return Set(notes).sorted().joined(separator: " / ")
+    }
+
     var hasSamples: Bool { !samples.isEmpty }
+    func sample(_ reference: String) -> APIDataService.Sample? {
+        samples.last(where: { $0.id == reference || $0.sample.url == reference })?.sample
+    }
     var hasSeveralSources: Bool { Set(samples.map { $0.sample.url }).count > 1 }
 
     static let bindingSchema: [String: Any] = [

@@ -4,6 +4,7 @@
   let revision = 0;
   let interaction = '';
   let readingBindings = [];
+  let focusedReadables = [];
   document.addEventListener('pointerdown', e => { if (e.isTrusted) interaction = 'pointer:' + (label(e.target) || e.target.tagName).slice(0,70); }, true);
   document.addEventListener('keydown', e => { if(e.isTrusted) interaction = 'keyboard:' + (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' ? 'typing' : e.key); }, true);
   const visible = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
@@ -75,8 +76,9 @@
       readingBindings=bindings.filter(b=>typeof b.key==='string'&&typeof b.selector==='string'&&b.selector.length<400);
       return state();
     },
-    observe() {
+    observe(query) {
       revision++;
+      const needle=typeof query==='string' ? query.trim().toLocaleLowerCase().slice(0,120) : '';
       if(refs.size > 1400) for(const key of [...refs.keys()].slice(0,1000)) refs.delete(key);
       const candidates = elements();
       // Prefer the current viewport while retaining a bounded set of below-fold targets.
@@ -90,9 +92,16 @@
           editable:e.type !== 'password' && (e.matches('input:not([type=button]):not([type=submit]):not([type=checkbox]):not([type=radio]),textarea') || e.isContentEditable), value:e.type === 'password' ? undefined : e.value?.slice?.(0,120), href:e.getAttribute('href'),
           disabled:!!e.disabled, x:Math.round(r.x), y:Math.round(r.y), width:Math.round(r.width), height:Math.round(r.height)};
       });
-      const candidatesText=[...document.querySelectorAll('time,output,input,select,[role="combobox"],button[aria-haspopup="listbox"],[role="heading"],[role="timer"],[role="status"],h1,h2,h3,[id],main p,main strong,main span')].filter(e=>readable(e)&&readText(e)&&readText(e).length<220 && (!e.matches('a,button') || dataControl(e)) && !e.querySelector('input[type="password"]'));
+      let candidatesText=[...document.querySelectorAll('time,output,input,select,[role="combobox"],button[aria-haspopup="listbox"],[role="heading"],[role="timer"],[role="status"],h1,h2,h3,[id],main p,main strong,main span')].filter(e=>readable(e)&&readText(e)&&readText(e).length<220 && (!e.matches('a,button') || dataControl(e)) && !e.querySelector('input[type="password"]'));
+      if(needle){
+        const nearby=e=>[readText(e),label(e),e.parentElement?.innerText?.slice(0,300),e.closest('a,button')?.innerText?.slice(0,300)].filter(Boolean).join(' ').toLocaleLowerCase();
+        const extra=[...document.querySelectorAll('a[href],button,span')].filter(e=>readable(e)&&readText(e)&&readText(e).length<220);
+        candidatesText=[...new Set([...candidatesText,...extra])].filter(e=>nearby(e).includes(needle));
+        focusedReadables=candidatesText.slice(0,70);
+      } else if(query==='') focusedReadables=[];
       const prominent=e=>parseFloat(getComputedStyle(e).fontSize)||0;
-      const readables=[...new Set(candidatesText)].sort((a,b)=>prominent(b)-prominent(a)).slice(0,70).map(e=>{
+      const rankedText=candidatesText.sort((a,b)=>prominent(b)-prominent(a));
+      const readables=[...new Set([...(needle?[]:focusedReadables.filter(readable)),...rankedText])].slice(0,70).map(e=>{
         // Search suggestions, related links and navigation are not the selected result.
         const navigation=!!e.closest('a,nav,aside,[role="navigation"],[role="listbox"],[role="menu"]') || (!!e.closest('button') && !dataControl(e));
         const selected=dataControl(e) || e.matches('[aria-selected="true"],[aria-current="true"],[aria-current="page"],option:checked');

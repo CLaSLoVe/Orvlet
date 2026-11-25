@@ -209,7 +209,7 @@
             model.sideTasks = [page]
             model.adoptRequestTask(.web(page.id))
             model.agent.activeTaskID = page.id
-            try check(offeredNames().contains("observe") && !offeredNames().contains("compose_ui"), "An owned source can be observed before loading design tools")
+            try check(offeredNames().contains("observe") && offeredNames().contains("compose_ui"), "An owned source exposes observation and bound presentation without another discovery round")
             _ = try await model.agent.execute("load_tools", ["family": "web"])
             try check(
                 offeredNames().contains("observe") && offeredNames().contains("compose_ui"),

@@ -27,7 +27,16 @@ filesystem-synchronized groups; Swift files added under `Orvlet/` or
 `./scripts/build.sh Release` creates `dist/Orvlet.app`, scans it for accidental
 credentials, and signs it locally. It uses `ORVLET_SIGNING_IDENTITY` when supplied,
 the sole eligible installed identity otherwise, or ad-hoc signing. This is a local
-build, not a notarized public distribution.
+build, not a notarized public distribution. If `dist/Orvlet.app` already contains
+the native Chromium framework, the standard build goes to `dist/Orvlet-WebKit.app`. Update the
+Chromium edition with the [native Chromium build](docs/native-chromium.md).
+
+The optional default-browser host needs the direct local variant:
+`./scripts/build.sh Release --system-browser` creates `dist/Orvlet-Browser.app`.
+This variant does not use macOS App Sandbox, because installed browser processes
+cannot inherit Orvlet's sandbox. Chromium's own renderer sandbox remains enabled.
+The standard build and its entitlements are unchanged. See
+[default-browser ownership and compatibility](docs/system-browser.md).
 
 ## Work on a change
 
@@ -51,18 +60,21 @@ build, not a notarized public distribution.
 python3 -m unittest discover -s Tests -p 'test_*.py'
 python3 scripts/check.py
 # With a current Debug build, select affected suites:
-python3 scripts/check.py --skip-build consistency side-screen
+python3 scripts/check.py --skip-build state-machines model-api
 # For changes crossing the application boundaries:
 python3 scripts/check.py --skip-build --full
+# Visible UI checks only when explicitly requested and the desktop is available:
+# python3 scripts/check.py --skip-build --show-ui consistency side-screen
 ```
 
 For runtime/data boundary changes, `./scripts/check-services.sh` also type-checks
 those services without application, agent, browser or view source files. This
 quick architectural check does not launch the app or call a provider.
 
-The default native run covers core behavior; the full run covers each distinct
-suite once. Reports stay under `.local/checks/`. These checks operate native
-windows and WebKit, so use a desktop session outside a restricted coding sandbox.
+The default native run and `--full` run only the audited background suites.
+Visible suites require `--show-ui` and an explicit user request; do not run them
+while the user is working. Reports stay under `.local/checks/`. Native WebKit
+checks still need a desktop session outside the restricted coding sandbox.
 See [check ownership](docs/architecture/checks.md) before adding a check; avoid
 repeating a shared group in another umbrella suite.
 
