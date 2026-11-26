@@ -131,7 +131,7 @@ extension AgentController {
         if ["calendar_create", "timer_start"].contains(name) {
             let humanText =
                 (RequestRun.current?.assignment?.original ?? currentRequest) + "\n"
-                + model.messages.filter { $0.isUser && $0.taskID == activeTaskID }.suffix(4).map(\.text).joined(
+                + model.recallableMessages(activeTaskID).filter(\.isUser).suffix(4).map(\.text).joined(
                     separator: "\n")
             guard nativeRequestActive, let evidence = input["request_evidence"] as? String,
                 !evidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, humanText.contains(evidence),

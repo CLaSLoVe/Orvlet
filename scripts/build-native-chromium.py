@@ -14,8 +14,11 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
 import zipfile
+
+from build_workspace import RUN_ENV, keep_debug_app, use_workspace
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERSION = '156.0.32+g3d1f4ab+chromium-156.0.8078.109'
@@ -96,26 +99,38 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('configuration', choices=['Debug', 'Release'], nargs='?', default='Debug')
     parser.add_argument('--output', type=pathlib.Path, help='Separate Release application destination; never launched')
-    parser.add_argument('--build-root', type=pathlib.Path, default=ROOT / '.build-native',
+    parser.add_argument('--build-root', type=pathlib.Path,
                         help='Isolated native/Xcode build directory for concurrent work')
     args = parser.parse_args()
-    args.build_root = args.build_root.resolve()
+    keep_debug = args.build_root is None and args.configuration == 'Debug'
+    with tempfile.TemporaryDirectory(prefix='native-', dir=os.environ[RUN_ENV]) as temporary:
+        scratch = pathlib.Path(temporary)
+        args.build_root = (args.build_root or scratch / 'derived').resolve()
+        build_app(args, parser, scratch, keep_debug)
+
+
+def build_app(args, parser, scratch, keep_debug):
     source_check()
     if os.uname().machine != 'arm64':
         parser.error('This pinned distribution currently supports Apple silicon')
     os.environ.setdefault('DEVELOPER_DIR', '/Applications/Xcode.app/Contents/Developer')
     cache = ROOT / '.local/cef'
     cache.mkdir(parents=True, exist_ok=True)
-    dep, archive = cache / DIRECTORY, cache / (DIRECTORY + '.tar.bz2')
+    archive = cache / (DIRECTORY + '.tar.bz2')
+    download = scratch / 'cef-download.tar.bz2'
+    candidate = archive
     if not archive.exists():
         url = 'https://cef-builds.spotifycdn.com/' + urllib.parse.quote(archive.name)
-        urllib.request.urlretrieve(url, archive)
-    with archive.open('rb') as data:
+        urllib.request.urlretrieve(url, download)
+        candidate = download
+    with candidate.open('rb') as data:
         digest = hashlib.file_digest(data, 'sha256').hexdigest()
     if digest != SHA256:
         raise RuntimeError('CEF archive checksum mismatch')
-    if not dep.exists():
-        run('tar', '-xjf', archive, '-C', cache)
+    if candidate == download:
+        download.replace(archive)
+    dep = scratch / DIRECTORY
+    run('tar', '-xjf', archive, '-C', scratch)
     build = args.build_root / 'native-clang'
     build.mkdir(parents=True, exist_ok=True)
     flags = ['xcrun', 'clang++', '-std=c++20', '-mmacosx-version-min=14.0',
@@ -166,14 +181,22 @@ def main():
     run('codesign', '--verify', '--deep', '--strict', app)
     if args.configuration == 'Release':
         destination = args.output or ROOT / 'dist/Orvlet-Chromium.app'
+        if destination.resolve() == ROOT / 'dist/Orvlet.app' and destination.exists():
+            from app_backup import rotate
+            rotate(ROOT, destination)
         old_extensions = destination / 'Contents/Resources/ChromiumExtensions'
         if old_extensions.exists():
             shutil.rmtree(old_extensions)
         run('ditto', app, destination)
         run('codesign', '--verify', '--deep', '--strict', destination)
         app = destination
+    elif keep_debug:
+        destination = ROOT / '.build-native/Build/Products/Debug/Orvlet.app'
+        keep_debug_app(app, destination)
+        app = destination
     print('Built (not launched):', app)
 
 
 if __name__ == '__main__':
+    use_workspace()
     main()

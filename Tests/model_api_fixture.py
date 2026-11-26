@@ -1,5 +1,38 @@
 """Wire-contract fixture: rejects lost tool results, reasoning state, and ignored settings."""
+import json
+
+
+def task_memory_response(body):
+    messages = body['messages']
+    functions = [entry['function']['name'] for entry in body['tools']]
+    if functions == ['update_task_memory']:
+        packet = json.loads(messages[-1]['content'])
+        assert 'ORVLET_FAKE_CREDENTIAL' not in json.dumps(packet)
+        changes = []
+        if any('金额改用美元' in row['text'] for row in packet['messages']):
+            assert (any(fact['quote'] == '金额用港币' for fact in packet['existing'])
+                    or any('金额用港币' in row['text'] for row in packet['messages'])), 'Missing previous currency evidence'
+        for row in packet['messages']:
+            for evidence, topic in [('只看港股', '市场'), ('金额用港币', '币种'), ('金额改用美元', '币种')]:
+                if evidence in row['text']:
+                    changes.append(dict(operation='set', kind='constraint', topic=topic,
+                                        source=row['source'], quote=evidence))
+        name, arguments = 'update_task_memory', {'changes': changes}
+    else:
+        facts = [m['content'] for m in messages if m['content'].startswith('Prior task constraint')]
+        assert any('只看港股' in f for f in facts) and any('金额改用美元' in f for f in facts), facts
+        assert all('港币' not in f for f in facts), facts
+        assert 'ORVLET_FAKE_CREDENTIAL' not in str(messages)
+        assert all('_orvletContextPriority' not in m for m in messages)
+        assert any(m['content'] == '导出时用什么币种？只回复币种。' for m in messages)
+        name, arguments = 'finish', {'outcome': 'answer', 'reply': '美元'}
+    return 200, {'choices': [{'message': {'role': 'assistant', 'tool_calls': [
+        {'id': 'task_memory', 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(arguments)}}]}}]}
+
+
 def respond(path, body, headers):
+    if path.startswith('/api-wire/task-memory/'):
+        return task_memory_response(body)
     if path.startswith('/api-wire/decision/'):
         assert headers.get('Authorization') == 'Bearer TEST_DECISION_KEY'
         if path.endswith('/systemone'):

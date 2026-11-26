@@ -23,6 +23,7 @@ struct WorkDefinition: Codable {
     var actions: [TaskSurfaceAction] = []
     var apiData: APIDataSpec?
     var runtime: TaskRuntimeSpec?
+    var journal: ActionJournalSpec?
 }
 
 struct WorkArtifact: Codable, Identifiable {
@@ -38,6 +39,7 @@ struct WorkArtifact: Codable, Identifiable {
     var checked = Date()
     var status = "Ready"
     var issue: String?
+    var journalHistory: JournalHistory?
     var runtimeState: TaskRuntimeState?
     // Compatibility resource adapter for native timers, calendar and owned pages.
     // The resource ID survives closing or replacing any of its views.
@@ -66,6 +68,7 @@ struct WorkView: Codable, Identifiable {
     var height: Double?
     var draftInputs: [String:String]?
     var inputIssue: String?
+    var reminder: CardReminderRule?
 }
 
 /// Main-actor commits are atomic. View edits never advance result revisions.
@@ -125,6 +128,14 @@ final class WorkRepository {
                                     definition: definition, source: source, evidence: evidence, file: file)
         artifact.revision = (prior?.revision ?? 0) + 1
         artifact.runtimeState = prior?.runtimeState
+        if let spec = definition.journal {
+            if let prior, let previousSpec = prior.definition.journal, previousSpec.valueKey == spec.valueKey,
+                previousSpec.scope == spec.scope {
+                artifact.journalHistory = prior.journalHistory
+                artifact.values[spec.valueKey] = prior.values[spec.valueKey]
+            }
+            artifact.rollJournal(to: Date())
+        }
         snapshot.artifacts[id] = artifact
         snapshot.designs[id] = design
         if let goalID, snapshot.goals[goalID]?.results.contains(id) == false { snapshot.goals[goalID]?.results.append(id) }
@@ -138,6 +149,9 @@ final class WorkRepository {
     }
     func artifact(_ id: UUID) -> WorkArtifact? { snapshot.artifacts[id] }
     func view(_ id: UUID) -> WorkView? { snapshot.views[id] }
+    func hasOpenView(for artifact: UUID) -> Bool {
+        snapshot.views.values.contains { $0.closed != true && $0.artifacts.contains(artifact) }
+    }
     func design(_ id: UUID) -> WorkDesign? { snapshot.designs[id] }
     func putView(_ view: WorkView) throws {
         guard !view.artifacts.isEmpty, view.artifacts.allSatisfy({ snapshot.artifacts[$0] != nil }),
@@ -228,6 +242,7 @@ extension WorkDefinition {
         apiData?.card = nil
         apiData?.customLayout = nil
         runtime = surface.runtime
+        journal = surface.journal
     }
 }
 

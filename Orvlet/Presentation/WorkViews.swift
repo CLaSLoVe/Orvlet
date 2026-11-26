@@ -20,10 +20,16 @@ extension AppModel {
         }
         return TaskSurface(title: artifact.title, markup: markup, fields: artifact.definition.fields,
                            actions: artifact.definition.actions, state: artifact.values,
-                           runtime: artifact.definition.runtime, preset: design?.preset)
+                           runtime: artifact.definition.runtime, preset: design?.preset, journal: artifact.definition.journal)
     }
 
     func surfaceForView(_ view: WorkView) throws -> TaskSurface {
+        var surface = try composeWorkView(view)
+        if let rule = view.reminder { surface.reminder = rule }
+        return surface
+    }
+
+    private func composeWorkView(_ view: WorkView) throws -> TaskSurface {
         guard let selected = work.artifact(view.selected) else { throw AppError.message("This result is unavailable.") }
         if view.layout == .together {
             var state: [String: String] = [:]
@@ -74,13 +80,19 @@ extension AppModel {
             surface.state.merge(draft) { _, new in new }
             surface.state["resultStatus"] = view.inputIssue ?? userText("正在更新…", "Updating…")
         }
+        if (view.draftInputs != nil || selected.issue != nil), surface.apiData?.resolvedCard?.kind == .currency {
+            surface.state["currencyRateEquation"] = ""
+        }
+        surface.presentJournal(selected, language: settings.preferredInterfaceLanguage)
         if let height = view.height { surface.markup.height = height }
         return surface
     }
 
     /// Projection only: no cancelling jobs, adopting a browser, or restarting runtime.
     func projectWorkView(_ id: UUID) throws {
-        guard let view = work.view(id), let artifact = work.artifact(view.selected) else { return }
+        guard let view = work.view(id) else { return }
+        for artifactID in view.artifacts { rollDailyJournal(artifactID) }
+        guard let artifact = work.artifact(view.selected) else { return }
         if view.closed == true {
             // The compatibility executor may still need its native resource;
             // it is not a Tasks entry and must never become visible on refresh.
@@ -90,10 +102,16 @@ extension AppModel {
             return
         }
         if var native = artifact.native, view.layout == .single {
+            if native.id != id { native.pendingTimerReminderID = nil }
             native.id = id
             native.hidden = view.hidden
             native.artifactIDs = view.artifacts
             native.markup = view.markup ?? work.design(artifact.id)?.markup
+            if let rule = view.reminder {
+                var markup = native.presentation
+                markup.reminder = rule
+                native.markup = markup
+            }
             if let height = view.height {
                 native.intrinsicCardHeight = height
                 if native.markup != nil { native.markup?.height = height }
@@ -140,7 +158,7 @@ extension AppModel {
     }
 
     @discardableResult
-    func presentWork(_ ids: [UUID], layout: WorkView.Layout, title: String, destination: UUID? = nil) throws -> [UUID] {
+    func presentWork(_ ids: [UUID], layout: WorkView.Layout, title: String, destination: UUID? = nil, reminder: CardReminderRule? = nil) throws -> [UUID] {
         guard !ids.isEmpty, ids.count <= 6, Set(ids).count == ids.count,
             ids.allSatisfy({ work.artifact($0) != nil }) else { throw AppError.message("Select one to six retained results.") }
         // Grouping one result must preserve its controls, not turn a working
@@ -149,12 +167,17 @@ extension AppModel {
         let groups = layout == .single ? ids.map { [$0] } : [ids]
         var views: [WorkView] = []
         for (index, group) in groups.enumerated() {
-            let existing = work.snapshot.views.values.first { $0.layout == layout && $0.artifacts == group }
-            let id = (index == 0 ? destination : nil) ?? existing?.id ?? UUID()
+            let target = index == 0 ? destination : nil
+            let existing = target.flatMap { work.view($0) }.flatMap { $0.layout == layout && $0.artifacts == group ? $0 : nil }
+                ?? work.snapshot.views.values.first { $0.layout == layout && $0.artifacts == group }
+            let id = target ?? existing?.id ?? UUID()
             let artifact = work.artifact(group[0])!
             let view = WorkView(id: id, artifacts: group, selected: existing?.selected ?? group[0], layout: layout,
-                title: layout == .single ? artifact.title : title, markup: existing?.markup, height:existing?.height)
-            if !(layout == .single && artifact.native != nil) {
+                title: layout == .single ? artifact.title : title, markup: existing?.markup, height:existing?.height,
+                reminder: reminder ?? (existing?.id == id ? existing?.reminder : nil))
+            if layout == .single, let native = artifact.native {
+                try view.reminder?.validate(available: Set(native.state.keys))
+            } else {
                 _ = try surfaceForView(view).validated() // Validate all views before publishing any.
             }
             views.append(view)
@@ -211,11 +234,37 @@ extension AppModel {
             configureClock(viewID, fields: input)
             return nil
         }
-        return performWorkOperation(artifact.id, action: action, fields: input)
+        return performWorkOperation(artifact.id, action: action, fields: input, owner: viewID)
     }
 
     @discardableResult
-    func performWorkOperation(_ id: UUID, action: String, fields: [String: String]) -> Task<Void, Never>? {
+    func performWorkOperation(_ id: UUID, action: String, fields: [String: String], owner: UUID? = nil) -> Task<Void, Never>? {
+        guard work.artifact(id)?.definition.journal != nil else {
+            return performImmediateOperation(id, action: action, fields: fields, owner: owner)
+        }
+        // A second press belongs after the first committed quantity, even when the JS worker is still running.
+        let prior = journalQueue[id]
+        let generation = prior?.generation ?? UUID()
+        let tail = UUID()
+        let job = Task { [weak self] in
+            await prior?.job.value
+            guard let self, !Task.isCancelled, journalQueue[id]?.generation == generation else { return }
+            defer { if journalQueue[id]?.tail == tail { journalQueue[id] = nil } }
+            rollDailyJournal(id)
+            if action == "undoJournal", let item = work.artifact(id) {
+                if work.update(id, expecting: item.revision, { _ = $0.undoJournal(at: Date()) }) {
+                    projectWorkResult(id)
+                    persistSideTasks()
+                }
+                return
+            }
+            await performImmediateOperation(id, action: action, fields: fields, owner: owner)?.value
+        }
+        journalQueue[id] = (generation, tail, job)
+        return job
+    }
+
+    private func performImmediateOperation(_ id: UUID, action: String, fields: [String: String], owner: UUID?) -> Task<Void, Never>? {
         guard let original = work.artifact(id),
             let operation = original.definition.actions.first(where: { $0.id == action }),
             Set(fields.keys).isSubset(of: Set(original.definition.fields)),
@@ -274,6 +323,7 @@ extension AppModel {
             do {
                 var definition = pending.definition
                 let values: [String: String]
+                var reminder: GeneratedReminder?
                 var evidence = pending.evidence
                 var checked = Date()
                 if var spec = definition.apiData {
@@ -305,17 +355,42 @@ extension AppModel {
                     definition.apiData = spec
                 } else if let code = operation.code, operation.kind == .code {
                     let input = pending.values.filter { definition.fields.contains($0.key) }.merging(fields) { _, new in new }
-                    let updates = try TaskValues.decode(try await taskCode.run(code: code, input: input, state: pending.values, declaredInputs: definition.fields))
-                    values = pending.values.merging(input) { _, new in new }.merging(updates) { _, new in new }
+                    let result = try await taskCode.run(code: code, input: input, state: pending.values, declaredInputs: definition.fields)
+                    let updates = try TaskValues.decode(result)
+                    reminder = try GeneratedReminder.fromAction(result)
+                    let base = pending.values.merging(input) { _, new in new }
+                    try definition.journal?.validatePatch(updates, base: base)
+                    values = base.merging(updates) { _, new in new }
                 } else { throw AppError.message("This operation is unavailable.") }
                 try Task.checkCancellation()
-                if work.update(id, expecting: pending.revision, { $0.values = values; $0.definition = definition; $0.evidence = evidence; $0.source = try? definition.apiData?.requestURL().absoluteString; $0.status = "Ready"; $0.checked = checked; $0.issue = nil }) {
+                if work.update(id, expecting: pending.revision, { item in
+                    item.values = values
+                    if let key = definition.journal?.valueKey, let before = pending.values[key] {
+                        item.recordJournal(from: before, at: checked)
+                    }
+                    item.definition = definition
+                    item.evidence = evidence
+                    item.source = try? definition.apiData?.requestURL().absoluteString
+                    item.status = "Ready"
+                    item.checked = checked
+                    item.issue = nil
+                }) {
+                    if let url = values["sourceRequest"], definition.apiData != nil { siteMemory.successfulAPI(url, checked: checked) }
                     projectWorkResult(id)
                     resolveTaskIssue(id, source: .data)
+                    if let reminder {
+                        let views = work.snapshot.views.values.filter { $0.closed != true && $0.artifacts.contains(id) }
+                        let destination = views.first { $0.id == owner } ?? views.first { $0.id == self.selectedTaskID }
+                            ?? views.sorted { $0.id.uuidString < $1.id.uuidString }.first
+                        if let destination { deliverCardReminder(reminder, to: destination.id) }
+                    }
                 }
             } catch is CancellationError {} catch {
                 if work.update(id, expecting: pending.revision, { $0.status = "Update unavailable"; $0.issue = error.localizedDescription }) {
                     projectWorkResult(id)
+                    if let failure = error as? SourceReadFailure, let status = failure.accessStatus, let owner {
+                        siteMemory.recordAPI(url: failure.url, status: status, taskID: owner)
+                    }
                     reportTaskIssue(id, source: .data, detail: error.localizedDescription)
                 }
             }

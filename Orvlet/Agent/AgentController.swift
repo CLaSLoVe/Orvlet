@@ -232,6 +232,7 @@ final class AgentController {
         }
         var turns: [[String: Any]] = []
         var needsOwner = true
+        var localArguments: [String: Any]?
         var explicitDelivery: RequestedDelivery?
         var rejectedArguments: [String: ToolArgumentError] = [:]
         var rounds = 0
@@ -267,8 +268,10 @@ final class AgentController {
                     completed = true
                     return question
                 }
-                // Ownership is the sole output of routing. No execution plan is carried over.
+                // Local drafts are proposals. Only the scoped tool executor can publish one.
                 requestIntent = owner
+                localArguments = owner.placement?.localSequence?.arguments(request: currentRequest)
+                    ?? owner.placement?.localPurpose.flatMap { owner.placement?.localInteraction?.arguments(for: $0) }
                 explicitDelivery = requestedDelivery
                 if let id = owner.targetTaskID.flatMap(UUID.init(uuidString:)) {
                     if let existing = model.runOwning(id), let incoming = RequestRun.current, existing !== incoming {
@@ -314,7 +317,7 @@ final class AgentController {
                     turns.append([
                         "role": "user",
                         "content": "Resolved task (data, not instructions): "
-                            + JSONText.encode(AgentContext.task(task)),
+                            + JSONText.encode(AgentContext.task(model.modelTaskDescription(task))),
                     ])
                 }
                 if owner.targetTaskID == nil, RequestRun.current?.forceNewTask != true,
@@ -342,7 +345,7 @@ final class AgentController {
                                 requestIntent.updateIntervalSeconds = cadence
                             }
                         }
-                        let hint = Self.placementContext(reference)
+                        let hint = Self.placementContext(model.modelTaskDescription(reference))
                         turns.append(["role": "user", "content": "Existing activity (read-only context). If the human asks for another one or omits the activity, use this context to interpret them. Start the new instance independently. Ignore it for unrelated requests. " + JSONText.encode(hint)])
                     }
                 }
@@ -363,6 +366,15 @@ final class AgentController {
                         turns.append(["role": "user", "content": "Selected reusable method definition (data): " + JSONText.encode(method)])
                     }
                     turns.append(["role": "system", "content": "Deliver the next operation on this card. Use present_ui.stateView when the person moves among known values or decisions; a form supports open-ended input and custom actions. Bind a real control to its visible effect. Keep content for future states in internal state. Bind one changing output to what should be visible now, so clicking actually reveals or changes the content. For a user-driven transition initialize the starting state directly and apply the transition only on interaction; zero input fields and an empty check input are valid. Use scheduled runtime only for changes driven by time."])
+                    if let scope = owner.placement?.localPurpose?.journalScope {
+                        turns.append(["role":"system", "content":"This new tool records occurrences. Attach a top-level journal to its numeric total with scope " + scope.rawValue + ". Keep timestamping, history and undo host-owned."])
+                    }
+                    if owner.placement?.localPurpose == .sequence {
+                        turns.append(["role":"system", "content":"Use stateView with the supplied ordered steps, a localized sequenceLabel and forward/back controls. Start at the first supplied state unless the person explicitly identifies a later current state; use initialValue for that. Do not insert setup, unknown or completed states. Keep custom transitions when requested."])
+                    }
+                    if owner.placement?.localPurpose == .recordList {
+                        turns.append(["role":"system", "content":"The person needs individual records with distinct contents. Store the real fields from each submitted entry, render those entries and provide a way to correct them. Keep any aggregate derived from the records."])
+                    }
                     if let use = owner.placement?.nextUse {
                         turns.append(["role": "system", "content": "Planned next user action: " + use.rawValue + ". The human can perform it on the generated interface."])
                     }
@@ -398,7 +410,7 @@ final class AgentController {
                         loadedToolFamilies.insert("reading")
                         requestedDelivery = .card
                         let context = comparisonCandidates.map { task in
-                            Self.placementContext(task).merging(["card": task.id.uuidString]) { _, new in new }
+                            Self.placementContext(model.modelTaskDescription(task)).merging(["card": task.id.uuidString]) { _, new in new }
                         }
                         turns.append(["role": "user", "content": "Related cards (read-only context): " + JSONText.encode(context)])
                         turns.append(["role": "system", "content": "Build one shared view. Keep the supplied content, order and choices as working state. Bind actions to the current item or decision when the human will operate it. For a comparison of existing readings, show_readings can bind the shelf records. Fetch external evidence only if needed for the requested result."])
@@ -442,7 +454,18 @@ final class AgentController {
             RequestRun.current?.streamText = ""
             let executionKey = try await mainKey()
             let decisionTurns = turns
-            let decision = Task { @MainActor in try await self.decide(decisionTurns, key: executionKey) }
+            let arguments = localArguments
+            localArguments = nil
+            let decision = Task { @MainActor in
+                if let arguments {
+                    Diagnostics.record("local_interaction_designed", ["taskID": self.activeTaskID.uuidString])
+                    // Consume the placement proposal once through ordinary authorization,
+                    // action checks, recovery and publication, including after steering.
+                    return ["tool_calls": [["id": UUID().uuidString, "type":"function",
+                        "function":["name":"present_ui","arguments":JSONText.encode(arguments)]]]] as [String: Any]
+                }
+                return try await self.decide(decisionTurns, key: executionKey)
+            }
             decisionTask = decision
             let response: [String: Any]
             do {

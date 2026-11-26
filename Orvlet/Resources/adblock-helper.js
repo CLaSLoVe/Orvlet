@@ -44,16 +44,22 @@
     schedule();
   }
   function setEnabled(value) {
+    if (enabled === !!value) return;
     enabled = !!value;
     observe();
     for (let i = 0; i < frames.length; i++) frames[i].postMessage({orvletAdBlocking: enabled}, '*');
   }
   window.addEventListener('message', event => {
-    if (window !== parent && event.source === parent && typeof event.data?.orvletAdBlocking === 'boolean') {
+    if (event.data?.orvletAdHelperReady === true) {
+      for (let i = 0; i < frames.length; i++) {
+        if (frames[i] === event.source) frames[i].postMessage({orvletAdBlocking: enabled}, '*');
+      }
+    } else if (window !== parent && event.source === parent && typeof event.data?.orvletAdBlocking === 'boolean') {
       setEnabled(event.data.orvletAdBlocking);
     }
   });
   window.__orvletAds = {isAd, setEnabled};
+  if (window !== parent) parent.postMessage({orvletAdHelperReady: true}, '*');
   if (document.documentElement) observe();
   else document.addEventListener('DOMContentLoaded', observe, {once: true});
 })();

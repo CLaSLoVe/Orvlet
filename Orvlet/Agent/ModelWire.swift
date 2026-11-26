@@ -3,6 +3,7 @@ import Foundation
 /// Protocol translation lives at the boundary; the agent keeps one tool/conversation representation.
 enum ModelWire {
     static let historyKey = "_orvletWire"
+    static let contextPriorityKey = "_orvletContextPriority"
 
     /// Only allowlisted scalar policy fields; never log arbitrary provider overrides.
     static func reasoningPolicy(_ body: [String: Any]) -> [String: Any] {
@@ -29,6 +30,51 @@ enum ModelWire {
         endpoint: Endpoint, messages: [[String: Any]], tools: [[String: Any]],
         reasoning: Bool, requiredTool: String?, budget: ThinkingBudget
     ) throws -> [String: Any] {
+        func encode(_ turns: [[String: Any]]) throws -> [String: Any] {
+            try wireBody(endpoint: endpoint, messages: turns, tools: tools, reasoning: reasoning,
+                         requiredTool: requiredTool, budget: budget)
+        }
+        let full = try encode(messages)
+        let limit = try ModelContextBudget.limit(full, options: endpoint.options)
+        var excess = ModelContextBudget.estimate(full) - limit
+        guard excess > 0 else { return full }
+
+        let history = messages.indices.filter {
+            messages[$0][contextPriorityKey] is Int && messages[$0]["content"] is String
+                && messages[$0]["tool_calls"] == nil && messages[$0]["role"] as? String != "tool"
+        }.sorted {
+            let a = messages[$0][contextPriorityKey] as? Int ?? 0
+            let b = messages[$1][contextPriorityKey] as? Int ?? 0
+            return a == b ? $0 < $1 : a < b
+        }
+        var omitted = Set<Int>()
+        for index in history {
+            omitted.insert(index)
+            excess -= ModelContextBudget.tokens(messages[index]["content"] as? String ?? "")
+            if excess <= 0 { break }
+        }
+        var turns = messages.indices.filter { !omitted.contains($0) }.map { messages[$0] }
+        var candidate = try encode(turns)
+        if ModelContextBudget.estimate(candidate) <= limit { return candidate }
+
+        // Preserve function-call IDs and the most recent tool evidence. Older
+        // payloads can be observed again if the current step needs them.
+        let results = turns.indices.filter { turns[$0]["role"] as? String == "tool" }
+        for index in results.dropLast() {
+            guard let content = turns[index]["content"] as? String, content.utf8.count > 256 else { continue }
+            turns[index]["content"] = "Earlier tool output omitted to fit context. Recheck the source if needed."
+        }
+        candidate = try encode(turns)
+        guard ModelContextBudget.estimate(candidate) <= limit else {
+            throw AppError.message("This request and its required data exceed the model context budget. Split the request or select a model with a larger context window in Settings.")
+        }
+        return candidate
+    }
+
+    private static func wireBody(
+        endpoint: Endpoint, messages: [[String: Any]], tools: [[String: Any]],
+        reasoning: Bool, requiredTool: String?, budget: ThinkingBudget
+    ) throws -> [String: Any] {
         let options = endpoint.options
         try options.validate()
         if let requiredTool,
@@ -40,7 +86,7 @@ enum ModelWire {
         var body: [String: Any] = ["model": endpoint.model, "stream": false]
         switch options.api {
         case .chatCompletions:
-            body["messages"] = messages.map { $0.filter { $0.key != historyKey } }
+            body["messages"] = messages.map { $0.filter { $0.key != historyKey && $0.key != contextPriorityKey } }
             if !tools.isEmpty {
                 body["tools"] = tools
                 body["tool_choice"] = "auto"

@@ -76,6 +76,12 @@ struct AppSettings: Codable {
     var allowAgents = false
     var theme = ThemeTone.iris
     var appearance = AppAppearance.dark
+    var alarmSound = ReminderSound.slowRise
+    var messageSound = ReminderSound.bamboo
+
+    func sound(for persistence: ReminderPersistence) -> ReminderSound {
+        persistence == .persistent ? alarmSound : messageSound
+    }
     var reduceMotion = false
     var expandOnHover = false
     var restoreLastSession = true
@@ -85,8 +91,9 @@ struct AppSettings: Codable {
         case fastKeyReference, decisionConfigurations, preferredModelProfiles
         case interfaceLanguage, profiles, activeProfileID, fastCredentialID, taskStartPolicy, compactLayout, compactTaskLimit,
             inactiveStackOpacity, blockAds, browserEngine, shortcut, main, fast, fastProtocol, useFast, autoAdapt, allowAgents, theme,
-            appearance, reduceMotion, expandOnHover, restoreLastSession, resumePlaybackOnLaunch
+            appearance, alarmSound, messageSound, reduceMotion, expandOnHover, restoreLastSession, resumePlaybackOnLaunch
     }
+    private enum LegacySoundKey: String, CodingKey { case reminderSound }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         interfaceLanguage = try c.decodeIfPresent(String.self, forKey: .interfaceLanguage) ?? Self.defaultInterfaceLanguage
@@ -114,6 +121,10 @@ struct AppSettings: Codable {
         allowAgents = try c.decodeIfPresent(Bool.self, forKey: .allowAgents) ?? false
         theme = try c.decodeIfPresent(ThemeTone.self, forKey: .theme) ?? .iris
         appearance = try c.decodeIfPresent(AppAppearance.self, forKey: .appearance) ?? .dark
+        let old = try decoder.container(keyedBy: LegacySoundKey.self)
+        let sharedSound = try old.decodeIfPresent(String.self, forKey: .reminderSound).flatMap(ReminderSound.init(rawValue:))
+        alarmSound = try (c.decodeIfPresent(String.self, forKey: .alarmSound).flatMap(ReminderSound.init(rawValue:)) ?? sharedSound ?? .slowRise).alarmPreference
+        messageSound = try (c.decodeIfPresent(String.self, forKey: .messageSound).flatMap(ReminderSound.init(rawValue:)) ?? sharedSound ?? .bamboo).messagePreference
         reduceMotion = try c.decodeIfPresent(Bool.self, forKey: .reduceMotion) ?? false
         expandOnHover = try c.decodeIfPresent(Bool.self, forKey: .expandOnHover) ?? false
         restoreLastSession = try c.decodeIfPresent(Bool.self, forKey: .restoreLastSession) ?? true
@@ -140,6 +151,8 @@ extension AppSettings {
         compactTaskLimit = draft.compactTaskLimit
         theme = draft.theme
         appearance = draft.appearance
+        alarmSound = draft.alarmSound
+        messageSound = draft.messageSound
         reduceMotion = draft.reduceMotion
         expandOnHover = draft.expandOnHover
         inactiveStackOpacity = draft.inactiveStackOpacity

@@ -121,7 +121,7 @@ class CheckRunnerReports(unittest.TestCase):
                 self.assertEqual(runner.verify_report(path, 0), 1)
 
     def test_default_runner_never_selects_live_scenarios(self):
-        self.assertEqual(set(runner.BACKGROUND_SUITES), {'state-machines', 'model-api'})
+        self.assertEqual(set(runner.BACKGROUND_SUITES), {'state-machines', 'model-api', 'memory'})
         self.assertTrue(set(runner.BACKGROUND_SUITES).issubset(runner.SUITES))
 
 

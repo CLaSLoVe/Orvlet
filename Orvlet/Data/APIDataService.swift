@@ -117,7 +117,7 @@ final class APIDataService {
                     .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot].contains($0.code)
             } ?? false
             throw SourceReadFailure(url: address, reason: error.localizedDescription,
-                allowsCorrection: error is PublicDataRequestIssue, hostUnavailable: hostUnavailable)
+                allowsCorrection: error is PublicDataRequestIssue, hostUnavailable: hostUnavailable, accessStatus: (error as? PublicAccessFailure)?.status)
         }
     }
     func acquire(_ proposed: APIDataSpec, previous: Sample? = nil, observed: ((Sample) -> Void)? = nil) async throws -> Reading {

@@ -68,15 +68,16 @@ enum TaskDismissalCheck {
             window.sendEvent(event(.leftMouseUp, end))
         }
         let tea = try model.startTimer(seconds: 300, title: "Tea")
-        let bread = try model.startTimer(seconds: 540, title: "Bread")
+        let calendar = SideTask(kind: .calendar, title: "Design review")
+        model.sideTasks.append(calendar)
+        let meeting = calendar.id
         let artifact = model.work.retain(title: "Parcel", values: ["delivery": "In transit"],
             definition: WorkDefinition(), design: WorkDesign(), goalID: nil)
         let parcel = try model.presentWork([artifact], layout: .single, title: "Parcel")[0]
-        let deadline = model.sideTasks.first { $0.id == tea }!.deadline
         model.activeRequest = nil
         model.taskShelfVisible = true
         model.taskListEditing = true
-        model.taskOrder = [tea, bread, parcel]
+        model.taskOrder = [tea, meeting, parcel]
         window.setContentSize(model.shellContentSize!)
         try await settle()
         try button(parcel)
@@ -102,7 +103,7 @@ enum TaskDismissalCheck {
         try await settle()
         try drag(tea, outside: false)
         try await settle()
-        try check(model.orderedTasks.map(\.id) == [bread, tea, parcel], "Dragging a title inside Tasks reorders without closing")
+        try check(model.orderedTasks.map(\.id) == [meeting, tea, parcel], "Dragging a title inside Tasks reorders without closing")
         try drag(tea, outside: true, cancel: true)
         try await settle()
         try check(model.orderedTasks.count == 3 && model.draggingTaskID == nil, "Escape cancels an outside drag")
@@ -121,21 +122,21 @@ enum TaskDismissalCheck {
         try await settle()
         model.tickTasks()
         model.persistSideTasks()
-        try check(model.orderedTasks.map(\.id) == [bread] && model.overflowTaskCount == 0
-            && model.sideTasks.first { $0.id == tea }?.deadline == deadline,
+        try check(model.orderedTasks.map(\.id) == [meeting] && model.overflowTaskCount == 0
+            && model.timerTool == nil,
             "Dragging a native title outside removes its shelf entry without recreating it on a timer tick")
-        try button(bread)
+        try button(meeting)
         try await settle()
         try check(model.visibleTasks.isEmpty && model.orderedTasks.count == 1, "A native card can be hidden")
-        try button(bread)
+        try button(meeting)
         try await settle()
-        try check(model.visibleTasks.map(\.id) == [bread], "A native card can be shown with the same ID")
+        try check(model.visibleTasks.map(\.id) == [meeting], "A native card can be shown with the same ID")
         defaults.set(try model.shelfArchive.encoded(model.sideTasks), forKey: "sideTasks.v1")
         let restored = AppModel(defaults: defaults)
         restored.isLiveTest = true
         restored.loadSideTasks()
         defer { restored.taskClock?.invalidate() }
-        try check(restored.orderedTasks.map(\.id) == [bread] && restored.visibleTasks.map(\.id) == [bread]
+        try check(restored.orderedTasks.map(\.id) == [meeting] && restored.visibleTasks.map(\.id) == [meeting]
             && restored.work.artifact(artifact)?.values["delivery"] == "Delivered",
             "Reload preserves closed, hidden and visible states separately from results")
         model.setCompactLayout(.vertical)
@@ -144,7 +145,7 @@ enum TaskDismissalCheck {
         func compactTargets(_ view: NSView) -> [WindowDragArea.DragView] {
             (view as? WindowDragArea.DragView).map { [$0] } ?? view.subviews.flatMap(compactTargets)
         }
-        guard let compact = compactTargets(host).first(where: { $0.identifier?.rawValue == bread.uuidString && $0.bounds.width > 50 })
+        guard let compact = compactTargets(host).first(where: { $0.identifier?.rawValue == meeting.uuidString && $0.bounds.width > 50 })
         else { throw AppError.message("Missing compact card drag target") }
         let start = compact.convert(NSPoint(x: compact.bounds.midX, y: compact.bounds.midY), to: nil)
         try check(host.hitTest(host.superview?.convert(start, from: nil) ?? start) === compact, "Compact card receives pointer input")

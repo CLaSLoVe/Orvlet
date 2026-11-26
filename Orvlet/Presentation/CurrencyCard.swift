@@ -53,10 +53,27 @@ extension APIDataSpec {
         else { return false }
         return Set(from) == Set(to)
     }
+    private func unitRateEquation(_ state: [String: String], roles: CurrencyCardFields) -> String? {
+        guard state["resultStatus", default: ""].isEmpty, state["status"] != "Update unavailable",
+            let request = try? requestURL().absoluteString, state["sourceRequest"] == request,
+            let from = state[roles.from], let to = state[roles.to],
+            let base = expectations?.first(where: { $0.value == "{" + roles.from + "}" })?.key,
+            let quote = expectations?.first(where: { $0.value == "{" + roles.to + "}" })?.key,
+            state[base]?.caseInsensitiveCompare(from) == .orderedSame,
+            state[quote]?.caseInsensitiveCompare(to) == .orderedSame else { return nil }
+        // Saved Frankfurter recipes predate the explicit quote-per-base slot.
+        let frankfurter = url == "https://api.frankfurter.dev/v2/rate/{" + roles.from + "}/{" + roles.to + "}"
+        let key = card?.rateKey ?? (frankfurter ? fields.first { $0.pointer == "/rate" }?.key : nil)
+        guard let key, let raw = state[key], let rate = Double(raw), rate.isFinite, rate > 0,
+            from != to || rate == 1 else { return nil }
+        let display = String(format: "%.8g", rate)
+        return "1 " + from + (Double(display) == rate ? " = " : " ≈ ") + display + " " + to
+    }
     func presentationState(_ state: [String: String]) -> [String: String] {
         var result = state
         if let subject = choiceSubject(state) { result["orvletChoiceSubject"] = subject }
         if card?.kind == .weather {
+            result["weatherAlternateTemperature"] = alternateTemperature(in: state)
             result["weatherSampleTime"] = state["weatherSampleTime"] ?? ""
             if let key = card?.contextKey, result[key] == nil { result[key] = "" }
         }
@@ -70,9 +87,13 @@ extension APIDataSpec {
             result["sourceDateDisplay"] = formatter.string(from: date)
         }
         if result["sourceDate"] == "Source update time unavailable" { result["sourceDateDisplay"] = "" }
-        if resolvedCard?.kind == .currency { result["currencyPair"] = "" }
+        if resolvedCard?.kind == .currency {
+            result["currencyPair"] = ""
+            result["currencyRateEquation"] = ""
+        }
         guard resolvedCard?.kind == .currency, let roles = currencyFields else { return result }
         result["currencyPair"] = (state[roles.from] ?? "") + " → " + (state[roles.to] ?? "")
+        result["currencyRateEquation"] = unitRateEquation(state, roles: roles) ?? ""
         guard usesEnglishPresetCopy else { return result }
         let locale = Locale(identifier: "en_US")
         result["currencyFromName"] = locale.localizedString(forCurrencyCode: state[roles.from] ?? "") ?? ""

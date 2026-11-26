@@ -1,6 +1,20 @@
 import Foundation
 
 extension TaskSurface {
+    func clockOffsets(at date: Date) -> [String: String] {
+        let clocks = runtime?.sources.filter { $0.kind == .clock && $0.format == .time } ?? []
+        var offsets = [String: String]()
+        for (index, clock) in clocks.enumerated() {
+            let zone = clock.timeZone.flatMap(TimeZone.init(identifier:)) ?? .current
+            let seconds = zone.secondsFromGMT(for: date)
+            let minutes = abs(seconds) / 60
+            let sign = seconds < 0 ? "−" : "+"
+            let offset = minutes % 60 == 0 ? String(minutes / 60) : String(format: "%d:%02d", minutes / 60, minutes % 60)
+            offsets["clockUTCOffset\(index)"] = seconds == 0 ? "UTC" : "UTC" + sign + offset
+        }
+        return offsets
+    }
+
     var clockControlState: [String: String] {
         let clocks = runtime?.sources.filter { $0.kind == .clock && $0.format == .time } ?? []
         var values = Dictionary(
@@ -11,7 +25,7 @@ extension TaskSurface {
         values["clockLocationLabel"] =
             (clocks.first?.timeZone ?? TimeZone.current.identifier).split(separator: "/").last.map(String.init)?
             .replacingOccurrences(of: "_", with: " ") ?? "Local"
-        return values
+        return values.merging(clockOffsets(at: Date())) { _, fresh in fresh }
     }
 
     var withClockControls: TaskSurface {
@@ -63,7 +77,7 @@ extension AppModel {
             var seen = Set<String>()
             surface.title = runtime.sources.filter { $0.kind == .clock && $0.format == .time }.map {
                 (($0.timeZone ?? TimeZone.current.identifier).split(separator: "/").last.map(String.init) ?? "Local").replacingOccurrences(of: "_", with: " ")
-            }.filter { seen.insert($0).inserted }.joined(separator: " · ")
+            }.filter { seen.insert($0).inserted }.joined(separator: ", ")
         }
         surface.state.merge(surface.clockControlState) { _, fresh in fresh }
         if surface.preset == "clock" { surface = surface.withClockControls }

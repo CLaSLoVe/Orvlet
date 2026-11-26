@@ -1,6 +1,119 @@
 import SwiftUI
 import WebKit
 
+/// Coordinates stay local to the compact strip as the window moves across the screen.
+struct StripSourceBounds: ViewModifier {
+    let task: UUID?
+    struct Frames: PreferenceKey {
+        static var defaultValue: [UUID?: CGRect] { [:] }
+        static func reduce(value: inout [UUID?: CGRect], nextValue: () -> [UUID?: CGRect]) {
+            value.merge(nextValue()) { _, next in next }
+        }
+    }
+    func body(content: Content) -> some View {
+        content.background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: Frames.self, value: [task: proxy.frame(in: .named("compactStrip"))])
+            }
+        }
+    }
+}
+
+/// Rounded shoulders join the task to the opening surface. The same outline
+/// runs backwards on close. All four edges use one coordinate system.
+struct ShellOutline: InsettableShape {
+    let layout: ShellLayout
+    var fullscreen = false
+    var insetAmount: CGFloat = 0
+
+    func inset(by amount: CGFloat) -> Self {
+        var result = self
+        result.insetAmount += amount
+        return result
+    }
+
+    func path(in bounds: CGRect) -> Path {
+        let box = bounds.insetBy(dx: insetAmount, dy: insetAmount)
+        let resting = RoundedRectangle(cornerRadius: max(0, 16 - insetAmount))
+        guard !fullscreen, let reveal = layout.reveal, let edge = layout.edge,
+              reveal.fraction > 0, reveal.fraction < 1, !box.isEmpty else { return resting.path(in: box) }
+        let rail = layout.localCompact
+        let sideways = edge == .left || edge == .right
+        let length = sideways ? box.width : box.height
+        let breadth = sideways ? box.height : box.width
+        let seam = min(length, (sideways ? rail.width : rail.height) - insetAmount)
+        guard length - seam > 0.5, seam > 2 else { return resting.path(in: box) }
+
+        let low = max(0, sideways ? rail.minY : rail.minX)
+        let high = min(breadth, sideways ? rail.maxY : rail.maxX)
+        let source = reveal.source ?? CGRect(origin: .zero, size: rail.size).insetBy(
+            dx: max(0, (rail.width - 28) / 2), dy: max(0, (rail.height - 28) / 2))
+        let p = reveal.fraction
+        let spread = p * p * (3 - 2 * p)
+        let backLow = low * (1 - spread)
+        let backHigh = high + (breadth - high) * spread
+        let frontLow = min(breadth, max(0, low + (sideways ? source.minY : source.minX))) * (1 - spread)
+        let frontHigh = breadth - (breadth - min(breadth, max(0, low + (sideways ? source.maxY : source.maxX)))) * (1 - spread)
+
+        // Omit a flat shoulder so the outside corner keeps its full resting radius.
+        var vertices = [CGPoint(x: 0, y: backLow)]
+        if abs(frontLow - backLow) > 0.25 {
+            vertices += [CGPoint(x: seam, y: backLow), CGPoint(x: seam, y: frontLow)]
+        }
+        vertices += [CGPoint(x: length, y: frontLow), CGPoint(x: length, y: frontHigh)]
+        if abs(frontHigh - backHigh) > 0.25 {
+            vertices += [CGPoint(x: seam, y: frontHigh), CGPoint(x: seam, y: backHigh)]
+        }
+        vertices.append(CGPoint(x: 0, y: backHigh))
+
+        var path = Path()
+        path.move(to: CGPoint(x: 0, y: (backHigh + backLow) / 2))
+        for index in vertices.indices {
+            let current = vertices[index]
+            let previous = vertices[(index + vertices.count - 1) % vertices.count]
+            let next = vertices[(index + 1) % vertices.count]
+            if current.x == seam {
+                // The two ends of one shoulder share their tangent. A shallow offset
+                // rolls across the same width as a deep one, without a vertical notch.
+                if previous.x != seam {
+                    let end = vertices[(index + 2) % vertices.count]
+                    let direction: CGFloat = end.x > previous.x ? 1 : -1
+                    let width = 16 + min(10, (length - seam) / 2)
+                    let before = min(width, abs(current.x - previous.x) / 2)
+                    let after = min(width, abs(end.x - next.x) / 2)
+                    let delta = next.y - current.y
+                    let bend = min(abs(delta) / 2, width)
+                    let rise = delta < 0 ? -bend : bend
+                    let tangent = min(before, after) * 0.36 * (1 - bend / width)
+                    let first = CGPoint(x: seam - direction * before, y: current.y)
+                    let last = CGPoint(x: seam + direction * after, y: next.y)
+                    path.addLine(to: first)
+                    path.addCurve(to: CGPoint(x: seam, y: current.y + rise),
+                                  control1: CGPoint(x: first.x + direction * before * 0.55, y: first.y),
+                                  control2: CGPoint(x: seam - direction * tangent, y: current.y + rise * 0.45))
+                    path.addLine(to: CGPoint(x: seam, y: next.y - rise))
+                    path.addCurve(to: last,
+                                  control1: CGPoint(x: seam + direction * tangent, y: next.y - rise * 0.45),
+                                  control2: CGPoint(x: last.x - direction * after * 0.55, y: last.y))
+                }
+            } else {
+                let radius = min(16 - insetAmount, hypot(previous.x - current.x, previous.y - current.y) / 2,
+                                 hypot(next.x - current.x, next.y - current.y) / 2)
+                path.addArc(tangent1End: current, tangent2End: next, radius: max(0, radius))
+            }
+        }
+        path.closeSubpath()
+        let transform: CGAffineTransform
+        switch edge {
+        case .right: transform = CGAffineTransform(translationX: box.minX, y: box.minY)
+        case .left: transform = CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: box.maxX, ty: box.minY)
+        case .below: transform = CGAffineTransform(a: 0, b: 1, c: 1, d: 0, tx: box.minX, ty: box.minY)
+        case .above: transform = CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: box.minX, ty: box.maxY)
+        }
+        return path.applying(transform)
+    }
+}
+
 struct ContentView: View {
     @Environment(\.colorScheme) private var systemScheme
     @ObservedObject var model: AppModel
@@ -11,6 +124,12 @@ struct ContentView: View {
     private var compact: NSRect { model.shellLayout.localCompact }
     private var stripOpacity: Double {
         min(1, compact.width / max(1, model.compactSize.width), compact.height / max(1, model.compactSize.height))
+    }
+    private var outline: ShellOutline { ShellOutline(layout: model.shellLayout, fullscreen: model.sourceIsFullscreen) }
+    private var detailOpacity: Double {
+        guard let reveal = model.shellLayout.reveal, !model.sourceIsFullscreen else { return 1 }
+        let t = min(1, max(0, (reveal.fraction - 0.17) / 0.60))
+        return t * t * (3 - 2 * t)
     }
     private var verticalRail: Bool { model.shellLayout.edge == .left || model.shellLayout.edge == .right }
     var body: some View {
@@ -41,6 +160,7 @@ struct ContentView: View {
                     CalmMotion.animation(reduced: model.motionReduced),
                     value: !model.collapsed && !model.taskShelfVisible
                 )
+                .opacity(detailOpacity)
                 .offset(x: content.minX - viewport.minX, y: content.minY - viewport.minY)
                 .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
                 .clipped()
@@ -52,6 +172,7 @@ struct ContentView: View {
             }
             .animation(CalmMotion.animation(reduced: model.motionReduced), value: model.taskShelfVisible)
             .frame(width: content.width, height: content.height)
+            .opacity(detailOpacity)
             .offset(x: content.minX - viewport.minX, y: content.minY - viewport.minY)
             .frame(width: viewport.width, height: viewport.height, alignment: .topLeading).clipped()
             .offset(x: viewport.minX, y: viewport.minY)
@@ -59,6 +180,7 @@ struct ContentView: View {
             if !model.sourceIsFullscreen, let feedback = model.feedback, content.width > 0, !model.taskShelfVisible {
                 RequestFeedbackView(model: model, feedback: feedback)
                     .id(feedback.id)
+                    .opacity(detailOpacity)
                     .frame(width: content.width, height: min(model.feedbackSize.height, content.height))
                     .offset(x: content.minX, y: content.maxY - min(model.feedbackSize.height, content.height))
             }
@@ -92,13 +214,14 @@ struct ContentView: View {
             }
         }
         .overlay(
-            RoundedRectangle(cornerRadius: 16).strokeBorder(
+            outline.strokeBorder(
                 scheme == .dark ? Color.white.opacity(0.13) : Color.white.opacity(0.9), lineWidth: 1)
                 .allowsHitTesting(false)
         )
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(model.accent.opacity(0.12), lineWidth: 0.5)
+        .overlay(outline.strokeBorder(model.accent.opacity(0.12), lineWidth: 0.5)
             .allowsHitTesting(false))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .clipShape(outline)
+        .contentShape(outline)
         .environment(\.calmReducedMotion, model.motionReduced)
         .environment(\.colorScheme, scheme)
         .preferredColorScheme(model.settings.appearance.scheme)
@@ -148,7 +271,7 @@ struct DetailContentView: View {
                         .shadow(color: .black.opacity(0.14), radius: 4, y: 1)
                 }
                 .buttonStyle(WindowDragButtonStyle(allowsWindowDrag: false))
-                .accessibilityIdentifier("exit-window-player").help("Exit fullscreen · Esc")
+                .accessibilityIdentifier("exit-window-player").help("Exit fullscreen (Esc)")
                 .padding(.top, 7)
                 .modifier(RevealingControls(visible: model.pointerNearSourceControls || showingExitHint,
                                            height: 40, reduced: model.motionReduced))
@@ -169,6 +292,9 @@ struct DetailContentView: View {
         }
         .preferredColorScheme(model.settings.appearance.scheme)
         .onExitCommand { if model.sourceIsFullscreen { model.activeWindowPlayer?.exit() } else { model.collapse() } }
+        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in model.refreshDailyJournals() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)) { _ in model.refreshDailyJournals() }
+        .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in model.refreshDailyJournals() }
         .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
             model.menuTracking = true
         }
@@ -184,19 +310,17 @@ struct DetailContentView: View {
                 } label: {
                     Image(systemName: "chevron.down").font(.system(size: 10)).frame(width: 24, height: 26)
                 }
-                .buttonStyle(.plain).help("Collapse · Esc").accessibilityLabel("Collapse task details")
+                .buttonStyle(.plain).help("Collapse (Esc)").accessibilityLabel("Collapse task details")
                 Button {
                     model.editTaskList()
                 } label: {
                     Image(systemName: "slider.horizontal.3").font(.system(size: 10)).frame(width: 24, height: 26)
                 }
                 .buttonStyle(.plain).help("Edit tasks").accessibilityLabel("Edit tasks")
-                Text(
-                    model.visibleHandoff?.isBrowserManager == true ? "Browser extensions" : model.selectedSideTask.map { model.usesMusicCard($0) } == true
-                        ? "Music" : model.selectedSideTask?.title ?? "Orvlet"
-                )
+                Text(toolbarTitle)
                 .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary).lineLimit(1)
-                if let task = model.selectedSideTask, let activity = model.taskActivity(task) {
+                if let task = model.selectedSideTask, let activity = model.taskActivity(task),
+                    activity != .succeeded || task.taskSurface?.hasEditableOperation != true {
                     TaskActivityGlyph(model: model, task: task)
                     Text(activity.label).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                 }
@@ -210,8 +334,6 @@ struct DetailContentView: View {
                                 if model.showingWeb { model.selectTask(card.id, expanded: true, preferSource: false) }
                                 else { model.openTaskFromDoubleClick(card.id) }
                             }
-                        } else if card.kind == .timer {
-                            Button("Restart timer") { model.timerAction(card.id, action: "restart") }
                         }
                     } label: {
                         Image(systemName: "ellipsis").font(.system(size: 11)).frame(width: 20, height: 23)
@@ -243,6 +365,13 @@ struct DetailContentView: View {
         }
     }
 
+    private var toolbarTitle: String {
+        if model.visibleHandoff?.isBrowserManager == true { return "Browser extensions" }
+        guard let task = model.selectedSideTask else { return "Orvlet" }
+        if task.kind == .timer { return "Timer" }
+        return model.usesMusicCard(task) ? "Music" : task.title
+    }
+
     var interactionCard: some View {
         VStack(spacing: 0) {
             Color.clear.frame(height: reservedHeight).allowsHitTesting(false)
@@ -266,6 +395,8 @@ struct DetailContentView: View {
                 Spacer(minLength: 0)
             } else if let task = model.selectedSideTask, model.usesMusicCard(task) {
                 MusicCard(model: model, task: task).id(task.id)
+            } else if model.selectedSideTask?.kind == .timer {
+                TimerCard(model: model)
             } else if let task = model.selectedSideTask {
                 ZStack {
                     HTMLCardView(
@@ -423,7 +554,7 @@ struct CommandPanelView: View {
                     .disabled(
                         model.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                             || model.mainServiceState == "checking"
-                    ).help("Send · ⌥↩ starts a new task")
+                    ).help("Send (⌥↩ starts a new task)")
                 }.buttonStyle(.plain).padding(20)
             }
             Divider().opacity(0.3)
@@ -442,7 +573,7 @@ struct CommandPanelView: View {
             if model.conversationHistoryVisible {
                 TaskConversationHistoryView(model: model).frame(height: model.historyContentHeight)
             } else if let task = model.editingInterfaceTask {
-                Text("Editing · " + task.title).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                Text("Editing " + task.title).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.vertical, 12)
             } else if model.busy {
                 HStack(spacing: 8) {

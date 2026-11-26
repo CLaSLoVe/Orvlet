@@ -24,14 +24,25 @@ extension AgentController {
         return hint.flatMap { $0.isEmpty || $0.count > 240 ? nil : $0 }
     }
 
-    /// Ownership is resolved once, independently of executable work. A checked
-    /// Jev result is authoritative; the main model only handles unresolved routes.
+    /// A checked Jev owner is authoritative. On unresolved routes the main model
+    /// can propose a local interface alongside its placement decision.
     func understand(
         _ text: String, clarification: String?, key: String?, globalRouting: Bool = false, allowFast: Bool = true
     ) async throws -> RequestIntent {
         let explicit = globalRouting ? nil : model.activeRequest?.submittedTaskID
+        // With no previous activity a request explicitly asking for a card has no
+        // ownership ambiguity. Let the main placement call design it in that turn.
+        let asksForCard = text.range(of: #"卡片|小卡|胶囊|(?:一张|做张|做个|制作|生成|新建|创建|设计).{0,18}卡|\b(?:cards?|capsules?|widgets?)\b"#,
+            options: [.regularExpression, .caseInsensitive]) != nil && !RequestedDelivery.explicitTextReply(text)
+        let emptyShelf = model.sideTasks.allSatisfy { $0.id == model.requestCardID || $0.terminalLabel != nil }
+            && model.archivedTaskHistory.isEmpty
         if !globalRouting, explicit == nil, let run = RequestRun.current, run.forceNewTask {
             loadedToolFamilies.formUnion(run.initialFamilies)
+            #if DEBUG
+                if interpretationOverride != nil || completionOverride != nil { return RequestIntent(kind: .general) }
+            #endif
+            if asksForCard, run.assignment == nil, run.initialFamilies.isEmpty, run.attachments.isEmpty,
+               let plan = try? await placeCards(text, cards: [], preferred: nil, key: key) { return plan }
             return RequestIntent(kind: .general)
         }
         var prepared = preparedRequest
@@ -45,7 +56,7 @@ extension AgentController {
             Diagnostics.record("ownership_resolved", ["source": "explicit", "taskID": explicit.uuidString])
             return RequestIntent(kind: .general, targetTaskID: explicit.uuidString)
         }
-        if prepared == nil, allowFast {
+        if prepared == nil, allowFast, !(emptyShelf && asksForCard && !globalRouting) {
             prepared = await model.prepareFastRequest(
                 text, explicit: nil, excluding: globalRouting ? nil : model.requestCardID)
         }
@@ -244,6 +255,7 @@ extension AgentController {
                 messages: repair, tools: [FailedStep.schema], reasoning: false, requiredTool: "repair_step", maximumWait: 20)
         }
         var context = [system] + AgentContext.compact(turns)
+        if let access = Self.siteHistoryTurn(siteHints(), turns: context) { context.append(access) }
         if let run = RequestRun.current {
             let planViews = (requestIntent.placement?.context ?? []) + (requestIntent.placement?.members.compactMap(\.retainedID) ?? [])
             // A resolved session only needs its own artifacts and explicit references.
@@ -355,7 +367,7 @@ extension AgentController {
                 // and duration separately and need not transcribe a typo a second time.
                 var quotes = [currentRequest]
                 if let owner = model.activeRequest?.submittedTaskID {
-                    for message in model.messages.filter({ $0.taskID == owner && $0.isUser }).suffix(3)
+                    for message in model.recallableMessages(owner).filter(\.isUser).suffix(3)
                         where message.text.count <= 120 && !quotes.contains(message.text) {
                         quotes.append(message.text)
                     }
@@ -372,7 +384,7 @@ extension AgentController {
                 properties.removeValue(forKey: "markup")
                 parameters["properties"] = properties
                 function["parameters"] = parameters
-                function["description"] = "Build the local card. For interaction among known states use stateView alone with title and complete:true; its controls handle transitions. Otherwise supply form (inputs, outputs, buttons, compactSubject, compactKey, optional visuals), state, actions, checks and complete. Choose components for what the person will inspect or do next. Expose a useful control when the next step changes the result. Show the initial state and bind the outcome of each action. A code action is a JS function body returning {state:{...}}. Checks can use changed fields or empty input for a state transition. Use initialize only for an action intended to run on creation. For a design outside the component library load_tools(custom_layout)."
+                function["description"] = "Build the local card. For interaction among known states use stateView alone with title and complete:true; its controls handle transitions. Otherwise supply form (inputs, outputs, buttons, compactSubject, compactKey, optional visuals), state, actions, checks and complete. For counts of real events, attach journal:{valueKey,scope} to the numeric total. The host supplies recent committed changes and undo. Use day for daily totals, allTime otherwise. For ordered workflows use stateView.sequenceLabel to show their order. For calculations include editable inputs and a useful basis for the result. Expose a useful control when the next step changes the result. Show the initial state and bind the outcome of each action. A code action is a JS function body returning {state:{...}}. Checks can use changed fields or empty input for a state transition. Use initialize only for an action intended to run on creation. For a design outside the component library load_tools(custom_layout)."
                 scoped["function"] = function
             }
             return scoped

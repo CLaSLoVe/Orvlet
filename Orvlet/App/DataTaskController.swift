@@ -164,13 +164,14 @@ extension AppModel {
                 guard accepts(ticket), let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
                 if let subject = spec.choiceSubject(values), subject != spec.choiceSubject(previous) {
                     let label = spec.displayRows.first(where: { $0.key == spec.card?.primaryKey })?.label
-                    let title = [subject, label].compactMap { $0 }.joined(separator: " · ")
+                    let title = [subject, label].compactMap { $0 }.joined(separator: " ")
                     sideTasks[i].title = title
                     sideTasks[i].taskSurface?.title = title
                 }
                 sideTasks[i].liveValues = values
                 sideTasks[i].taskSurface?.state = values
                 if !cached {
+                    if let url = values["sourceRequest"] { siteMemory.successfulAPI(url) }
                     sideTasks[i].dataUpdatedAt = Date()
                     Diagnostics.record("api_data_refresh", ["taskID": id.uuidString, "origin": scheduled ? "scheduled" : "interaction", "verified": true])
                 }
@@ -180,6 +181,9 @@ extension AppModel {
                 persistSideTasks()
             } catch is CancellationError {} catch {
                 guard accepts(ticket), let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
+                if let failure = error as? SourceReadFailure, let status = failure.accessStatus {
+                    siteMemory.recordAPI(url: failure.url, status: status, taskID: id)
+                }
                 reportTaskIssue(id, source: .data, detail: error.localizedDescription)
                 if cached {
                     for output in spec.outputs ?? [] { sideTasks[i].liveValues?[output.key] = "—" }

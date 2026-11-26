@@ -10,6 +10,37 @@ struct PageReadUnavailable: LocalizedError {
 final class BrowserController: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     let id: UUID
     var lastState: [String: Any] = [:]
+    private var pendingMediaReplacement: (failed: String, next: String)?
+    private var attemptedMediaSources = Set<String>()
+
+    func tryAlternateMedia(_ page: String, state: [String: Any]) -> Bool {
+        guard let failed = state["activeMediaSource"] as? String, SessionStore.validURL(failed),
+            let candidates = state["alternativeMediaSources"] as? [String] else { return false }
+        let remembered = state["playbackFailed"] as? Bool != true
+        if remembered && (!model.playbackSources.avoids(failed) || state["playing"] as? Bool == true) { return false }
+        if pendingMediaReplacement?.failed == failed { return true }
+        if !remembered { model.playbackSources.record(failed) }
+        let options = candidates.filter {
+            $0 != failed && SessionStore.validURL($0) && !model.playbackSources.avoids($0) && !attemptedMediaSources.contains($0)
+        }
+        guard let next = model.playbackSources.preferredMedia(for: failed, among: options) ?? options.first else { return false }
+        guard !playbackSuspended else { return true }
+        attemptedMediaSources.insert(next)
+        pendingMediaReplacement = (failed, next)
+        let generation = navigationGeneration
+        Task { [weak self] in
+            guard let self, !disposed, generation == navigationGeneration else { return }
+            guard !playbackSuspended, currentURL?.absoluteString == page else {
+                pendingMediaReplacement = nil
+                attemptedMediaSources.remove(next)
+                return
+            }
+            let args = [page, failed, next].map { JSONText.encode($0) }.joined(separator: ",") + "," + String(remembered)
+            let changed = try? await evaluate("window.__orvlet.replaceMediaSource(" + args + ")") as? Bool
+            if generation == navigationGeneration && changed != true { pendingMediaReplacement = nil }
+        }
+        return true
+    }
     private var retainedMediaSurface: (url: URL, plan: SurfacePlan)?
     func rememberMediaSurface(_ plan: SurfacePlan, url: String) {
         guard plan.markup != nil else { return }
@@ -31,6 +62,8 @@ final class BrowserController: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
         return checked
     }
     var loading = false
+    // An in-flight login can return to the original owned entry after the human signs in.
+    var pendingSignInEntry: String?
     private(set) var sourceAccessIssue: String?
     private(set) var userPausedPlayback = false
     private(set) var waitingForInterface = false
@@ -133,7 +166,16 @@ final class BrowserController: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     private var navigationCommitted = false
     private var activeNavigation: WKNavigation?
     private var committedNavigation: WKNavigation?
-    private(set) var navigationGeneration = 0
+    var restoredPlaybackReplacement: (original: MusicTrack, selected: MusicTrack)?
+    var handledPlaybackFailure: String?
+    private(set) var navigationGeneration = 0 {
+        didSet {
+            pendingMediaReplacement = nil
+            attemptedMediaSources.removeAll()
+            restoredPlaybackReplacement = nil
+            handledPlaybackFailure = nil
+        }
+    }
     private let adBlocker = AdBlocker()
     private(set) var disposed = false
     unowned let model: AppModel
@@ -145,6 +187,20 @@ final class BrowserController: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
     func evaluate(_ script: String) async throws -> Any? {
         if let systemPage { try await systemPage.ready(); return try await systemPage.evaluate(script) }
         return try await webView.evaluateJavaScript(script)
+    }
+    func applyReminderMusicDucking() {
+        let coordinator = model.playbackCoordinator
+        let revision = coordinator.reminderRevision
+        let script = "window.__orvlet?.setReminderMusicGain(\(coordinator.reminderMusicGain), \(revision)); true"
+        Task { [weak self] in
+            guard let self, !disposed, revision == coordinator.reminderRevision else { return }
+            if let systemPage {
+                // Evaluate only in an existing connection. An alert must never open a page.
+                _ = try? await systemPage.evaluate(script)
+            } else if webView.url != nil {
+                _ = try? await webView.evaluateJavaScript(script)
+            }
+        }
     }
     func pauseMedia() async {
         if let systemPage { _ = try? await systemPage.evaluate("document.querySelectorAll('audio,video').forEach(m=>m.pause()); true") }
@@ -250,6 +306,9 @@ final class BrowserController: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
         // Click/scroll acknowledgements are not page snapshots. Keep the last
         // verified media state until the page sends a complete observation.
         guard !disposed, data["url"] is String else { return }
+        if (data["reminderMusicGain"] as? Double ?? 1) != model.playbackCoordinator.reminderMusicGain {
+            applyReminderMusicDucking()
+        }
         if systemPage != nil, !loading, let failure = systemFailure,
             let url = (data["url"] as? String).flatMap(URL.init(string:)), ["http", "https"].contains(url.scheme ?? "") {
             if let i = model.sideTasks.firstIndex(where: { $0.id == id }), model.sideTasks[i].dataIssue == failure {
@@ -269,6 +328,30 @@ final class BrowserController: NSObject, WKNavigationDelegate, WKUIDelegate, WKS
                     "taskID": id.uuidString, "playing": playing, "currentTime": data["currentTime"] as? Double ?? 0,
                     "held": playbackSuspended,
                 ])
+        }
+        if !loading, let page = data["url"] as? String, page == lastState["url"] as? String,
+            data["adPlaying"] as? Bool != true, lastState["adPlaying"] as? Bool != true,
+            data["playbackFailed"] as? Bool != true, lastState["playbackFailed"] as? Bool != true,
+            data["playing"] as? Bool == true, lastState["playing"] as? Bool == true,
+            data["activeMediaSource"] as? String == lastState["activeMediaSource"] as? String,
+            let before = lastState["currentTime"] as? Double, let after = data["currentTime"] as? Double, after > before {
+            model.playbackSources.recovered(page)
+            if let replacement = restoredPlaybackReplacement, MusicTrack.videoID(page) == replacement.selected.id {
+                model.playbackSources.verified(replacement.selected, for: replacement.original)
+                restoredPlaybackReplacement = nil
+            }
+            handledPlaybackFailure = nil
+            if let active = data["activeMediaSource"] as? String {
+                model.playbackSources.recovered(active)
+                if let replacement = pendingMediaReplacement, replacement.next == active {
+                    model.playbackSources.verifiedMedia(active, replacing: replacement.failed)
+                    pendingMediaReplacement = nil
+                }
+            }
+        }
+        if let raw = data["url"] as? String, raw != lastState["url"] as? String,
+            let route = SiteMemory.Route(raw, client: ""), route.logout, let profile = siteMemoryProfile {
+            model.siteMemory.invalidateSession(origin: route.origin, profile: profile)
         }
         lastState = data
         guard model.browser === self else {

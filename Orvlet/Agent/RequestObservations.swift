@@ -21,7 +21,7 @@ struct RequestObservations {
         let notes = samples.compactMap { entry -> String? in
             guard references.contains(entry.id) || references.contains(entry.sample.url),
                 let host = URL(string: entry.sample.url)?.host else { return nil }
-            return host + " · " + entry.sample.checked.formatted(date: .abbreviated, time: .shortened)
+            return host + ", " + entry.sample.checked.formatted(date: .abbreviated, time: .shortened)
         }
         return Set(notes).sorted().joined(separator: " / ")
     }

@@ -76,7 +76,7 @@ enum CardVisuals {
           const Y = v => high === low ? 41 : 72-(v-low)/(high-low)*60;
           const svg = svgElement('svg', {viewBox:'0 0 280 84', role:'img'});
           const format = v => v.toLocaleString(document.documentElement.lang,{maximumSignificantDigits:6});
-          svg.setAttribute('aria-label', [caption.textContent, String(xs[0]), String(xs[last]), format(low), format(high)].join(' · '));
+          svg.setAttribute('aria-label', [caption.textContent, String(xs[0]), String(xs[last]), format(low), format(high)].join(', '));
           for (const value of new Set([low,high])) {
             const y = Y(value);
             svg.append(svgElement('line',{x1:50,x2:275,y1:y,y2:y,stroke:'var(--line)'}));
@@ -105,7 +105,25 @@ enum CardVisuals {
           }
           figure.append(svg,range);
         }
+        const stepList = document.querySelector('.calm-sequence ol');
+        function updateSteps(state) {
+          if (!stepList || !changed(stepList, [state.items, state.activeIndex])) return;
+          const items = readColumn(state.items), current = Number(state.activeIndex);
+          stepList.replaceChildren();
+          for (const [i, name] of items.entries()) {
+            if (typeof name !== 'string') continue;
+            const step = document.createElement('li');
+            step.textContent = name;
+            if (i === current) step.setAttribute('aria-current', 'step');
+            stepList.append(step);
+          }
+          if (items.length > 6) {
+            const active = stepList.querySelector('[aria-current=step]');
+            if (active) stepList.scrollTop += active.getBoundingClientRect().top - stepList.getBoundingClientRect().top;
+          }
+        }
         function updateVisuals(state) {
+          updateSteps(state);
           for (const table of tables) drawRows(table,state);
           for (const figure of figures) drawSeries(figure,state);
         }
@@ -176,7 +194,7 @@ struct CardVisual: Codable {
         block.columns = boundColumns
         block.label = label.trimmingCharacters(in: .whitespacesAndNewlines)
         if block.label.isEmpty {
-            block.label = block.kind == .line ? boundColumns.last!.label : boundColumns.map(\.label).joined(separator: " · ")
+            block.label = block.kind == .line ? boundColumns.last!.label : boundColumns.map(\.label).joined(separator: ", ")
         }
         guard (try? Self.markup([block])) != nil else { return nil }
         return block

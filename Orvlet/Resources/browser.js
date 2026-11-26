@@ -23,6 +23,81 @@
     const score = m => (visible(m) ? 32 : 0) + (m.controls ? 16 : 0) + (m.currentSrc ? 4 : 0) + (!m.paused && !m.ended ? 8 : 0) + (!m.muted && m.volume > 0 ? 16 : 0);
     return score(b) - score(a);
   })[0];
+  // Apply the envelope after the site's volume control, including on cross-origin media.
+  const duckedMedia = new Map();
+  let reminderMusicGain = 1, duckRevision = 0, gain = 1, rampTimer;
+  const applyGain = (element, track) => {
+    const output = track.native.get.call(element);
+    // Native media controls can set the volume without using the JS accessor.
+    if (output !== track.output) track.volume = output;
+    const next = track.volume * gain;
+    if (output !== next) track.native.set.call(element, next);
+    track.output = track.native.get.call(element);
+  };
+  const followMedia = element => {
+    if (!(element instanceof HTMLMediaElement) || element.paused || element.ended || element.muted ||
+        duckedMedia.has(element) || Object.hasOwn(element, 'volume')) return;
+    const native = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
+    const track = { native, volume:element.volume, output:element.volume };
+    Object.defineProperty(element, 'volume', {
+      configurable:true,
+      get:() => track.volume,
+      set:value => {
+        const volume = Number(value);
+        if (!Number.isFinite(volume) || volume < 0 || volume > 1) return native.set.call(element, value);
+        track.output = native.get.call(element);
+        track.volume = volume;
+        applyGain(element, track);
+      }
+    });
+    duckedMedia.set(element, track);
+    applyGain(element, track);
+  };
+  const onPlay = event => followMedia(event.target);
+  const restoreMedia = element => {
+    const track = duckedMedia.get(element);
+    if (!track) return;
+    if (track.native.get.call(element) === track.output) track.native.set.call(element, track.volume);
+    delete element.volume;
+    duckedMedia.delete(element);
+  };
+  const onPause = event => restoreMedia(event.target);
+  const onVolumeChange = event => {
+    const element = event.target;
+    if (element.muted) return restoreMedia(element);
+    const track = duckedMedia.get(element);
+    if (track) applyGain(element, track);
+    else if (reminderMusicGain < 1) followMedia(element);
+  };
+  const setReminderMusicGain = (target, revision) => {
+    if (revision <= duckRevision) return;
+    duckRevision = revision;
+    if (reminderMusicGain === target) return;
+    reminderMusicGain = target;
+    const active = target < 1;
+    clearTimeout(rampTimer);
+    if (active) {
+      document.addEventListener('play', onPlay, true);
+      document.addEventListener('pause', onPause, true);
+      document.addEventListener('volumechange', onVolumeChange, true);
+      document.querySelectorAll('audio,video').forEach(followMedia);
+    } else {
+      document.removeEventListener('play', onPlay, true);
+    }
+    const start = performance.now(), from = gain;
+    const tick = () => {
+      const t = Math.min(1, (performance.now() - start) / (active ? 100 : 450));
+      gain = from + (target - from) * t * t * (3 - 2*t);
+      for (const [element, track] of duckedMedia) applyGain(element, track);
+      if (t < 1) rampTimer = setTimeout(tick, 16);
+      else if (!active) {
+        for (const element of duckedMedia.keys()) restoreMedia(element);
+        document.removeEventListener('pause', onPause, true);
+        document.removeEventListener('volumechange', onVolumeChange, true);
+      }
+    };
+    tick();
+  };
   const dataControl = e => e.matches('input:not([type]),input[type="text"],input[type="number"],input[type="search"],input[type="date"],input[type="time"],select,[role="combobox"],button[aria-haspopup="listbox"]');
   const readable = e => e && visible(e) && !e.closest('script,style,[contenteditable="true"],[aria-hidden="true"],input[type="password"],input[type="hidden"]') && (!e.matches('input,textarea') || dataControl(e));
   const readText = e => {
@@ -44,7 +119,18 @@
     const live = player?.getVideoData?.()?.isLive === true || m?.duration === Infinity;
     const ended = m?.ended === true || player?.getPlayerState?.() === 0;
     const adPlaying = window.__orvletAds?.isAd?.() === true;
-    return {documentReady:document.readyState, adPlaying, title: navigator.mediaSession?.metadata?.title || document.title, url: location.href, readings:readings(), mediaPrimary:!!m && ((visible(m) && (m.controls || m.tagName==='VIDEO')) || !!navigator.mediaSession?.metadata?.title),
+    const mediaCode = m?.error?.code || 0;
+    const overlay = player?.querySelector('.ytp-error-content-wrap, .ytp-error-content, .ytp-error');
+    const response = player?.getPlayerResponse?.();
+    const sameVideo = !response?.videoDetails?.videoId || response.videoDetails.videoId === new URL(location.href).searchParams.get('v');
+    const playerFailed = sameVideo && ((overlay && visible(overlay)) || ['ERROR','UNPLAYABLE'].includes(response?.playabilityStatus?.status));
+    // Network errors can affect every source. Only content failures belong in persistent memory.
+    const playbackFailed = navigator.onLine !== false && mediaCode !== 2 && !adPlaying &&
+      (playerFailed || mediaCode === 3 || mediaCode === 4);
+    const alternatives = m && !player ? [...m.querySelectorAll('source[src]')]
+      .filter(s => !s.type || m.canPlayType(s.type)).map(s => s.src).filter(s => /^https?:/.test(s)) : [];
+    return {documentReady:document.readyState, reminderMusicGain, adPlaying, playbackFailed:!!playbackFailed,
+      ...(!player && m && {activeMediaSource:m.currentSrc || m.src}), ...(alternatives.length && {alternativeMediaSources:alternatives}), title: (!adPlaying && navigator.mediaSession?.metadata?.title) || document.title, url: location.href, readings:readings(), mediaPrimary:!!m && ((visible(m) && (m.controls || m.tagName==='VIDEO')) || !!navigator.mediaSession?.metadata?.title),
       playing: !!m && !m.paused && !ended && m.readyState >= 2, audible: !!m && !m.paused && !ended && !m.muted && m.volume > 0 && m.readyState >= 2, looping: m?.loop ?? false, muted: player?.isMuted?.() ?? m?.muted ?? false, readyState: m?.readyState ?? 0, mediaError: m?.error?.message || '', hasMedia: !!m && (!!m.currentSrc || !!m.srcObject || m.readyState >= 1), mediaType: m?.tagName.toLowerCase(),
       width: m?.videoWidth || 0, height: m?.videoHeight || 0,
       interaction, hasCanvas: !!document.querySelector('canvas'), volume: player?.getVolume ? player.getVolume()/100 : m?.volume ?? 1,
@@ -54,6 +140,15 @@
   };
   window.__orvlet = {
     state,
+    setReminderMusicGain,
+    replaceMediaSource(page, failed, next, remembered = false) {
+      const m = media();
+      if (!m || location.href !== page || (m.currentSrc || m.src) !== failed || !(state().playbackFailed || (remembered && m.paused)) ||
+          ![...m.querySelectorAll('source[src]')].some(source => source.src === next)) return false;
+      m.src = next;
+      m.play().catch(() => {});
+      return true;
+    },
     musicCandidates() {
       if (!['www.youtube.com','youtube.com','m.youtube.com'].includes(location.hostname)) return [];
       const seen = new Set(), results = [];
@@ -111,10 +206,18 @@
           evidenceRole:navigation?'navigation':selected?'selected':primary?'primary':'supporting',
           scopeSelector:scope===document.body?'body':selectorFor(scope)};
       });
-      return {...state(), readables, viewport:{width:innerWidth,height:innerHeight}, elements:items,
+      const loginFormVisible = [...document.querySelectorAll('input[type=password],input[autocomplete=username],input[autocomplete=current-password]')].some(visible);
+      const loginError = [...document.querySelectorAll('[role=alert],main h1,main h2,#headingText,#headingSubtext')]
+        .filter(visible).map(e => e.innerText || '').join(' ').slice(0,1200);
+      const browserLoginRejected = /(?:this browser or app may not be secure|this browser (?:is not|isn.t) supported|unsupported browser|此浏览器或应用可能不安全|不支持此浏览器)/i.test(loginError);
+      const signedInContentVisible = !!document.querySelector('main,article,[role=main]') &&
+        [...document.querySelectorAll('a[href],form[action]')].some(e => visible(e) &&
+          /\/(?:sign[-_]?out|log[-_]?out)(?:[/?#]|$)/i.test(e.getAttribute('href') || e.getAttribute('action') || ''));
+      return {...state(), readables, loginFormVisible, browserLoginRejected, signedInContentVisible, viewport:{width:innerWidth,height:innerHeight}, elements:items,
         text:(document.body?.innerText || '').slice(0,2800) + ((document.body?.innerText || '').length > 2800 ? '\n…\n' + document.body.innerText.slice(-700) : ''), frames: [...document.querySelectorAll('iframe')].map(f=>({title:f.title,src:f.src})).slice(0,8)};
     },
     async act(a) {
+      if (a.expectedPage && a.expectedPage !== location.href) throw Error('The source page has changed.');
       if (a.action === 'observe') return this.observe();
       if (['back','forward','reload'].includes(a.action)) {
         setTimeout(() => a.action === 'reload' ? location.reload() : history.go(a.action === 'back' ? -1 : 1), 0);

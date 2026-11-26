@@ -101,6 +101,7 @@ extension AppModel {
         onCommandResize?(commandWindowHeight)
     }
     func openTaskConversation(_ id: UUID) {
+        scheduleTaskMemory(id, idle: true)
         selectChat(true, conversation: id)
         conversationHistoryVisible = true
         onCommandResize?(commandWindowHeight)
@@ -177,9 +178,8 @@ extension AppModel {
         persistSideTasks()
         conversationDrafts[id] = nil
         archivedTaskHistory.removeAll { $0.id == id }
-        messages.removeAll { $0.taskID == id }
+        eraseConversationData(id)
         persistTaskHistory()
-        persistConversation()
         if conversationTaskID == id {
             conversationTaskID = nil
             editingInterfaceID = nil
@@ -222,10 +222,20 @@ extension AppModel {
         }
     }
     @discardableResult
-    func appendMessage(_ text: String, isUser: Bool, taskID: UUID? = nil, requestID: UUID? = nil, editsInterface: Bool = false) -> UUID {
-        let message = ChatMessage(taskID: taskID ?? UUID(), requestID: requestID, text: text, isUser: isUser, editsInterface: editsInterface ? true : nil)
-        let retained = Set(messages.filter { $0.taskID == message.taskID }.suffix(499).map(\.id))
-        messages = messages.filter { $0.taskID != message.taskID || retained.contains($0.id) } + [message]
+    func appendMessage(_ text: String, isUser: Bool, taskID: UUID? = nil, requestID: UUID? = nil, editsInterface: Bool = false, verifiedMemoryResult: Bool = false) -> UUID {
+        var message = ChatMessage(taskID: taskID ?? UUID(), requestID: requestID, text: text, isUser: isUser, editsInterface: editsInterface ? true : nil)
+        message.verifiedMemoryResult = verifiedMemoryResult ? true : nil
+        let owned = messages.filter { $0.taskID == message.taskID }
+        let retained = Set(owned.suffix(499).map(\.id))
+        if let id = message.taskID, owned.count >= 500 {
+            var ledger = taskMemoryLedger(id)
+            if !ledger.coverageGap, owned.contains(where: { $0.pendingReminder == nil && !retained.contains($0.id) && !ledger.processed.contains($0.id) }) {
+                ledger.coverageGap = true
+                _ = saveTaskMemory(ledger, task: id)
+            }
+        }
+        messages = messages.filter { $0.taskID != message.taskID || $0.pendingReminder != nil || retained.contains($0.id) } + [message]
+        if let id = message.taskID { scheduleTaskMemory(id) }
         return message.id
     }
     func associateMessages(requestID: UUID, messageID: UUID?, taskID: UUID) {
@@ -233,10 +243,11 @@ extension AppModel {
             messages[index].taskID = taskID
             messages[index].requestID = requestID
         }
+        scheduleTaskMemory(taskID)
     }
     /// A bounded dialogue, including the question being answered, rather than only a task title.
     func taskInterpretationContext(_ id: UUID, excluding latest: String) -> [[String: String]] {
-        messages.filter { $0.taskID == id && $0.text != latest }.suffix(6).map {
+        recallableMessages(id).filter { $0.text != latest }.suffix(6).map {
             [
                 "role": $0.isUser ? "user" : "assistant", "text": String($0.text.prefix(500)),
                 "sentAt": ISO8601DateFormatter().string(from: $0.date),
@@ -245,10 +256,8 @@ extension AppModel {
     }
     func taskConversation(_ id: UUID?) -> [[String: Any]] {
         guard let id else { return [] }
-        return messages.filter { $0.taskID == id && (activeRequest == nil || $0.requestID != activeRequest?.id) }
-            .suffix(12).map {
-                ["role": $0.isUser ? "user" : "assistant", "content": $0.text]
-            }
+        scheduleTaskMemory(id)
+        return recalledTaskConversation(id, query: activeRequest?.input ?? "", excluding: activeRequest?.id)
     }
     func submitTaskRequest(_ text: String, taskID: UUID, messageID: UUID? = nil, prepared: PreparedRequest? = nil) {
         guard restoreHistoryTask(taskID, showCard: false) else {
@@ -326,14 +335,14 @@ extension AppModel {
             + history.filter { !available.contains($0.id) }).prefix(16)
         return items.map { item in
             let task =
-                sideTasks.first(where: { $0.id == item.id }) ?? archivedTaskHistory.first(where: { $0.id == item.id })
+                (sideTasks.first(where: { $0.id == item.id }) ?? archivedTaskHistory.first(where: { $0.id == item.id })).map(modelTaskDescription)
             let recent =
-                (available.contains(item.id) || explicit == item.id ? messages.filter { $0.taskID == item.id } : [])
+                (available.contains(item.id) || explicit == item.id ? recallableMessages(item.id) : [])
                 .suffix(4).map {
                     ["role": $0.isUser ? "user" : "assistant", "text": String($0.text.prefix(500))]
                 }
             return [
-                "id": item.id.uuidString, "title": item.title, "kind": task?.kind.rawValue ?? "result",
+                "id": item.id.uuidString, "title": task?.title ?? item.title, "kind": task?.kind.rawValue ?? "result",
                 "status": task?.status ?? "Archived", "lifecycle": item.state, "terminal": task?.terminalLabel != nil,
                 "availability": available.contains(item.id) ? "available" : "archived",
                 "media": task?.isMediaTask ?? false, "playing": task?.playing ?? false,
@@ -464,6 +473,7 @@ extension AppModel {
         guard let task = sideTasks.first(where: { $0.id == id }) else { throw PipelineFailure.targetUnavailable }
         if let view = work.view(id), let artifact = work.artifact(view.selected) {
             if let native = artifact.native, native.id != id { return try await endTask(native.id,action:action) }
+            journalQueue[artifact.id] = nil
             workJobTokens[artifact.id] = nil
             workJobs.removeValue(forKey:artifact.id)?.cancel()
             if artifact.definition.runtime != nil {
@@ -494,7 +504,8 @@ extension AppModel {
         guard let i = sideTasks.firstIndex(where: { $0.id == id }) else { throw CancellationError() }
         let cancelled = action == .cancel
         let label = cancelled ? "Cancelled" : "Finished"
-        sideTasks[i].terminalLabel = task.title + " · " + label
+        clearPendingTimerAlarm(for: id)
+        sideTasks[i].terminalLabel = task.title + ", " + label
         sideTasks[i].status = label
         sideTasks[i].deadline = nil
         sideTasks[i].playing = false

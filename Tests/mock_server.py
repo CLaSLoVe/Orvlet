@@ -15,12 +15,23 @@ class Handler(BaseHTTPRequestHandler):
  fresh_reads=0
  def log_message(self,*args): pass
  def do_GET(self):
+  if self.path == '/site-memory/reset':
+   self.send_response(200);self.send_header('Set-Cookie','orvlet_memory_fixture=; Max-Age=0; Path=/site-memory');self.end_headers()
+   self.wfile.write(b'<html><body>Ready</body></html>');return
+  if self.path.startswith('/site-memory/favorites') and 'orvlet_memory_fixture=ready' not in self.headers.get('Cookie',''):
+   self.send_response(302);self.send_header('Location','/site-memory/login');self.end_headers();return
   if self.path.startswith('/blocked-source'):
    self.send_response(403);self.send_header('Content-Type','text/html');self.end_headers()
    self.wfile.write(b'<html><head><title>Access denied</title></head><body>Access denied</body></html>');return
   if self.path.startswith('/deferred-reading'):
    value='second' if 'second' in self.path else 'first'
    data=('<html><body><output id="reading"></output><img src="/slow-image?'+value+'"><script>setTimeout(()=>document.querySelector("#reading").textContent="'+value+'",150)</script></body></html>').encode();kind='text/html'
+  elif self.path == '/site-memory/login':
+   data=b'<html><body><main><form><input type="password" placeholder="Password"></form></main></body></html>';kind='text/html'
+  elif self.path.startswith('/site-memory/favorites'):
+   data=b'<html><body><main><h1>Saved articles</h1><p>First saved article</p><a href="/site-memory/logout">Sign out</a></main></body></html>';kind='text/html'
+  elif self.path == '/site-memory/article':
+   data=b'<html><body><main><h1>Public article</h1><a href="/site-memory/login">Sign in</a></main></body></html>';kind='text/html'
   elif self.path.startswith('/slow-image'):
    time.sleep(3);data=b'';kind='image/png'
   elif self.path.startswith(('/tone.wav','/short-tone.wav')):

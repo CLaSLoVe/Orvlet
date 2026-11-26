@@ -117,49 +117,68 @@ final class CalendarService {
         let prefix = event["status"] as? String == "exists" ? "Already in" : "Added to"
         let location = event["location"] as? String ?? ""
         var reply =
-            "\(prefix) \(event["calendar"] as? String ?? "Calendar"): \(event["title"] as? String ?? "Event") · \(time)"
-        if !location.isEmpty { reply += " · " + location }
+            "\(prefix) \(event["calendar"] as? String ?? "Calendar"): \(event["title"] as? String ?? "Event"), \(time)"
+        if !location.isEmpty { reply += ", " + location }
         if event["assumedEnd"] as? Bool == true { reply += ". End time assumed: one hour." }
         return reply
     }
-    static func cardState(_ event: [String: Any]) -> [String: String]? {
-        let parser = DateFormatter()
-        parser.locale = Locale(identifier: "en_US_POSIX")
-        parser.calendar = Calendar(identifier: .gregorian)
-        parser.timeZone = .current
-        parser.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-        guard let start = parser.date(from: event["start"] as? String ?? "") else { return nil }
-        let end = parser.date(from: event["end"] as? String ?? "")
+    static func cardState(_ event: [String: Any], hostTimeZone: TimeZone = .current) -> [String: String]? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        formatter.timeZone = hostTimeZone
+        guard let start = formatter.date(from: event["start"] as? String ?? "") else { return nil }
+        let end = formatter.date(from: event["end"] as? String ?? "").flatMap { $0 > start ? $0 : nil }
         let allDay = event["allDay"] as? Bool == true
-        let zone =
-            allDay ? TimeZone.current : TimeZone(identifier: event["sourceTimeZone"] as? String ?? "") ?? .current
-        parser.timeZone = zone
-        parser.dateFormat = "EEE, MMM d, yyyy"
-        let day = parser.string(from: start)
-        parser.dateFormat = "HH:mm"
-        var time = parser.string(from: start)
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = zone
-        if allDay {
-            time = "All day"
-            if let end, let last = calendar.date(byAdding: .day, value: -1, to: end),
-                !calendar.isDate(start, inSameDayAs: last)
-            {
-                parser.dateFormat = "MMM d"
-                time += " · through " + parser.string(from: last)
-            }
-        } else if let end {
-            parser.dateFormat = calendar.isDate(start, inSameDayAs: end) ? "HH:mm" : "MMM d, HH:mm"
-            time += "–" + parser.string(from: end)
+        let zone = allDay ? hostTimeZone : TimeZone(identifier: event["sourceTimeZone"] as? String ?? "") ?? hostTimeZone
+        func text(_ date: Date, _ pattern: String, in timeZone: TimeZone) -> String {
+            formatter.timeZone = timeZone
+            formatter.dateFormat = pattern
+            return formatter.string(from: date)
         }
-        return [
-            "eventDate": day, "eventTime": time,
-            "eventZone": allDay
-                ? ""
-                : (zone.identifier.split(separator: "/").last.map(String.init) ?? zone.identifier)
-                    .replacingOccurrences(of: "_", with: " ") + " time",
+        func range(in timeZone: TimeZone) -> String {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = timeZone
+            let first = text(start, "HH:mm", in: timeZone)
+            guard let end else { return first }
+            let pattern = calendar.isDate(start, inSameDayAs: end) ? "HH:mm" : "MMM d, HH:mm"
+            return first + "–" + text(end, pattern, in: timeZone)
+        }
+        func zoneName(_ timeZone: TimeZone) -> String {
+            (timeZone.identifier.split(separator: "/").last.map(String.init) ?? timeZone.identifier)
+                .replacingOccurrences(of: "_", with: " ") + " time"
+        }
+        var state = [
+            "eventDate": text(start, "EEE, MMM d, yyyy", in: zone),
             "eventLocation": event["location"] as? String ?? "",
+            "eventZone": "", "eventDuration": "", "eventLocal": "",
+            "eventGlance": text(start, "MMM d", in: hostTimeZone),
         ]
+        if allDay {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = hostTimeZone
+            state["eventTime"] = "All day"
+            if let end, let last = calendar.date(byAdding: .day, value: -1, to: end),
+                !calendar.isDate(start, inSameDayAs: last) {
+                state["eventTime"] = "All day through " + text(last, "MMM d", in: hostTimeZone)
+            }
+            return state
+        }
+
+        state["eventTime"] = range(in: zone)
+        state["eventZone"] = zoneName(zone)
+        state["eventGlance"] = text(start, "MMM d, HH:mm", in: hostTimeZone)
+        if let end {
+            state["eventDuration"] = Duration.seconds(end.timeIntervalSince(start))
+                .formatted(.units(allowed: [.days, .hours, .minutes, .seconds], width: .narrow)
+                    .locale(Locale(identifier: "en_US")))
+        }
+        if [start, end ?? start].contains(where: { zone.secondsFromGMT(for: $0) != hostTimeZone.secondsFromGMT(for: $0) }) {
+            state["eventLocal"] = text(start, "MMM d", in: hostTimeZone) + ", " + range(in: hostTimeZone)
+                + ", " + zoneName(hostTimeZone)
+        }
+        return state
     }
     func run(_ arguments: [String], allowPermissionPrompt: Bool = false) async throws -> String {
         #if DEBUG

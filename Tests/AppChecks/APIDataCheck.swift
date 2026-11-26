@@ -486,6 +486,36 @@
                 guard ok else { throw AppError.message(message) }
                 checks.append(message)
             }
+            var exchange = currency()
+            exchange.inputs?["amount"] = "0.01"
+            exchange.maxAgeSeconds = nil
+            exchange.updatedAtPointer = nil
+            let quotes = APIDataService(code: model.taskCode, fetch: { url in
+                let quote = try PublicDataClient.url(url).lastPathComponent
+                return ["base": "HKD", "quote": quote, "rate": quote == "HKD" ? 1 : 0.12345678] as [String: Any]
+            })
+            let quote = try await quotes.read(exchange)
+            let converter = try exchange.surface(title: "Exchange", state: quote)
+            try check(quote["converted"] == "0.00" && converter.state["currencyRateEquation"] == "1 HKD = 0.12345678 CNY"
+                && converter.markup.html.contains("data-bind='currencyRateEquation'"),
+                "The converter shows the verified unit rate even when the rounded conversion is zero")
+            for draft in [["toCurrency": "EUR"], ["rate": "—"], ["resultStatus": "Update unavailable"]] {
+                let state = exchange.presentationState(quote.merging(draft) { _, new in new })
+                try check(state["currencyRateEquation"] == "", "A mismatched, missing or unavailable quote clears its equation: " + draft.keys.first!)
+            }
+            exchange.inputs?["toCurrency"] = "HKD"
+            let identical = try await quotes.read(exchange)
+            try check(exchange.presentationState(identical)["currencyRateEquation"] == "1 HKD = 1 HKD",
+                "A verified same-currency pair shows its unit rate exactly")
+            exchange.url = "https://example.org/quote/{fromCurrency}/{toCurrency}"
+            var unbound = identical
+            unbound["sourceRequest"] = try exchange.requestURL().absoluteString
+            try check(exchange.presentationState(unbound)["currencyRateEquation"] == "",
+                "An unknown source with no declared unit-rate field never infers one from a converted amount")
+            exchange.card = .init(kind: .currency, primaryKey: "converted", unitKey: "quote", rateKey: "rate")
+            let custom = try exchange.validated()
+            try check(custom.presentationState(unbound)["currencyRateEquation"] == "1 HKD = 1 HKD",
+                "A generated currency recipe can bind its own source unit rate")
             // A retained reading must update while the user is away, including after restoring its recipe.
             var reading = APIDataSpec(url: "https://example.org/reading", fields: [
                 APIDataField(key: "rate", label: "Reading", pointer: "/rate"),

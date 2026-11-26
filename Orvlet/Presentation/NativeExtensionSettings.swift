@@ -7,7 +7,7 @@ struct NativeExtensionSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Remember website logins", isOn: Binding(get: { host.keepLogins }, set: { value in
-                perform { try host.setKeepLogins(value) }
+                perform { try host.setKeepLogins(value); model.siteMemory.invalidateSession() }
             })).help("Keep site data across launches using macOS Keychain. Off uses a guest session.")
             Divider()
             HStack {

@@ -48,7 +48,7 @@ struct TaskConversationHistoryView: View {
                                         if model.conversationProgress.count > 3 {
                                             DisclosureGroup("Earlier steps", isExpanded: $showEarlierSteps) {
                                                 ForEach(Array(model.conversationProgress.dropLast(3).enumerated()), id: \.offset) { _, step in
-                                                    Text(step).textSelection(.enabled).foregroundStyle(.secondary)
+                                                    Text(step.replacingOccurrences(of: " · ", with: ", ")).textSelection(.enabled).foregroundStyle(.secondary)
                                                 }
                                             }
                                         }
@@ -56,7 +56,7 @@ struct TaskConversationHistoryView: View {
                                             HStack(alignment: .firstTextBaseline, spacing: 7) {
                                                 Image(systemName: step.contains(" · ") ? "exclamationmark.circle" : "circle.fill")
                                                     .font(.system(size: step.contains(" · ") ? 10 : 4))
-                                                Text(step).textSelection(.enabled)
+                                                Text(step.replacingOccurrences(of: " · ", with: ", ")).textSelection(.enabled)
                                             }
                                             .foregroundStyle(index == min(2, model.conversationProgress.count - 1) ? .primary : .secondary)
                                         }

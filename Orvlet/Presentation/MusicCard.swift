@@ -7,6 +7,7 @@ struct MusicCard: View {
     @Environment(\.colorScheme) private var scheme
     @State private var seeking = false
     @State private var seekPosition = 0.0
+    @State private var showRemainingTime = false
     @State private var showVolume = false
     @State private var editingVolume = false
     @State private var volume = 1.0
@@ -22,7 +23,7 @@ struct MusicCard: View {
                 Text(loading ? queue.current?.title ?? task.title : task.title)
                     .font(.system(size: 19, weight: .semibold, design: .rounded))
                     .lineLimit(2).frame(height: 48, alignment: .topLeading)
-                Text(loading ? "Opening…" : state.ad ? sourceName + " · Advertisement" : subtitle)
+                Text(loading ? "Opening…" : state.ad ? "Advertisement on " + sourceName : subtitle)
                     .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             VStack(spacing: 3) {
@@ -44,7 +45,17 @@ struct MusicCard: View {
                     HStack {
                         Text(MusicPlayback.time(seeking ? seekPosition : state.position))
                         Spacer()
-                        Text(MusicPlayback.time(state.duration))
+                        Button {
+                            showRemainingTime.toggle()
+                        } label: {
+                            Text(state.endTimeLabel(showRemaining: showRemainingTime, position: seeking ? seekPosition : state.position))
+                                .padding(.leading, 8).frame(minHeight: 18).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain).windowDragControl()
+                        .help(showRemainingTime ? "Show total duration" : "Show time remaining")
+                        .accessibilityLabel(showRemainingTime ? "Time remaining" : "Total duration")
+                        .accessibilityValue(state.endTimeLabel(showRemaining: showRemainingTime, position: seeking ? seekPosition : state.position))
+                        .accessibilityIdentifier("music-time-display")
                     }.font(.system(size: 10, design: .rounded)).monospacedDigit().foregroundStyle(.secondary)
                 } else {
                     Text(
@@ -200,7 +211,7 @@ struct MusicCard: View {
     }
     private var subtitle: String {
         let text = state.subtitle.isEmpty ? queue.current?.subtitle ?? "" : state.subtitle
-        return text.isEmpty ? sourceName : text + " · " + sourceName
+        return text.isEmpty ? sourceName : text + " (" + sourceName + ")"
     }
     private var sourceName: String {
         let host = URL(string:task.sourceURL ?? "")?.host ?? "Player"

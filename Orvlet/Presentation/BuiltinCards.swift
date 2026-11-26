@@ -6,6 +6,7 @@ struct DataCardPreset: Codable {
     var kind: Kind
     var primaryKey: String
     var unitKey: String? = nil
+    var rateKey: String? = nil
     var contextKey: String? = nil
 
     var subject: String? = nil
@@ -26,7 +27,7 @@ struct DataCardPreset: Codable {
         var result = self
         result.primaryKey = primary
         result.subject = subject.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40)) }
-        for (path, slot) in [("unitKey", \Self.unitKey), ("contextKey", \Self.contextKey), ("displayNameKey", \Self.displayNameKey)] {
+        for (path, slot) in [("unitKey", \Self.unitKey), ("rateKey", \Self.rateKey), ("contextKey", \Self.contextKey), ("displayNameKey", \Self.displayNameKey)] {
             if let raw = self[keyPath: slot] {
                 guard let key = resolve(raw, in: keys) else {
                     throw ToolArgumentError(path: "$.source.card." + path, issue: "bind the appropriate available key or omit this optional slot")
@@ -105,6 +106,9 @@ struct DataCardPreset: Codable {
             "unitKey": [
                 "type": "string", "description": "Optional source field containing the unit or quote currency.",
             ],
+            "rateKey": [
+                "type": "string", "description": "For currency conversions, the scalar source field reporting quote units per one base unit. Bind it only when the source specifies this direction.",
+            ],
             "contextKey": [
                 "type": "string",
                 "description":
@@ -167,8 +171,9 @@ enum BuiltinCards {
                     + "' data-field='clockZone" + String(index)
                     + "' data-change='configureClock' data-catalog='timeZone'><option value='" + escape(zone)
                     + "'>" + escape(label) + "</option></select></label>" : "<small class='clock-label'>" + escape(label) + "</small>"
-            return "<div class='clock-place'>" + heading + "<strong class='clock-time' data-bind='" + clock.key
-                + "'></strong>"
+            let offset = interactive ? "<small class='clock-offset' data-bind='clockUTCOffset" + String(index) + "'></small>" : ""
+            return "<div class='clock-place'>" + heading + "<div class='clock-reading'><strong class='clock-time' data-bind='" + clock.key
+                + "'></strong>" + offset + "</div>"
                 + (date.map { "<span class='calm-description' data-bind='" + $0.key + "'></span>" } ?? "") + "</div>"
         }.joined()
         return CardMarkup(
@@ -186,7 +191,7 @@ enum BuiltinCards {
                                 String.init)?.replacingOccurrences(of: "_", with: " ") ?? "Local") + "</small>")
                 + "</div>",
             css:
-                ".calm-surface.clock-preset{gap:12px}.clock-zone{display:grid;grid-template-columns:minmax(0,1fr) 24px}.clock-zone select{grid-area:1/1/2/3;padding-right:26px}.clock-zone::after{content:'⌄';grid-area:1/2;align-self:center;justify-self:center;color:var(--muted);pointer-events:none}.clock-preset select{appearance:none;-webkit-appearance:none;border-radius:10px;padding:7px 10px;min-height:34px;line-height:18px}.clock-place select{width:100%}.clock-preset:has(.clock-place:nth-child(3)){gap:6px}.clock-format{display:flex;align-items:center;justify-content:space-between;gap:12px}.clock-format select{width:110px;font-size:11px}.clock-place select{font-size:12px}.clock-preset:has(.clock-place:nth-child(3)) .clock-place{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px;padding-top:4px;align-items:baseline}.clock-preset:has(.clock-place:nth-child(3)) .clock-zone{grid-column:1/-1}.clock-preset:has(.clock-place:nth-child(3)) .calm-description{font-size:10px}.clock-preset:has(.clock-place:nth-child(3)) .clock-time{font-size:26px}.clock-place{display:grid;gap:6px}.clock-label{font-size:12px;font-weight:500;color:var(--muted)}.clock-place+.clock-place{border-top:1px solid var(--line);padding-top:14px}.clock-time{font-size:32px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-1px;line-height:1.2}.clock-place:only-child .clock-time{font-size:44px;letter-spacing:-1.5px}.clock-place>.calm-description{font-size:11px}",
+                ".calm-surface.clock-preset{gap:12px}.clock-reading{display:flex;align-items:baseline;column-gap:8px;flex-wrap:wrap}.clock-offset{white-space:nowrap;font-size:10px;font-variant-numeric:tabular-nums;color:var(--muted)}.clock-zone{display:grid;grid-template-columns:minmax(0,1fr) 24px}.clock-zone select{grid-area:1/1/2/3;padding-right:26px}.clock-zone::after{content:'⌄';grid-area:1/2;align-self:center;justify-self:center;color:var(--muted);pointer-events:none}.clock-preset select{appearance:none;-webkit-appearance:none;border-radius:10px;padding:7px 10px;min-height:34px;line-height:18px}.clock-place select{width:100%}.clock-preset:has(.clock-place:nth-child(3)){gap:6px}.clock-format{display:flex;align-items:center;justify-content:space-between;gap:12px}.clock-format .clock-zone{width:92px}.clock-format select,.clock-format .choice-trigger{width:100%;font-size:11px}.clock-zone .choice-trigger{padding-inline:10px 26px;text-align:start}.clock-place select{font-size:12px}.clock-preset:has(.clock-place:nth-child(3)) .clock-place{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px;padding-top:4px;align-items:baseline}.clock-preset:has(.clock-place:nth-child(3)) .clock-zone{grid-column:1/-1}.clock-preset:has(.clock-place:nth-child(3)) .calm-description{font-size:10px}.clock-preset:has(.clock-place:nth-child(3)) .clock-time{font-size:26px}.clock-place{display:grid;gap:6px}.clock-label{font-size:12px;font-weight:500;color:var(--muted)}.clock-place+.clock-place{border-top:1px solid var(--line);padding-top:14px}.clock-time{font-size:32px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-1px;line-height:1.2}.clock-place:only-child .clock-time{font-size:44px;letter-spacing:-1.5px}.clock-place>.calm-description{font-size:11px}",
             height: clocks.count == 3 ? 320 : clocks.count == 2 ? 245 : 185)
     }
 
@@ -206,18 +211,22 @@ enum BuiltinCards {
     static func calendar(structured: Bool) -> CardMarkup {
         let schedule =
             structured
-            ? "<div class='event-date'><strong data-bind='eventDate'></strong><span data-bind='eventTime'></span></div><small class='calm-label' data-bind='eventZone'></small><p class='calm-description' data-bind='eventLocation'></p>"
+            ? """
+                <div class='event-date'><strong data-bind='eventDate'></strong><span data-bind='eventTime'></span></div>
+                <div class='event-meta calm-label'><span data-bind='eventZone'></span><span data-bind='eventDuration'></span></div>
+                <small class='calm-label' data-bind='eventLocal'></small><p class='calm-description' data-bind='eventLocation'></p>
+                """
             : "<p class='calm-description' data-bind='detail'></p>"
         return CardMarkup(
             html:
                 "<section class='calm-surface calendar-preset'><small class='calm-label' data-bind='status'></small><div class='event-heading'><strong class='calm-title' data-bind='title'></strong>"
                 + schedule
                 + "</div><div class='calm-actions'><button class='calm-secondary' data-action='calendar'>Open Calendar</button></div></section>",
-            compactHTML: "<div class='calm-glance'><strong class='calm-value' data-bind='"
-                + (structured ? "eventTime" : "title") + "'></strong>"
-                + (structured ? "<small class='calm-label' data-bind='eventDate'></small>" : "") + "</div>",
+            compactHTML: structured
+                ? "<div class='calm-glance'><small class='calm-label' data-bind='title'></small><strong class='calm-value' data-bind='eventGlance'></strong></div>"
+                : "<div class='calm-glance'><strong class='calm-value' data-bind='title'></strong></div>",
             css:
-                ".calm-surface.calendar-preset{gap:16px}.event-heading{display:grid;gap:8px}.event-date{display:grid;gap:3px}.event-date strong{font-size:13px;font-weight:500}.event-date span{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.3px}.event-heading>p:empty,.event-heading>small:empty{display:none}.event-heading .calm-description{white-space:pre-line}",
+                ".calm-surface.calendar-preset{gap:16px}.event-heading{display:grid;gap:8px}.event-date{display:grid;gap:3px}.event-date strong{font-size:13px;font-weight:500}.event-date span{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.3px}.event-heading>p:empty,.event-heading>small:empty,.event-meta:not(:has(span:not(:empty))){display:none}.event-meta{display:flex;flex-wrap:wrap;gap:8px}.event-heading .calm-description{white-space:pre-line}",
             height: 240)
     }
     static func data(
@@ -251,7 +260,8 @@ enum BuiltinCards {
                 "<span class='weather-low calm-description'>" + escape(englishPresetCopy ? "Low" : row.label) + " <span data-bind='" + row.key + "'></span> "
                     + (row.unitKey.map { "<span class='preset-unit-suffix' data-bind='" + $0 + "'></span>" } ?? escape(row.unit ?? "")) + "</span>"
             } ?? ""
-        let number = "<div class='preset-number'>" + value + unitHTML + "</div>"
+        let alternate = preset.kind == .weather ? "<small class='weather-alternate' data-bind='weatherAlternateTemperature'></small>" : ""
+        let number = "<div class='preset-number'>" + value + unitHTML + alternate + "</div>"
         let hero: String
         if preset.kind == .weather {
             hero =
@@ -266,7 +276,9 @@ enum BuiltinCards {
                 + "</div></div>"
         } else {
             let label = englishPresetCopy && preset.kind == .currency ? "Converted amount" : primary.label
-            hero = "<div class='preset-result'><small class='calm-label'>" + escape(label) + "</small>" + number + "</div>"
+            let rate = preset.kind == .currency
+                ? "<small class='currency-rate' data-bind='currencyRateEquation'></small>" : ""
+            hero = "<div class='preset-result'><small class='calm-label'>" + escape(label) + "</small>" + number + rate + "</div>"
         }
         let controls: String
         if preset.kind == .currency, inputs.count == 3, swap {
@@ -290,10 +302,11 @@ enum BuiltinCards {
                 + "</strong><small class='calm-label'>"
                 + (preset.kind == .weather
                     ? escape(primary.label)
-                        + (preset.contextKey.map { " · <span data-bind='" + $0 + "'></span>" } ?? "")
+                        + (preset.contextKey.map { " <span data-bind='" + $0 + "'></span>" } ?? "")
                     : "<span data-bind='currencyPair'></span>") + "</small></div>",
             css: """
-                .calm-surface.data-preset{gap:14px}.data-preset.currency-preset{gap:12px}.preset-result{display:grid;gap:6px}.preset-place{font-size:16px;font-weight:500;line-height:1.3}.preset-number{display:flex;flex-wrap:wrap;align-items:baseline;gap:7px;font-size:32px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-1px;line-height:1.15;overflow-wrap:anywhere}.preset-unit{font-size:14px;font-weight:500;letter-spacing:0;color:var(--muted)}.data-preset.weather-preset{gap:8px}.weather-low{display:block;margin-top:3px}.weather-heading,.weather-reading{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.weather-condition{display:grid;gap:4px;max-width:125px;text-align:right}.weather-condition small:empty{display:none}.weather-heading small{white-space:nowrap}.weather-preset .preset-number{font-size:36px;letter-spacing:-1px}.weather-preset .preset-result{gap:4px}.weather-preset .preset-details{gap:8px 16px}.weather-preset .preset-place{font-size:13px}.weather-preset .preset-inputs{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:10px}.weather-preset .data-input input,.weather-preset .data-input select{font-size:12px}.weather-preset .preset-unit{font-size:22px}.preset-inputs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.data-input{display:grid;gap:6px;align-content:start;min-width:0}.data-input>span{font-size:11px;font-weight:500;color:var(--muted)}.data-input input,.data-input select{min-width:0;width:100%;font-size:14px}.currency-preset .data-input:first-child{grid-column:1/-1}.currency-preset .data-input:first-child input{font-size:22px;font-weight:500;letter-spacing:-.5px;font-variant-numeric:tabular-nums;padding:7px 12px;min-height:44px;background:transparent}.currency-preset input::-webkit-inner-spin-button,.currency-preset input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}.currency-inputs{grid-template-columns:minmax(0,1fr) 32px minmax(0,1fr);column-gap:10px;row-gap:10px}.currency-swap{align-self:start;margin-top:22px;padding:0;font-size:20px;min-width:32px;min-height:36px}.currency-name{font-size:10px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--muted)}.data-input select{appearance:none;-webkit-appearance:none;min-height:36px;padding:7px 26px 7px 10px}.data-input:has(select){grid-template-columns:minmax(0,1fr) 22px;column-gap:0}.data-input:has(select)>span,.data-input:has(select)>small{grid-column:1/-1}.data-input select{grid-area:2/1/3/3}.data-input:has(select)::after{content:'⌄';grid-area:2/2/3/3;align-self:center;justify-self:center;font-size:14px;color:var(--muted);pointer-events:none}.preset-details{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px}.preset-detail{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px;font-size:13px}.preset-detail>.calm-label{flex-basis:100%}.preset-detail strong{font-size:14px;font-weight:500;overflow-wrap:anywhere}.preset-detail:only-child,.reading-preset .preset-detail:last-child:nth-child(odd){grid-column:1/-1}.data-preset>small:empty,.preset-details:empty{display:none}.data-preset>small{font-size:11px;color:var(--muted)}.data-preset footer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 12px;align-items:center;border-top:1px solid var(--line);padding-top:10px;font-size:10px;color:var(--muted)}.data-preset footer>span:empty{display:none}.data-preset footer>span{overflow-wrap:anywhere;line-height:1.4}.data-preset footer>span:nth-child(2){grid-column:1}.data-preset footer button{grid-column:2;grid-row:1/3;min-height:32px}
+                .currency-rate{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}.currency-rate:empty{display:none}
+                .calm-surface.data-preset{gap:14px}.data-preset.currency-preset{gap:12px}.preset-result{display:grid;gap:6px}.preset-place{font-size:16px;font-weight:500;line-height:1.3}.preset-number{display:flex;flex-wrap:wrap;align-items:baseline;gap:7px;font-size:32px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-1px;line-height:1.15;overflow-wrap:anywhere}.preset-unit{font-size:14px;font-weight:500;letter-spacing:0;color:var(--muted)}.data-preset.weather-preset{gap:8px}.weather-alternate{font-size:12px;letter-spacing:0;font-weight:450;color:var(--muted);white-space:nowrap}.weather-alternate:empty{display:none}.weather-low{display:block;margin-top:3px}.weather-heading,.weather-reading{display:flex;align-items:baseline;justify-content:space-between;gap:12px}.weather-condition{display:grid;gap:4px;max-width:125px;text-align:right}.weather-condition small:empty{display:none}.weather-heading small{white-space:nowrap}.weather-heading:empty{display:none}.weather-preset .preset-number{font-size:36px;letter-spacing:-1px}.weather-preset .preset-result{gap:4px}.weather-preset .preset-details{gap:8px 16px}.weather-preset .preset-place{font-size:13px}.weather-preset .preset-inputs{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:10px}.weather-preset .data-input input,.weather-preset .data-input select{font-size:12px}.weather-preset .preset-unit{font-size:22px}.preset-inputs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.data-input{display:grid;gap:6px;align-content:start;min-width:0}.data-input>span{font-size:11px;font-weight:500;color:var(--muted)}.data-input input,.data-input select{min-width:0;width:100%;font-size:14px}.currency-preset .data-input:first-child{grid-column:1/-1}.currency-preset .data-input:first-child input{font-size:22px;font-weight:500;letter-spacing:-.5px;font-variant-numeric:tabular-nums;padding:7px 12px;min-height:44px;background:transparent}.currency-preset input::-webkit-inner-spin-button,.currency-preset input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}.currency-inputs{grid-template-columns:minmax(0,1fr) 32px minmax(0,1fr);column-gap:10px;row-gap:10px}.currency-swap{align-self:start;margin-top:22px;padding:0;font-size:20px;min-width:32px;min-height:36px}.currency-name{font-size:10px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--muted)}.data-input select{appearance:none;-webkit-appearance:none;min-height:36px;padding:7px 26px 7px 10px}.data-input:has(select){grid-template-columns:minmax(0,1fr) 22px;column-gap:0}.data-input:has(select)>span,.data-input:has(select)>small{grid-column:1/-1}.data-input select{grid-area:2/1/3/3}.data-input .choice-trigger{padding-inline:10px 26px;text-align:start}.data-input:has(select)::after{content:'⌄';grid-area:2/2/3/3;align-self:center;justify-self:center;font-size:14px;color:var(--muted);pointer-events:none}.preset-details{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px}.preset-detail{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px;font-size:13px}.preset-detail>.calm-label{flex-basis:100%}.preset-detail strong{font-size:14px;font-weight:500;overflow-wrap:anywhere}.preset-detail:only-child,.reading-preset .preset-detail:last-child:nth-child(odd){grid-column:1/-1}.data-preset>small:empty,.preset-details:empty{display:none}.data-preset>small{font-size:11px;color:var(--muted)}.data-preset footer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 12px;align-items:center;border-top:1px solid var(--line);padding-top:10px;font-size:10px;color:var(--muted)}.data-preset footer>span:empty{display:none}.data-preset footer>span{overflow-wrap:anywhere;line-height:1.4}.data-preset footer>span:nth-child(2){grid-column:1}.data-preset footer button{grid-column:2;grid-row:1/3;min-height:32px}
                 """, height: preset.kind == .currency ? 310 : 305)
     }
 }

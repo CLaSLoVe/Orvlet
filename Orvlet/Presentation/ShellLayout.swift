@@ -25,6 +25,7 @@ struct ShellLayout: Equatable {
     // Preserve the full anchor while only its presented rail retracts.
     var compactViewport: NSRect? = nil
     var corner = DockCorner(right: false, top: true)
+    var reveal: ShellReveal?
     var presentedCompact: NSRect { compactViewport ?? compact }
     var localCompact: NSRect { local(presentedCompact) }
     var localContent: NSRect { local(content) }
@@ -129,7 +130,7 @@ struct ShellLayout: Equatable {
         return layout.fitting(screen)
     }
 
-    @MainActor func transitioning(from start: ShellLayout, progress: Double) -> ShellLayout {
+    @MainActor func transitioning(from start: ShellLayout, progress: Double, source: NSRect? = nil) -> ShellLayout {
         if progress >= 1 { return self }
         let rail = CalmMotion.blend(start.compact, compact, progress)
         // Keep one content layout throughout the reveal, attached to the moving rail.
@@ -138,8 +139,21 @@ struct ShellLayout: Equatable {
             ? CalmMotion.blend(start.content, self.content, progress)
             : detail.content.offsetBy(dx: rail.minX - detail.compact.minX, dy: rail.maxY - detail.compact.maxY)
         let viewport = CalmMotion.blend(start.presentedCompact, presentedCompact, progress)
+        // A reversal continues the silhouette already on screen, including its source row.
+        var reveal: ShellReveal?
+        if detail.presentedCompact.size == detail.compact.size,
+            start.edge == nil || edge == nil || start.reveal != nil {
+            let from = start.reveal?.fraction ?? (start.edge == nil ? 0 : 1)
+            let to: CGFloat = edge == nil ? 0 : 1
+            reveal = ShellReveal(fraction: from + (to - from) * progress, source: start.reveal?.source ?? source)
+        }
         return ShellLayout(frame: CalmMotion.blend(start.frame, frame, progress), compact: rail,
                           content: content, edge: detail.edge, compactViewport: viewport,
-                          corner: detail.corner)
+                          corner: detail.corner, reveal: reveal)
     }
+}
+
+struct ShellReveal: Equatable {
+    var fraction: CGFloat
+    var source: CGRect?
 }

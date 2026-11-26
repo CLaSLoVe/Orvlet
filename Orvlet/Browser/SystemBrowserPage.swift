@@ -87,6 +87,10 @@ final class SystemBrowserPage: ObservableObject {
             _ = try await connection.call("Runtime.addBinding", ["name": "__orvletWindowPlayerChanged", "executionContextName": "orvlet-input"])
             _ = try await connection.call("Page.addScriptToEvaluateOnNewDocument", ["worldName": "orvlet-input", "source": WindowPlayer.observer])
             _ = try await connection.call("Page.addScriptToEvaluateOnNewDocument", ["source": WindowPlayer.script])
+            if host.native {
+                _ = try await connection.call("Page.addScriptToEvaluateOnNewDocument",
+                    ["source": AdBlocker.helper(enabled: false), "runImmediately": true])
+            }
             try await updateGate()
             try await resizeNow()
             issue = nil
@@ -94,7 +98,8 @@ final class SystemBrowserPage: ObservableObject {
             polling = Task { [weak self] in
                 while let self, !stopped, !Task.isCancelled {
                     do {
-                        if let state = try await evaluate(BrowserController.script + "; window.__orvlet.state()") as? [String: Any],
+                        let adPreference = host.native ? "window.__orvletAds?.setEnabled(\(owner?.model.settings.blockAds == true));" : ""
+                        if let state = try await evaluate(adPreference + BrowserController.script + "; window.__orvlet.state()") as? [String: Any],
                             !stopped, owner?.loading == false, state["url"] as? String != "about:blank" { owner?.updateState(state) }
                     } catch {}
                     do { try await Task.sleep(for: .seconds(1)) } catch { break }

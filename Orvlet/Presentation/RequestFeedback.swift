@@ -1,8 +1,8 @@
 import SwiftUI
 
 struct RequestFeedback: Identifiable {
-    enum Kind { case success, needsInput, authorization, failure, information, attention }
-    let id = UUID()
+    enum Kind { case success, needsInput, authorization, failure, information }
+    let id: UUID
     let text: String
     let kind: Kind
     var replyPrefix: String?
@@ -14,7 +14,6 @@ struct RequestFeedback: Identifiable {
         case .authorization: return "Model access"
         case .failure: return "Needs attention"
         case .information: return "Orvlet"
-        case .attention: return "Time is up"
         }
     }
     var icon: String {
@@ -24,7 +23,6 @@ struct RequestFeedback: Identifiable {
         case .authorization: return "key"
         case .failure: return "exclamationmark.circle"
         case .information: return "bubble.left"
-        case .attention: return "timer"
         }
     }
 }
@@ -41,15 +39,31 @@ extension AppModel {
     /// arriving results never focus the composer or interrupt playback.
     func deliverReply(_ text: String, kind: RequestFeedback.Kind = .success, taskID: UUID? = nil) {
         let owner = taskID ?? activeRequest?.owner?.id ?? activeRequest?.placeholderID ?? UUID()
+        let proof = RequestRun.current?.agent.lastToolVerification
+        let verifiedResult = kind == .success && proof?.needsInput == false && proof?.reply == text
         let messageID = appendMessage(
             text, isUser: false, taskID: owner,
-            requestID: taskID == nil || taskID == activeRequest?.owner?.id ? activeRequest?.id : nil)
+            requestID: taskID == nil || taskID == activeRequest?.owner?.id ? activeRequest?.id : nil, verifiedMemoryResult: verifiedResult)
         if let index = sideTasks.firstIndex(where: { $0.id == owner && $0.kind == .result }) {
             sideTasks[index].detail = text
             sideTasks[index].status =
                 kind == .failure
                 ? "Task failed"
                 : kind == .needsInput ? "Input needed" : kind == .authorization ? "Waiting for model" : "Ready"
+        }
+        if [.needsInput, .failure, .authorization].contains(kind) {
+            guard work.view(owner)?.closed != true else { return }
+            if !commandPanelVisible || conversationTaskID != owner { unreadReplyIDs.insert(messageID) }
+            let destination: ReminderDestination = switch kind {
+            case .needsInput: .reply(prefix: agent.clarificationPrefix)
+            case .authorization: .settings
+            default: .conversation
+            }
+            presentCardReminder(owner, eventID: messageID, message: text,
+                                persistence: .persistent,
+                                destination: destination, saveForRelaunch: true)
+            // The foreground receipt owns presentation when the window delegate is installed.
+            if onRemindersChanged != nil { return }
         }
         guard !commandPanelVisible || conversationTaskID != owner else { return }
         unreadReplyIDs.insert(messageID)
@@ -67,14 +81,13 @@ extension AppModel {
             return
         }
         let receipt = RequestFeedback(
-            text: text, kind: kind, replyPrefix: kind == .needsInput ? agent.clarificationPrefix : nil, taskID: owner)
+            id: messageID, text: text, kind: kind, replyPrefix: kind == .needsInput ? agent.clarificationPrefix : nil, taskID: owner)
         feedback = receipt
         feedbackWakesStack = true
         if !taskShelfVisible { onResize?(windowSize) }
         onShow?()
         refreshStackAttention()
-        if kind == .information { return } // Keep the conversation available for a follow-up.
-        // Problems remain available until read or dismissed, without blinking or sound.
+        guard kind == .success else { return }
         feedbackTask = Task { [weak self] in
             do {
                 try await Task.sleep(for: .seconds(10))
@@ -82,12 +95,7 @@ extension AppModel {
                     try await Task.sleep(for: .seconds(1))
                 }
                 guard let self, self.feedback?.id == receipt.id else { return }
-                if kind == .success {
-                    self.dismissFeedback()
-                } else {
-                    self.feedbackWakesStack = false
-                    self.refreshStackAttention()
-                }
+                self.dismissFeedback()
             } catch {}
         }
     }
@@ -122,6 +130,7 @@ struct RequestFeedbackView: View {
                     .fontWeight(.semibold).lineLimit(1)
                 Spacer(minLength: 0)
                 Button {
+                    model.dismissReminder(feedback.id)
                     model.dismissFeedback()
                 } label: {
                     Image(systemName: "xmark").font(.system(size: 10)).frame(width: 24, height: 24)
@@ -153,6 +162,11 @@ struct RequestFeedbackView: View {
                     feedback.kind == .authorization
                         ? "Open Settings…" : feedback.kind == .needsInput ? "Reply…" : "Chat"
                 ) {
+                    if let reminder = model.reminders.first(where: { $0.id == feedback.id }) {
+                        model.openReminder(reminder)
+                        model.dismissFeedback()
+                        return
+                    }
                     if feedback.kind == .authorization {
                         model.onSettings?()
                         return

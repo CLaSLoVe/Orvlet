@@ -34,34 +34,117 @@ struct CalmTimerControl: View {
     @ObservedObject var model: AppModel
     let task: SideTask
     var body: some View {
+        let entry = model.primaryTimerEntry
+        let actionable = entry.map { !$0.finished || $0.pendingTimerReminderID != nil } ?? false
         HStack(spacing: 6) {
             Button {
                 model.toggleTaskPresentation(task.id)
             } label: {
                 HStack(spacing: 6) {
-                    TaskActivityGlyph(model: model, task: task, symbol: task.finished ? "checkmark" : "timer")
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(task.timerSubject)
-                            .font(.system(size: 9, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary).lineLimit(1)
-                        Text(task.finished ? "Done" : task.state["remaining"] ?? "")
-                            .font(.system(size: 11, weight: .semibold, design: .rounded)).monospacedDigit().lineLimit(1)
-                    }.frame(width: 52, alignment: .leading)
-                }.frame(width: 78, height: 28)
-            }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id, opensTask: true)).help(task.title)
-                .accessibilityLabel(
-                    task.title + ", " + (task.state["remaining"] ?? ""))
-            Button {
-                model.taskRanking.record(task.id, .control)
-                model.timerAction(task.id, action: "toggle")
-            } label: {
-                Image(systemName: task.finished ? "arrow.clockwise" : task.deadline == nil ? "play.fill" : "pause.fill")
-                    .font(.system(size: 9, weight: .medium)).frame(width: 24, height: 28)
-            }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id)).help(
-                task.state["toggleLabel"] ?? "Pause timer"
-            )
-            .accessibilityLabel((task.state["toggleLabel"] ?? "Pause") + " " + task.title)
+                    TaskActivityGlyph(model: model, task: task, symbol: "timer")
+                    if let entry, actionable {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(entry.timerSubject).font(.system(size: 9, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary).lineLimit(1)
+                            Text(entry.finished ? "Time is up" : entry.state["remaining"] ?? "")
+                                .font(.system(size: 11, weight: .semibold, design: .rounded)).monospacedDigit().lineLimit(1)
+                        }.frame(width: 52, alignment: .leading)
+                    } else {
+                        Text("Timer").font(.system(size: 11, weight: .medium, design: .rounded))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }.frame(width: actionable ? 78 : 108, height: 28)
+            }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id, opensTask: true))
+                .help("Open Timer").accessibilityLabel("Open Timer")
+            if let entry, actionable {
+                TimerEntryQuickControl(model: model, entry: entry)
+                    .buttonStyle(TaskCardButtonStyle(model: model, id: task.id))
+            }
         }.frame(width: 108, height: 28)
+    }
+}
+
+private struct TimerEntryQuickControl: View {
+    @ObservedObject var model: AppModel
+    let entry: SideTask
+    var body: some View {
+        let ringing = entry.pendingTimerReminderID != nil
+        let label = (ringing ? "Acknowledge" : entry.state["toggleLabel"] ?? "Pause") + " " + entry.timerSubject
+        Button {
+            model.taskRanking.record(entry.id, .control)
+            if ringing { model.acknowledgeTimerFromTool(entry.id) }
+            else { model.timerAction(entry.id, action: "toggle") }
+        } label: {
+            Image(systemName: ringing ? "checkmark" : entry.deadline == nil ? "play.fill" : "pause.fill")
+                .font(.system(size: 10, weight: .semibold)).frame(width: 24, height: 28)
+        }.help(label).accessibilityLabel(label)
+    }
+}
+
+private struct CapsuleActionButton: View {
+    @ObservedObject var model: AppModel
+    let task: SideTask
+    let action: CapsuleAction
+
+    var body: some View {
+        Button {
+            model.cardAction(task.id, action: action.id, value: nil, fromCapsule: true)
+        } label: {
+            Text(action.label)
+                .font(.system(size: 10, weight: .semibold))
+                .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                .frame(width: action.buttonWidth, height: 22)
+                .background(model.accent.opacity(0.13), in: RoundedRectangle(cornerRadius: 7))
+                .frame(height: 28)
+        }
+        .help(task.title + ", " + action.label)
+        .accessibilityLabel(task.title + ", " + action.label)
+        .accessibilityIdentifier("capsule-action-" + task.id.uuidString)
+    }
+}
+
+/// A moving spectral highlight and a soft reflection share the same inset outline.
+struct CapsuleAttentionEdge: View {
+    let event: CapsuleAttention
+    let reducedMotion: Bool
+    let accent: Color
+    var radius: CGFloat = 10
+    var ongoing = false
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        let outline = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        let strength = event.intensity.edgeStrength
+        if reducedMotion {
+            outline.strokeBorder(accent.opacity(min(1, 0.76 * strength)), lineWidth: 1.4 * strength)
+        } else {
+            TimelineView(.animation(minimumInterval: ongoing ? 1.0 / 30 : nil)) { clock in
+                let elapsed = max(0, clock.date.timeIntervalSince(event.started))
+                let t = min(1, elapsed / CapsuleAttention.duration)
+                let rise = min(1, t / 0.14)
+                let fall = min(1, (1 - t) / 0.33)
+                let opacity = ongoing ? 0.78 : rise * rise * (3 - 2 * rise) * fall * fall * (3 - 2 * fall)
+                let rotation = ongoing ? elapsed.truncatingRemainder(dividingBy: 5) * 72 : 330 * t
+                let start = Angle.degrees(158 + rotation)
+                let cyan = Color(red: 0.10, green: 0.81, blue: 0.94)
+                let violet = Color(red: 0.56, green: 0.36, blue: 1.00)
+                let rose = Color(red: 0.99, green: 0.32, blue: 0.69)
+                let spectrum = AngularGradient(stops: [
+                    .init(color: rose.opacity(0.08), location: 0),
+                    .init(color: rose.opacity(0.84), location: 0.22),
+                    .init(color: violet, location: 0.42),
+                    .init(color: cyan, location: 0.63),
+                    .init(color: Color(red: 0.77, green: 0.98, blue: 1), location: 0.69),
+                    .init(color: cyan.opacity(0.16), location: 0.76),
+                    .init(color: rose.opacity(0.08), location: 1),
+                ], center: .center, startAngle: start, endAngle: start + .degrees(360))
+                ZStack {
+                    outline.strokeBorder(spectrum, lineWidth: 2.8 * strength)
+                        .blur(radius: 2.1).opacity(scheme == .dark ? 0.66 : 0.48)
+                    outline.strokeBorder(spectrum, lineWidth: (scheme == .dark ? 1.2 : 1.45) * strength)
+                }.opacity(opacity)
+            }
+        }
     }
 }
 
@@ -70,12 +153,15 @@ struct CalmTaskControl: View {
     @Environment(\.colorScheme) private var scheme
     @ObservedObject var model: AppModel
     let task: SideTask
-    private var shortcut: TaskSurfaceAction? {
-        task.taskSurface?.actions.first { $0.compactLabel != nil }
+    private var shortcut: CapsuleAction? {
+        if task.kind == .web, model.externalBrowser { return nil }
+        return task.capsuleAction
     }
     var body: some View {
         Group {
-            if let label = task.terminalLabel {
+            if task.kind == .timer {
+                CalmTimerControl(model: model, task: task)
+            } else if let label = task.terminalLabel {
                 HStack(spacing: 4) {
                     Button {
                         model.openTaskConversation(task.id)
@@ -86,7 +172,7 @@ struct CalmTaskControl: View {
                         }.frame(width: 78, height: 28, alignment: .leading)
                     }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id)).help(label)
                     Button {
-                        model.closeTask(task.id)
+                        model.closeTaskTool(task.id)
                     } label: {
                         Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)).frame(
                             width: 24, height: 28
@@ -98,7 +184,7 @@ struct CalmTaskControl: View {
                         }
                     }.buttonStyle(.plain).accessibilityLabel("Acknowledge and close " + task.title)
                 }.frame(width: 108, height: 28)
-            } else if model.isPreparingTask(task) {
+            } else if model.isPreparingTask(task), shortcut == nil {
                 Button {
                     if task.id == model.requestCardID {
                         model.openTaskConversation(task.id)
@@ -116,62 +202,45 @@ struct CalmTaskControl: View {
                         }.frame(width: 82, alignment: .leading)
                     }.frame(width: 108, height: 28)
                 }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id, opensTask: true)).help(
-                    task.title + " · " + model.preparationLabel)
+                    task.title + ", " + model.preparationLabel)
             } else if task.customCompact == true || shortcut != nil {
                 HStack(spacing: 6) {
                     HTMLCardView(
                         markup: task.presentation, compact: true, state: task.state,
                         allowedActions: task.allowedActions,
                         appearance: model.settings.appearance, accent: model.settings.theme.hex,
-                        reduceMotion: model.motionReduced, action: { _, _ in }
+                        reduceMotion: model.motionReduced, compactHasGlyph: shortcut == nil || task.isMediaTask, action: { _, _ in }
                     )
-                    .frame(width: task.kind == .timer || task.isMediaTask || shortcut != nil ? 78 : 108, height: 28)
+                    .frame(width: task.isMediaTask ? 78 : shortcut?.textWidth ?? 108, height: 28)
                     .overlay(alignment: .leading) {
-                        TaskActivityGlyph(model: model, task: task).allowsHitTesting(false)
+                        if shortcut == nil || task.isMediaTask { TaskActivityGlyph(model: model, task: task).allowsHitTesting(false) }
                     }
                     .overlay {
                         WindowDragArea(
                             onClick: { model.toggleTaskPresentation(task.id) },
                             onDoubleClick: { model.openTaskFromDoubleClick(task.id) },
                             delaySingleClick: model.taskClickWillCollapse(task.id),
-                            onOutsideDrop: { model.closeTask(task.id) }, taskID: task.id,
+                            onOutsideDrop: { model.closeTaskTool(task.id) }, taskID: task.id,
                             taskPreview: model.dragAppearance(task.id),
                             dragging: { model.draggingTaskID = $0 ? task.id : nil })
                     }
                     .accessibilityLabel(task.title)
-                    if task.kind == .timer || task.isMediaTask {
+                    if task.isMediaTask {
                         Button {
                             model.taskRanking.record(task.id, .control)
-                            if task.kind == .timer {
-                                model.timerAction(task.id, action: "toggle")
-                            } else {
-                                model.controlMedia(task.id, operation: "toggle")
-                            }
+                            model.controlMedia(task.id, operation: "toggle")
                         } label: {
-                            Image(
-                                systemName: task.kind == .timer
-                                    ? (task.finished
-                                        ? "arrow.clockwise" : task.deadline == nil ? "play.fill" : "pause.fill")
-                                    : task.playing ? "pause.fill" : "play.fill"
-                            )
+                            Image(systemName: task.playing ? "pause.fill" : "play.fill")
                             .font(.system(size: 9, weight: .semibold)).frame(width: 24, height: 28)
                         }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id)).accessibilityLabel(
                             (task.state["toggleLabel"] ?? "Toggle") + " " + task.title)
-                    } else if let shortcut, let label = shortcut.compactLabel {
-                        Button {
-                            model.taskRanking.record(task.id, .control)
-                            model.performTaskAction(task.id, action: shortcut.id, value: nil)
-                        } label: {
-                            Text(label).font(.system(size: 10, weight: .semibold, design: .rounded))
-                                .lineLimit(1).frame(width: 24, height: 28)
-                        }.buttonStyle(TaskCardButtonStyle(model: model, id: task.id))
-                            .accessibilityLabel(task.title + " · " + label)
+                    } else if let shortcut {
+                        CapsuleActionButton(model: model, task: task, action: shortcut)
+                            .buttonStyle(TaskCardButtonStyle(model: model, id: task.id))
                     }
                 }.frame(width: 108, height: 28)
             } else if model.quickMediaTasks.contains(where: { $0.id == task.id }) {
                 CalmMediaControl(model: model, task: task)
-            } else if task.kind == .timer {
-                CalmTimerControl(model: model, task: task)
             } else if let markup = task.markup ?? task.plan?.markup, !markup.compactHTML.isEmpty {
                 HTMLCardView(
                     markup: markup, compact: true, state: task.state, allowedActions: task.allowedActions,
@@ -185,7 +254,7 @@ struct CalmTaskControl: View {
                         onClick: { model.toggleTaskPresentation(task.id) },
                         onDoubleClick: { model.openTaskFromDoubleClick(task.id) },
                         delaySingleClick: model.taskClickWillCollapse(task.id),
-                        onOutsideDrop: { model.closeTask(task.id) },
+                        onOutsideDrop: { model.closeTaskTool(task.id) },
                         taskID: task.id, taskPreview: model.dragAppearance(task.id),
                         dragging: { model.draggingTaskID = $0 ? task.id : nil })
                 }
@@ -215,13 +284,19 @@ struct CalmTaskControl: View {
                 )
                 .shadow(color: Color.black.opacity(scheme == .dark ? 0.08 : 0.035), radius: 2, y: 1)
             }
-            .opacity(model.draggingTaskID == task.id ? 0.3 : 1)
-            .animation(CalmMotion.animation(reduced: model.motionReduced), value: model.draggingTaskID)
+            .overlay {
+                if let event = model.compactAttention(for: task) {
+                    CapsuleAttentionEdge(event: event, reducedMotion: model.motionReduced, accent: model.accent)
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                }
+            }
+            .background { TaskDragSourceMarker(id: task.id) }
+            .opacity(model.draggingTaskID == task.id ? 0 : 1)
             .onHover { hovering = $0 }
             .animation(CalmMotion.response(reduced: model.motionReduced), value: hovering)
             .contextMenu {
                 Button("Chat") { model.openTaskConversation(task.id) }
-                Button("Hide") { model.dismissTask(task.id) }
+                Button("Hide") { model.setToolHidden(task.id, hidden: true) }
             }
     }
 }
@@ -233,18 +308,24 @@ struct CalmStrip: View {
         Group {
             if model.settings.compactLayout == .vertical {
                 VStack(spacing: 4) {
-                    toolbar.frame(width: 120, height: 28)
-                    ForEach(model.ambientTasks) { task in CalmTaskControl(model: model, task: task).transition(.opacity)
+                    toolbar.frame(width: 120, height: 28).modifier(StripSourceBounds(task: nil))
+                    ForEach(model.ambientTasks) { task in
+                        CalmTaskControl(model: model, task: task).modifier(StripSourceBounds(task: task.id))
+                            .transition(.opacity)
                     }
                 }.padding(.vertical, 6).frame(width: 136)
             } else {
                 HStack(spacing: 6) {
-                    toolbar.frame(width: 84, height: 28)
-                    ForEach(model.ambientTasks) { task in CalmTaskControl(model: model, task: task).transition(.opacity)
+                    toolbar.frame(width: 84, height: 28).modifier(StripSourceBounds(task: nil))
+                    ForEach(model.ambientTasks) { task in
+                        CalmTaskControl(model: model, task: task).modifier(StripSourceBounds(task: task.id))
+                            .transition(.opacity)
                     }
                 }.padding(.horizontal, 8).frame(height: 44)
             }
         }
+        .coordinateSpace(name: "compactStrip")
+        .onPreferenceChange(StripSourceBounds.Frames.self) { model.compactSourceFrames = $0 }
         .animation(CalmMotion.layout(reduced: model.motionReduced), value: model.ambientTasks.map(\.id))
         .background { WindowDragArea() }
         .contextMenu {
@@ -276,7 +357,7 @@ struct CalmStrip: View {
                                         : Color(red: 0.88, green: 0.87, blue: 0.94), in: Capsule())
                         }
                     }
-                }.buttonStyle(WindowDragButtonStyle()).help("All tasks · \(model.overflowTaskCount) tucked away")
+                }.buttonStyle(WindowDragButtonStyle()).help("All tasks, \(model.overflowTaskCount) tucked away")
                     .accessibilityLabel("All tasks, \(model.overflowTaskCount) tucked away")
                 Spacer(minLength: 4)
                 Button {
@@ -291,7 +372,7 @@ struct CalmStrip: View {
                                 ).padding(2)
                             }
                         }
-                }.buttonStyle(WindowDragButtonStyle()).help(model.hasUnreadReply ? "Read latest reply" : "Ask Orvlet · " + model.settings.shortcut.title)
+                }.buttonStyle(WindowDragButtonStyle()).help(model.hasUnreadReply ? "Read latest reply" : "Ask Orvlet (" + model.settings.shortcut.title + ")")
                     .accessibilityLabel(model.hasUnreadReply ? "Read latest reply" : "Ask Orvlet")
             }.foregroundStyle(CalmVisualStyle.tint(model.accent, scheme: scheme))
         }
@@ -334,11 +415,12 @@ struct CalmTaskShelf: View {
                 }.foregroundStyle(.secondary)
                     .help(model.taskListEditing ? "Done" : "Edit tasks")
                     .accessibilityLabel(model.taskListEditing ? "Done" : "Edit tasks")
-                Button {
-                    model.selectChat(true)
+                Menu {
+                    Button("Timer") { model.openTimerTool() }
+                    Button("Ask Orvlet…") { model.selectChat(true) }
                 } label: {
                     Image(systemName: "plus").font(.system(size: 11, weight: .medium)).frame(width: 28, height: 28)
-                }.buttonStyle(WindowDragButtonStyle()).foregroundStyle(.secondary)
+                }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().foregroundStyle(.secondary)
                     .help("Add task").accessibilityLabel("Add task")
                 if model.compactRailTucked { PinnedTasksButton(model: model) }
             }.frame(height: 28).background { WindowDragArea() }
@@ -348,16 +430,7 @@ struct CalmTaskShelf: View {
             }
             ScrollView {
                 LazyVStack(spacing: 4) {
-                    ForEach(model.orderedTasks) { task in
-                        row(task)
-                            .overlay(alignment: dropAfter ? .bottom : .top) {
-                                if dropTarget == task.id {
-                                    Capsule().fill(model.accent).frame(height: 2).padding(.horizontal, 6)
-                                        .allowsHitTesting(false)
-                                }
-                            }
-                            .opacity(draggedTask == task.id ? 0.65 : 1)
-                    }
+                    taskRows(model.orderedTasks)
                     if model.listedTasks.isEmpty {
                         Text("Your tasks will appear here.").foregroundStyle(.secondary).font(.system(size: 12))
                             .padding(16)
@@ -368,12 +441,25 @@ struct CalmTaskShelf: View {
             .preferredColorScheme(model.settings.appearance.scheme)
             .onExitCommand { model.taskShelfVisible = false }
     }
+    private func taskRows(_ tasks: [SideTask]) -> some View {
+        ForEach(tasks) { task in
+            row(task)
+                .overlay(alignment: dropAfter ? .bottom : .top) {
+                    if dropTarget == task.id {
+                        Capsule().fill(model.accent).frame(height: 2).padding(.horizontal, 6)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .opacity(draggedTask == task.id ? 0.65 : 1)
+        }
+    }
+
     func rowDrag(_ task: SideTask, opensTask: Bool = false) -> some View {
         TaskDragHandle(
             taskID: task.id,
             onClick: opensTask ? { open(task) } : nil,
             onDoubleClick: opensTask ? { model.openTaskFromDoubleClick(task.id) } : nil,
-            appearance: model.dragAppearance(task.id), close: { model.closeTask(task.id) },
+            appearance: model.dragAppearance(task.id), close: { model.closeTaskTool(task.id) },
             begin: {
                 draggedTask = task.id
                 model.draggingTaskID = task.id
@@ -396,6 +482,18 @@ struct CalmTaskShelf: View {
         model.taskRanking.record(task.id, .open)
         if model.selectTask(task.id, expanded: true) { model.taskShelfVisible = false }
     }
+    private func shelfDetail(_ task: SideTask) -> String {
+        if task.kind == .timer {
+            guard let entry = model.primaryTimerEntry else { return "Ready" }
+            if entry.pendingTimerReminderID != nil { return entry.timerSubject + ", time is up" }
+            if entry.finished { return "Ready" }
+            return entry.timerSubject + ", " + (entry.deadline == nil ? "Paused" : entry.state["remaining"] ?? "")
+        }
+        if let activity = model.taskActivity(task) { return activity.label }
+        if task.hidden { return "Hidden" }
+        return task.status
+    }
+
     func row(_ task: SideTask) -> some View {
         HStack(spacing: 6) {
             Group {
@@ -415,13 +513,7 @@ struct CalmTaskShelf: View {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(task.title).font(.system(size: 12)).lineLimit(1)
-                        Text(
-                            model.taskActivity(task)?.label
-                                ?? (task.hidden
-                                    ? "Hidden"
-                                    : task.kind == .timer && !task.finished
-                                        ? (task.state["remaining"] ?? "") + " · " + task.status : task.status)
-                        )
+                        Text(shelfDetail(task))
                         .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer(minLength: 0)
@@ -431,36 +523,28 @@ struct CalmTaskShelf: View {
             .help("Open " + task.title)
             if model.taskListEditing {
                 Button {
-                    if task.hidden { model.showTask(task.id) }
-                    else { model.dismissTask(task.id) }
+                    model.setToolHidden(task.id, hidden: !task.hidden)
                 } label: {
                     Image(systemName: task.hidden ? "eye" : "eye.slash").frame(width: 26, height: 30)
                 }
                 .help((task.hidden ? "Show " : "Hide ") + task.title)
                 .accessibilityLabel((task.hidden ? "Show " : "Hide ") + task.title)
                 Button {
-                    model.closeTask(task.id)
+                    model.closeTaskTool(task.id)
                 } label: {
                     Image(systemName: "xmark").frame(width: 26, height: 30)
                 }
                 .help("Close " + task.title).accessibilityLabel("Close " + task.title)
-            } else if task.terminalLabel == nil
-                && (task.kind == .timer || model.quickMediaTasks.contains(where: { $0.id == task.id }))
-            {
+            } else if task.kind == .timer, let entry = model.primaryTimerEntry,
+                      !entry.finished || entry.pendingTimerReminderID != nil {
+                TimerEntryQuickControl(model: model, entry: entry)
+            } else if task.terminalLabel == nil && model.quickMediaTasks.contains(where: { $0.id == task.id }) {
                 Button {
                     model.taskRanking.record(task.id, .control)
-                    if task.kind == .timer {
-                        model.timerAction(task.id, action: "toggle")
-                    } else {
-                        model.controlMedia(task.id, operation: "toggle")
-                    }
+                    model.controlMedia(task.id, operation: "toggle")
                 } label: {
-                    Image(
-                        systemName: task.kind == .timer
-                            ? (task.finished ? "arrow.clockwise" : task.deadline == nil ? "play.fill" : "pause.fill")
-                            : task.playing ? "pause.fill" : "play.fill"
-                    )
-                    .font(.system(size: 11)).frame(width: 28, height: 32)
+                    Image(systemName: task.playing ? "pause.fill" : "play.fill")
+                        .font(.system(size: 11)).frame(width: 28, height: 32)
                 }.help(task.state["toggleLabel"] ?? "Toggle").accessibilityLabel(
                     (task.state["toggleLabel"] ?? "Toggle") + " " + task.title)
             }
@@ -472,11 +556,10 @@ struct CalmTaskShelf: View {
             .contextMenu {
                 Button("Chat") { model.openTaskConversation(task.id) }
                 Button(task.hidden ? "Show" : "Hide") {
-                    if task.hidden { model.showTask(task.id) }
-                    else { model.dismissTask(task.id) }
+                    model.setToolHidden(task.id, hidden: !task.hidden)
                 }
                 Divider()
-                Button("Remove from Tasks") { model.closeTask(task.id) }
+                Button("Remove from Tasks") { model.closeTaskTool(task.id) }
             }
             .animation(CalmMotion.response(reduced: model.motionReduced), value: hoveredTask == task.id)
 
@@ -495,6 +578,17 @@ struct CalmMediaRail: View {
 }
 
 extension AppModel {
+    func compactSourceFrame(for task: SideTask?) -> CGRect? {
+        let anchor = task?.kind == .timer ? timerTool?.id : task?.id
+        return compactSourceFrames[anchor] ?? compactSourceFrames[nil]
+    }
+
+    func compactAttention(for task: SideTask) -> CapsuleAttention? {
+        guard task.kind == .timer else { return capsuleAttention[task.id] }
+        return sideTasks.lazy.filter { $0.kind == .timer }
+            .compactMap { self.capsuleAttention[$0.id] }.max { $0.started < $1.started }
+    }
+
     var quickMediaTasks: [SideTask] {
         sideTasks.filter { task in
             task.kind == .web && task.isMediaTask && (task.id == browser.id || parkedBrowsers[task.id] != nil || task.id == dormantLaunchSession?.taskID)
@@ -505,10 +599,6 @@ extension AppModel {
         let media = quickMediaTasks.filter { !$0.hidden }
         let playing = media.first { $0.id == playbackCoordinator.owner && $0.playing } ?? media.first(where: \.playing)
         let timers = visibleTasks.filter { $0.kind == .timer }
-        let firstTimer =
-            timers.filter { $0.finished && $0.status != "Stopped" }.max {
-                ($0.completedAt ?? $0.created) < ($1.completedAt ?? $1.created)
-            } ?? timers.first
         var result = [SideTask]()
         func append(_ task: SideTask?) {
             if let task, work.view(task.id)?.closed != true, !result.contains(where: { $0.id == task.id }) { result.append(task) }
@@ -523,11 +613,11 @@ extension AppModel {
         if !result.contains(where: { $0.isMediaTask }) {
             append(playing ?? media.first(where: { $0.id == preferredMediaTaskID }) ?? media.first)
         }
-        append(firstTimer)
+        append(timers.first)
         for task in media + timers + listedTasks { append(task) }
         return result
     }
-    var orderedTasks: [SideTask] {
+    private var orderedEntries: [SideTask] {
         let fallback = automaticTaskOrder
         let explicit = !taskOrder.isEmpty
         let order = explicit ? taskOrder : learnedTaskOrder
@@ -543,13 +633,20 @@ extension AppModel {
             let urgent = fallback.filter {
                 ($0.id == ambientRequestID && (!$0.isMediaTask || $0.id == fallback.first?.id))
                     || ($0.isMediaTask && $0.playing && !$0.hidden)
-                    || ($0.kind == .timer
-                        && (($0.finished && $0.status != "Stopped") || ($0.deadline != nil && $0.remaining <= 60)))
+                    || $0.timerNeedsAttention
             }
             let urgentIDs = Set(urgent.map(\.id))
             result = urgent + result.filter { !urgentIDs.contains($0.id) }
         }
         return result
+    }
+    var orderedTasks: [SideTask] {
+        var tool = timerTool
+        return orderedEntries.compactMap { task in
+            guard task.kind == .timer else { return task }
+            defer { tool = nil }
+            return tool
+        }
     }
     var ambientTasks: [SideTask] {
         Array(orderedTasks.filter { !$0.hidden }.prefix(min(6, max(1, settings.compactTaskLimit))))
@@ -592,7 +689,7 @@ extension AppModel {
         if !isLiveTest { settings.save() }
         onResize?(windowSize)
     }
-    var overflowTaskCount: Int { listedTasks.count - ambientTasks.count }
+    var overflowTaskCount: Int { listedToolCount - ambientTasks.count }
     var microMediaTasks: [SideTask] {
         ambientTasks.filter { task in quickMediaTasks.contains(where: { $0.id == task.id }) }
     }

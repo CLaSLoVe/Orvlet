@@ -12,8 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.init(model: AppModel())
     }
     init(model: AppModel) { self.model = model; super.init() }
+    var reminderPanel: NSPanel?
     var panel: ShellPanel!
     // Task details stay attached to the compact shell; command input is a separate panel.
+    private var lastRevealSource: CGRect?
     private var lastOrientation: CompactLayout?
     private var wasPinned = false
     private var lastContentSize: NSSize?
@@ -86,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         container.addSubview(hosting)
         panel.contentView = container
         installDismissalMonitors()
+        model.onRemindersChanged = { [weak self] in self?.presentReminders() }
         model.onParkCapsule = { [weak self] in self?.parkCapsuleInCorner() }
         model.onResize = { [weak self] size in self?.resize(to: size) }
         model.onStackOpacity = { [weak self] value in
@@ -185,6 +188,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // A refresh after live resize must keep the exact frame the person released.
             layout = target.fitting(screen)
         }
+        if layout.edge != nil && (!shellMotion.isRunning || model.shellLayout.edge == nil) {
+            lastRevealSource = model.compactSourceFrame(for: model.taskShelfVisible ? nil : model.selectedSideTask)
+        }
         let stayingPinned = wasPinned && model.compactRailTucked
         wasPinned = model.compactRailTucked
         lastShowingWeb = model.showingWeb
@@ -206,17 +212,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if targetShellLayout != layout || (!shellMotion.isRunning && panel.frame != layout.frame) {
             let start = model.shellLayout
             targetShellLayout = layout
-            let duration =
+            var duration =
                 model.motionReduced || !panel.isVisible || (stayingPinned && !shellMotion.isRunning)
                 ? 0 : (layout.edge == nil ? CalmMotion.collapse : CalmMotion.expand)
+            if let reveal = start.reveal, (layout.edge == nil || layout.edge == start.edge) && layout.compactViewport == nil {
+                let remaining = layout.edge == nil ? reveal.fraction : 1 - reveal.fraction
+                duration *= sqrt(max(0, min(1, remaining)))
+            }
             // AppKit enforces minSize immediately. Install the webpage minimum once the
             // transition lands so opening from a small card has no initial size jump.
             panel.minSize = NSSize(width: 44, height: 30)
-            if duration > 0 { applyShellLayout(layout.transitioning(from: start, progress: 0)) }
+            let source = lastRevealSource
+            if duration > 0 { applyShellLayout(layout.transitioning(from: start, progress: 0, source: source)) }
             shellMotion.run(
                 duration: duration, window: panel,
                 update: { [weak self] t in
-                    self?.applyShellLayout(layout.transitioning(from: start, progress: t))
+                    self?.applyShellLayout(layout.transitioning(from: start, progress: t, source: source))
                 }, completion: { [weak panel] in panel?.minSize = minimum })
         } else if !shellMotion.isRunning {
             panel.minSize = minimum
@@ -376,7 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     if self.model.taskShelfVisible {
                         self.model.taskShelfVisible = false
                     } else if !self.model.collapsed, let id = self.model.selectedTaskID {
-                        self.model.closeTask(id)
+                        self.model.closeTaskTool(id)
                     } else {
                         self.model.hide()
                     }
@@ -452,6 +463,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return .terminateLater
     }
     func applicationWillTerminate(_ notification: Notification) {
+        model.stopReminderRepeats()
+        model.stopReminderSound()
         if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor) }
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         model.readinessTask?.cancel()

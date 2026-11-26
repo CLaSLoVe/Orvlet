@@ -15,6 +15,7 @@ enum ResultTools {
         "Arrange retained results without fetching or executing them again. Choose separate for independently kept results, together for a joint reading, select for one tool that switches among results. Existing views are preserved. Presentation does not partition the work goal. A source may produce results before any view exists.",
         ["results": ["type":"array", "minItems":1, "maxItems":6, "items":["type":"string"], "description":"Result IDs returned by tools or listed in retainedResults."],
          "layout": ["type":"string", "enum":["separate","together","select"]],
+         "reminder": CardReminderRule.schema,
          "title": ["type":"string", "maxLength":80],
          "complete": ["type":"boolean"]], required:["results","layout","title"])
 }
@@ -107,8 +108,9 @@ extension AgentController {
             throw ToolArgumentError(path:"$.results", issue:"use saved result IDs returned by acquisition or inspect_results")
         }
         let target = presentationDestination()
+        let rule = try CardReminderRule.decode(input["reminder"])
         let viewIDs = try model.presentWork(ids, layout: layout == "separate" ? .single : layout == "select" ? .select : .together,
-            title: title, destination: target)
+            title: title, destination: target, reminder: rule)
         finishWorkPresentation(keeping:Set(viewIDs))
         taskSurfaceReady = true
         if let id = viewIDs.first { activeTaskID = id }

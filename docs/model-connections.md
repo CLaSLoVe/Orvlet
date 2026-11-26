@@ -14,6 +14,7 @@ Settings → Models offers **GPT** and **Custom**.
 
 - GPT shows one secure OpenAI API Key field and a model picker. The main model uses Responses; OpenAI Decisions automatically uses `gpt-6-luna` with the same credential reference. One connection test checks both services and identifies which service failed.
 - Custom shows the main model's base URL, model ID and key, followed by the Jev key. Protocol, authentication and custom Jev endpoint/model settings remain under Advanced.
+- Advanced model settings accept a context window in tokens. Orvlet defaults to a local budget of 128,000 and estimates the assembled request, including tool schemas and output headroom. For a smaller local model, enter its supported window. The provider applies its own tokenizer and limits.
 - Switching modes preserves saved connections, each provider's credentials and the last selected model. Unsubmitted key edits are retained per credential account. An empty key field keeps the saved key. Third-party GPT gateways remain Custom connections.
 - The built-in GPT list follows the [official model catalog](https://developers.openai.com/api/docs/models); saved model IDs outside that list remain selectable.
 
@@ -37,3 +38,5 @@ References: [OpenAI reasoning guide](https://developers.openai.com/api/docs/guid
 ## Verification
 
 Local HTTP fixtures cover both decision protocols, choice routing, credential-preserving migration, mode round trips, refusals and malformed responses. The complete Models pages are rendered offscreen at production size in both appearances. Tests do not use real credentials or live providers. Run `scripts/check.py model-api state-machines` against a freshly built Debug app.
+
+Latest verification: `.local/checks/20261125-112243/summary.json` — 212 checks passed (80 model/API and 132 state-machine checks), including error-chat persistence, retry deduplication, independent resource recovery, and offscreen views.

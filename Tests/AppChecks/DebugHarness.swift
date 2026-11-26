@@ -27,7 +27,9 @@
             case deliveryMedia = "--delivery-media"
             case deliveryHistory = "--delivery-history"
             case setupCheck = "--setup-check"
+            case generativeLatency = "--generative-latency"
             case stateMachineCheck = "--state-machine-check"
+            case memoryCheck = "--memory-check"
             case systemBrowserCheck = "--system-browser-check"
             case nativeBrowserCheck = "--native-browser-check"
             case consistencyCheck = "--consistency-check"
@@ -60,7 +62,7 @@
             case liveCheck = "--live-check"
             var requiresLiveServices: Bool {
                 switch self {
-                case .modelPolicyProbe, .requestPipelineLive, .calendarCheck, .triageLiveCheck, .fastReuseLiveCheck,
+                case .generativeLatency, .modelPolicyProbe, .requestPipelineLive, .calendarCheck, .triageLiveCheck, .fastReuseLiveCheck,
                     .intentCheck,
                     .demoRecording,
                     .deliveryCheck, .deliveryRestore,
@@ -124,9 +126,14 @@
                 fputs("This check uses external services. Add --allow-live-services to opt in.\n", stderr)
                 exit(2)
             }
-            if CommandLine.arguments.contains("--background-checks"), mode != .stateMachineCheck && mode != .modelAPICheck && mode != .systemBrowserCheck && mode != .nativeBrowserCheck {
+            if CommandLine.arguments.contains("--background-checks"), mode != .stateMachineCheck && mode != .memoryCheck && mode != .modelAPICheck && mode != .systemBrowserCheck && mode != .nativeBrowserCheck && mode != .generativeLatency {
                 fputs("This suite may show windows. It cannot run in background-check mode.\n", stderr)
                 exit(2)
+            }
+            if mode == .generativeLatency {
+                guard CommandLine.arguments.contains("--background-checks") else { exit(2) }
+                Task { await GenerativeLatencyCheck.run() }
+                return true
             }
             if mode == .systemBrowserCheck {
                 Task { await SystemBrowserCheck.start() }
@@ -140,7 +147,74 @@
                 Task { await StateMachineCheck.start() }
                 return true
             }
+            if mode == .memoryCheck {
+                Task { await MemoryCheck.start() }
+                return true
+            }
             let model = delegate.model
+            if mode == .requestPipelineLive, CommandLine.arguments.contains("--audit-work-store") {
+                let saved = WorkRepository(defaults:.standard).snapshot
+                if CommandLine.arguments.contains("--remove-audited-fixture") {
+                    // Only the one unowned fixture created before test-store isolation.
+                    guard saved.goals.isEmpty, saved.attempts.isEmpty, saved.artifacts.count == 1,
+                        let fixture = saved.artifacts.values.first, fixture.title == "Currency conversion",
+                        fixture.goalID == nil, fixture.native == nil, fixture.source == nil,
+                        fixture.values["converted"] != nil else { print("Refused: store is not the audited fixture"); exit(1) }
+                    UserDefaults.standard.removeObject(forKey:"work.v1")
+                    UserDefaults.standard.synchronize()
+                    print("Removed isolated-check residue; other preferences unchanged")
+                    exit(0)
+                }
+                print(JSONText.encode(["goals":saved.goals.count,"artifacts":saved.artifacts.values.map {
+                    ["title":$0.title,"source":$0.source ?? "","hasGoal":$0.goalID != nil] as [String:Any]
+                }]))
+                exit(0)
+            }
+            if mode == .requestPipelineLive, CommandLine.arguments.contains("--diagnose-models") {
+                print(JSONText.encode(["main":model.settings.main.model, "profiles":model.settings.profiles.map { ["id":$0.id,"model":$0.endpoint.model,"host":$0.endpoint.completionURL?.host ?? ""] }]))
+                exit(0)
+            }
+            if mode == .requestPipelineLive, CommandLine.arguments.contains("--probe-selected-model") {
+                Task {
+                    do {
+                        let connection = model.settings.mainConnection
+                        let schema = ToolSchema.function("ready", "Report readiness", ["ok":["type":"boolean"]], required:["ok"])
+                        _ = try await ModelClient.complete(endpoint: connection.endpoint, key: connection.loadKey(),
+                            messages: [["role":"user","content":"Call ready with ok=true."]], tools: [schema],
+                            reasoning:false, requiredTool:"ready", maximumWait:12)
+                        print(JSONText.encode(["model":connection.endpoint.model,"ok":true])); exit(0)
+                    } catch { print(JSONText.encode(["model":model.settings.main.model,"error":error.localizedDescription])); exit(1) }
+                }
+                return true
+            }
+            if mode == .protectionCheck, CommandLine.arguments.contains("--task-dismissal") {
+                Task {
+                    do { try await TaskDismissalCheck.run(); exit(0) }
+                    catch { print(error.localizedDescription); exit(1) }
+                }
+                return true
+            }
+            if mode == .protectionCheck, CommandLine.arguments.contains("--playback-handoff") {
+                Task {
+                    do { try await PlaybackHandoffCheck.run(model); exit(0) }
+                    catch { print(error.localizedDescription); exit(1) }
+                }
+                return true
+            }
+            if mode == .protectionCheck, CommandLine.arguments.contains("--ads-only") {
+                model.isLiveTest = true
+                model.persistHistory = false
+                Task {
+                    do {
+                        try await ProtectionCheck.checkAds(model) { passed, name in
+                            guard passed else { throw AppError.message(name) }
+                            print(name)
+                        }
+                        exit(0)
+                    } catch { print(error.localizedDescription); exit(1) }
+                }
+                return true
+            }
             if mode == .requestPipelineLive, CommandLine.arguments.contains("--verify-credentials") {
                 Task {
                     do { print(JSONText.encode(["checks": try await LocalCredentialsCheck.run()])); exit(0) }

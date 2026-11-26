@@ -22,8 +22,8 @@
             let id = browser.id
             browser.setUserPlaybackPaused(true)
             defer { browser.dispose() }
-            let url = "https://www.youtube.com/watch?v=abcdefghijk"
-            var task = SideTask(id: id, kind: .web, title: "Field recordings")
+            let url = "https://www.youtube.com/watch?v=jfKfPfyJRdk"
+            var task = SideTask(id: id, kind: .web, title: "lofi hip hop radio 📚 beats to relax/study to")
             task.sourceURL = url
             task.status = "Paused"
             task.listening = true
@@ -45,7 +45,7 @@
                 "Non-media tasks still show their completion receipt")
             let failureMessage = model.appendMessage("The previous request was incomplete.", isUser: false, taskID: id)
             let page: [String: Any] = [
-                "url": url, "title": task.title, "channel": "Fixture channel", "hasMedia": true,
+                "url": url, "title": task.title, "channel": "Lofi Girl", "hasMedia": true,
                 "playing": false, "live": true, "mediaPrimary": true, "readyState": 4,
             ]
             model.recordTaskOutcome(id, .failed)

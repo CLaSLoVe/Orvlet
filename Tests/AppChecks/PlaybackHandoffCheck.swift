@@ -36,6 +36,25 @@ enum PlaybackHandoffCheck {
             print(JSONText.encode(["checks":try await PlaybackRestartCheck.local(model),"ok":true]))
             return
         }
+        let live = CommandLine.arguments.contains("--bilibili-source")
+        let timestamp = MusicPlayback(["duration": 375.0, "currentTime": 100.0, "seekable": true])
+        try check(timestamp.endTimeLabel(showRemaining: false, position: timestamp.position) == "6:15"
+            && timestamp.endTimeLabel(showRemaining: true, position: timestamp.position) == "−4:35"
+            && timestamp.endTimeLabel(showRemaining: true, position: 300.5) == "−1:15"
+            && timestamp.endTimeLabel(showRemaining: true, position: 376) == "−0:00",
+            "Switching the time display shows the total or remaining duration, including during a seek")
+        if live {
+            model.beginAmbientRequest("Play the supplied video")
+            model.activeRequest?.browserResourceID = player.id
+            model.activeRequest?.expectsPlayback = true
+            _ = try await player.action(["action":"navigate","url":"https://www.bilibili.com/video/BV1UKitBUEhE/"])
+            model.markPlaybackTask(player.id)
+            try await Task.sleep(for:.seconds(3))
+            print("SOURCE " + JSONText.encode(try await player.observe()))
+            print("ACCESS " + JSONText.encode(["issue":player.sourceAccessIssue ?? "", "playerCard":model.sideTasks.first { $0.id == player.id }?.usesMusicCard == true]))
+            print("MEDIA " + JSONText.encode(try await player.webView.evaluateJavaScript("[...document.querySelectorAll('*')].filter(e=>typeof e.play==='function').map(e=>({tag:e.tagName,type:e.constructor.name,htmlMedia:e instanceof HTMLMediaElement,paused:e.paused,readyState:e.readyState,error:e.error?.message||''}))") ?? []))
+            return
+        }
         player.webView.loadHTMLString("""
         <html><head><title>Field recording</title></head><body>
         <audio id="media" preload="auto" src="http://127.0.0.1:19244/tone.wav" loop></audio>

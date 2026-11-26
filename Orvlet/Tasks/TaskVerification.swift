@@ -37,6 +37,12 @@ enum TaskVerification {
     /// Saved definitions already passed the changed-input gate when first published.
     /// Their checks still execute; fresh inputs may legitimately equal a saved check.
     enum DefinitionOrigin { case generated, saved }
+    static func checkedActionOutput(_ response: [String: Any], at path: String) throws -> [String: String] {
+        do { _ = try GeneratedReminder.fromAction(response) }
+        catch { throw ToolArgumentError(path: path, issue: "Invalid reminder from the handler. " + error.localizedDescription) }
+        return try TaskValues.decode(response)
+    }
+
     static func validateActions(
         _ surface: TaskSurface, runtime: any TaskCodeExecuting, required: Bool, origin: DefinitionOrigin = .generated
     ) async throws {
@@ -90,8 +96,8 @@ enum TaskVerification {
             let input = surface.state.filter { surface.fields.contains($0.key) }.merging(check.input) { _, new in new }
             let output: [String: String]
             do {
-                output = try TaskValues.decode(
-                    try await runtime.run(code: action.code ?? "", input: input, state: surface.state, declaredInputs: surface.fields))
+                let response = try await runtime.run(code: action.code ?? "", input: input, state: surface.state, declaredInputs: surface.fields)
+                output = try checkedActionOutput(response, at: path)
             } catch let error as TaskCodeError {
                 if let expectedError, error.localizedDescription.contains(expectedError) { continue }
                 throw ToolArgumentError(
@@ -106,7 +112,9 @@ enum TaskVerification {
             }
             // Buttons and control_task apply a state patch. An action check may also
             // assert that other displayed values survived the operation.
-            let result = surface.state.merging(input) { _, new in new }.merging(output) { _, new in new }
+            let base = surface.state.merging(input) { _, new in new }
+            try surface.journal?.validatePatch(output, base: base)
+            let result = base.merging(output) { _, new in new }
             guard output.keys.contains(where: { check.expected[$0] != nil }),
                 check.expected.allSatisfy({ result[$0.key] == $0.value }) else {
                 let actual = output.filter { check.expected[$0.key] != nil }

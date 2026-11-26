@@ -35,6 +35,13 @@ struct TaskActivityReceipt {
     }
 }
 
+struct CapsuleAttention {
+    static let duration: TimeInterval = 1.45
+    let eventID: UUID
+    var intensity: ReminderIntensity = .standard
+    let started = Date()
+}
+
 enum TaskIssueSource: String {
     case browser, readings, playback, interface, data, runtime
     var title: String {
@@ -50,38 +57,45 @@ enum TaskIssueSource: String {
 }
 
 extension AppModel {
-    /// Background failures belong in the owning conversation. Never open a
-    /// window, steal focus, or repeat the same incident on every retry.
-    func reportTaskIssue(_ id: UUID, source: TaskIssueSource, detail: String) {
+    /// Keep temporary failures in the task record. The caller promotes a failure
+    /// only after recovery has finished and the person has an action to take.
+    func reportTaskIssue(_ id: UUID, source: TaskIssueSource, detail: String, requiresAttention: Bool = false) {
         let owners = taskIssueOwners(id)
-        var changed = false
         for owner in owners {
             let text = source.title + ": " + String(detail.prefix(2000))
-            if messages.last(where: { $0.taskID == owner && ($0.issueResource ?? $0.taskID) == id
-                && $0.issueSource == source.rawValue && $0.issueResolved != true })?.text == text {
-                continue
+            let previous = messages.lastIndex { $0.taskID == owner && ($0.issueResource ?? $0.taskID) == id
+                && $0.issueSource == source.rawValue && $0.issueResolved != true }
+            let index: Int
+            if let previous, messages[previous].text == text {
+                guard requiresAttention && messages[previous].issuePromoted != true else { continue }
+                index = previous
+            } else {
+                appendMessage(text, isUser: false, taskID: owner)
+                index = messages.index(before: messages.endIndex)
+                messages[index].issueSource = source.rawValue
+                messages[index].issueResource = id
             }
-            let messageID = appendMessage(text, isUser: false, taskID: owner)
-            if let i = messages.firstIndex(where: { $0.id == messageID }) {
-                messages[i].issueSource = source.rawValue
-                messages[i].issueResource = id
+            if requiresAttention {
+                messages[index].issuePromoted = true
+                let messageID = messages[index].id
+                if !commandPanelVisible || conversationTaskID != owner { unreadReplyIDs.insert(messageID) }
+                presentCardReminder(owner, eventID: messageID, message: detail, persistence: .persistent, saveForRelaunch: true)
             }
-            changed = true
-            if !commandPanelVisible || conversationTaskID != owner { unreadReplyIDs.insert(messageID) }
         }
-        if changed { persistConversation() }
     }
     func resolveTaskIssue(_ id: UUID, source: TaskIssueSource) {
         let owners = Set(taskIssueOwners(id))
-        var changed = false
+        var resolved = Set<UUID>()
         for i in messages.indices where messages[i].taskID.map(owners.contains) == true
             && (messages[i].issueResource ?? messages[i].taskID) == id
             && messages[i].issueSource == source.rawValue && messages[i].issueResolved != true {
-            unreadReplyIDs.remove(messages[i].id)
+            resolved.insert(messages[i].id)
             messages[i].issueResolved = true
-            changed = true
         }
-        if changed { persistConversation() }
+        if !resolved.isEmpty {
+            unreadReplyIDs.subtract(resolved)
+            removeReminders { resolved.contains($0.id) }
+        }
     }
     private func taskIssueOwners(_ id: UUID) -> [UUID] {
         if sideTasks.contains(where: { $0.id == id }) { return [id] }
@@ -90,6 +104,7 @@ extension AppModel {
     func loadModelKey(for connection: ModelConnection? = nil) async throws -> String {
         let selected = connection ?? settings.mainConnection
         let key = try await selected.loadKey()
+        if modelAccessIssue != nil { removeReminders { $0.opensSettings } }
         modelAccessIssue = nil
         if feedback?.kind == .authorization { dismissFeedback() }
         return key
@@ -120,7 +135,7 @@ extension AppModel {
             !(activity == .succeeded && task.isMediaTask && task.terminalLabel == nil) {
             return activity
         }
-        if ["Needs attention", "Task failed", "Interrupted · retry"].contains(task.status) { return .failed }
+        if ["Needs attention", "Task failed", "Interrupted. Retry", "Interrupted · retry"].contains(task.status) { return .failed }
         return nil
     }
     /// A recovered resource is not a failed task. Keep the failed request in its
@@ -129,17 +144,17 @@ extension AppModel {
         guard let i = sideTasks.firstIndex(where: { $0.id == id && $0.isMediaTask }),
             sideTasks[i].terminalLabel == nil else { return }
         if taskActivityReceipts[id]?.activity == .failed { taskActivityReceipts[id] = nil }
-        if ["Needs attention", "Task failed", "Interrupted · retry"].contains(sideTasks[i].status) {
+        if ["Needs attention", "Task failed", "Interrupted. Retry", "Interrupted · retry"].contains(sideTasks[i].status) {
             sideTasks[i].status = playing ? "Playing" : "Paused"
         }
     }
-    func recordInterfaceFailure(_ id: UUID, _ error: Error) {
+    func recordInterfaceFailure(_ id: UUID, _ error: Error, userRequested: Bool = true) {
         guard let i = sideTasks.firstIndex(where: { $0.id == id }) else { return }
         Diagnostics.record("interface_failure", ["taskID": id.uuidString, "type": String(describing: type(of: error))])
         sideTasks[i].interfaceIssue = PipelineFailure.presentation.localizedDescription
         if error is ModelAccessError {
             taskActivityReceipts[id] = nil
-            reportModelAccessIssue(error)
+            if userRequested { reportModelAccessIssue(error) }
             persistSideTasks()
             return
         }
@@ -226,6 +241,7 @@ extension AppModel {
                         value["ok"] as? Bool == true
                     else { throw AppError.message("The model didn't confirm tool support.") }
                     mainServiceState = "ready"
+                    removeReminders { $0.opensSettings }
                     if feedback?.kind == .authorization { dismissFeedback() }
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -251,10 +267,6 @@ extension AppModel {
                 } catch {
                     guard !Task.isCancelled else { return }
                     fastServiceState = "unavailable"
-                    if notify && mainServiceState == "ready" {
-                        showConnectionNotice(
-                            "The decision service isn't available. Orvlet will use its default model flow and local task ordering.")
-                    }
                 }
             } else {
                 fastServiceState = fastEnabled ? "unconfigured" : "off"
@@ -262,10 +274,7 @@ extension AppModel {
         }
     }
     private func showConnectionNotice(_ text: String) {
-        feedback = RequestFeedback(text: text, kind: .authorization)
-        feedbackWakesStack = true
-        onResize?(windowSize)
-        onShow?()
-        refreshStackAttention()
+        guard !reminders.contains(where: { $0.opensSettings && $0.message == text }) else { return }
+        deliverReply(text, kind: .authorization)
     }
 }

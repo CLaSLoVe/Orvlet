@@ -4,7 +4,7 @@ import Foundation
 enum AgentContext {
     static let stateKeys: Set<String> = [
         "url", "title", "documentReady", "hasMedia", "playing", "audible", "muted", "volume", "looping",
-        "currentTime", "duration", "seekable", "live", "ended", "adPlaying", "readyState", "mediaError",
+        "currentTime", "duration", "seekable", "live", "ended", "adPlaying", "readyState", "mediaError", "playbackFailed",
         "artist", "readings", "music_queue", "reusable_ui", "error", "loading",
     ]
 

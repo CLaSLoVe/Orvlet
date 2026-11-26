@@ -74,7 +74,7 @@ extension AgentController {
             model.adoptRequestTask(.init(id: id, kind: .timer))
             let timer = model.sideTasks.first { $0.id == id }
             verifyEffect(
-                timer?.finished == true ? "Time is up." : "Timer running · " + (timer?.state["remaining"] ?? ""))
+                timer?.finished == true ? "Time is up." : "Time remaining: " + (timer?.state["remaining"] ?? ""))
             return ["verified": true, "id": id.uuidString]
         case "calendar_clarify":
             guard nativeRequestActive, !unresolvedCalendar else {

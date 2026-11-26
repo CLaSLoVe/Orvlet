@@ -49,6 +49,7 @@ struct ModelOptions: Codable, Equatable {
     var authPrefix = ""
     var reasoning = ModelReasoning.automatic
     var outputTokens = ""
+    var contextWindow: String?
     var tokenParameter = "max_completion_tokens"
     var temperature = ""
     var timeout = ""
@@ -64,6 +65,9 @@ struct ModelOptions: Codable, Equatable {
         return object
     }
     func validate() throws {
+        if let contextWindow, !contextWindow.isEmpty, Int(contextWindow).map({ $0 > 0 }) != true {
+            throw AppError.message("Context window must be a positive token count, or blank.")
+        }
         if !outputTokens.isEmpty, Int(outputTokens).map({ $0 > 0 }) != true {
             throw AppError.message("Output token limit must be a positive whole number, or blank.")
         }

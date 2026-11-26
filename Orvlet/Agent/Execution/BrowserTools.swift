@@ -40,7 +40,13 @@ extension AgentController {
             return ["ok": true, "reused": true]
         case "navigate":
             let destination = input["url"] as? String
-            if let destination { recovery.attemptingPage(destination) }
+            if let destination {
+                if model.playbackSources.avoids(destination), model.activeRequest?.expectsPlayback == true || requestIntent.playbackIntent == "play" {
+                    throw PlaybackSourceUnavailable()
+                }
+                recovery.siteDestination = destination
+                recovery.attemptingPage(destination)
+            }
             if !preparedBrowser {
                 try model.prepareBrowserForNewTask(destination: destination)
                 preparedBrowser = true
@@ -76,6 +82,8 @@ extension AgentController {
                 if !model.collapsed && !model.chatVisible { model.selectChat(false) }
             }
             let page = try await model.performBrowserAction(a)
+            try Task.checkCancellation()
+            guard revision == steeringRevision else { return ["superseded": true] }
             freshSourceLoaded = true
             return context(page, detail: "page")
         case "act":
@@ -83,6 +91,7 @@ extension AgentController {
             if input["action"] as? String == "media", ["play", "toggle"].contains(input["operation"] as? String ?? "") {
                 model.activeRequest?.expectsPlayback = true
                 model.markPlaybackTask(model.browser.id)
+                if model.playbackSources.avoids(model.webURL) { throw PlaybackSourceUnavailable() }
             }
             // Resolve an exact, unique accessible name when a provider omits role.
             // Never interpret arbitrary CSS, aliases or ambiguous matches as a target.
@@ -114,10 +123,27 @@ extension AgentController {
                 throw AppError.message(
                     "The user did not ask to pause. Keep the task running while preparing its interface.")
             }
+            if input["action"] as? String == "click", let target = input["id"] as? String,
+                model.activeRequest?.expectsPlayback == true || requestIntent.playbackIntent == "play",
+                let rows = model.lastObservation["elements"] as? [[String: Any]],
+                let href = rows.first(where: { $0["id"] as? String == target })?["href"] as? String,
+                model.playbackSources.avoidsLink(href, on: model.webURL) { throw PlaybackSourceUnavailable() }
             // Agent page clicks must not toggle an already playing player. Direct
             // human page interaction and native pause controls remain unrestricted.
             input["preservePlayback"] = requestIntent.playbackIntent != "pause"
             if input["action"] as? String == "reload" { input["fresh"] = true }
+            if model.playbackSources.avoids(model.webURL), input["action"] as? String == "reload",
+                model.activeRequest?.expectsPlayback == true || requestIntent.playbackIntent == "play" { throw PlaybackSourceUnavailable() }
+            if input["action"] as? String == "click", let id = input["id"] as? String,
+                let row = (model.lastObservation["elements"] as? [[String: Any]])?.first(where: { $0["id"] as? String == id }),
+                let href = row["href"] as? String, let base = URL(string: model.webURL),
+                let target = URL(string: href, relativeTo: base)?.absoluteURL,
+                target.scheme == "http" || target.scheme == "https" {
+                // Keep the original protected operation through its sign-in redirect.
+                if SiteMemory.Route(target.absoluteString, client: "")?.login != true || recovery.siteDestination == nil {
+                    recovery.siteDestination = target.absoluteString
+                }
+            }
             let actionResult = try await model.performBrowserAction(input)
             if input["action"] as? String == "reload" { freshSourceLoaded = true }
             if actionResult["playbackDeferred"] as? Bool == true { return context(actionResult) }

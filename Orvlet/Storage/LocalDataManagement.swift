@@ -1,6 +1,15 @@
 import Foundation
 import WebKit
 
+struct MemoryListItem: Identifiable {
+    enum Kind { case task, site }
+    let id: String
+    let kind: Kind
+    let title: String
+    let detail: String
+    let updated: Date
+}
+
 enum LocalDataKind: String, CaseIterable, Identifiable {
     case interfaces, web, pages, conversations
     var id: String { rawValue }
@@ -24,8 +33,8 @@ enum LocalDataKind: String, CaseIterable, Identifiable {
         switch self {
         case .interfaces: "User designs and reusable cards"
         case .web: "Temporary page resources"
-        case .pages: "Visited pages and resume points"
-        case .conversations: "Saved messages and drafts"
+        case .pages: "Visited pages, resume points and website experience"
+        case .conversations: "Saved messages, drafts and task memory"
         }
     }
     var confirmation: String {
@@ -34,9 +43,9 @@ enum LocalDataKind: String, CaseIterable, Identifiable {
             "Remove saved user designs and reset reuse to the built-in defaults? The six built-in tools remain available. Open tasks stay as they are."
         case .web:
             "Remove cached page resources? Sign-ins, saved tools and conversations stay. Pages may reload resources next time."
-        case .pages: "Remove recent-page history and saved resume points? Open pages and conversations stay."
+        case .pages: "Remove recent-page history, saved resume points and website experience?"
         case .conversations:
-            "Remove all saved chat messages and drafts? Tasks, built-in tools and model settings stay. This cannot be undone."
+            "Remove all messages, drafts, task memory and website experience from these conversations? This cannot be undone."
         }
     }
 }
@@ -46,7 +55,7 @@ enum LocalDataSize {
         bytes == 0 ? "0 B" : ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
     /// Metadata only, limited to this application's network-cache directories.
-    static func webCacheBytes() -> Int? {
+    nonisolated static func webCacheBytes() -> Int? {
         guard let bundle = Bundle.main.bundleIdentifier else { return nil }
         let fm = FileManager.default
         let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -99,13 +108,63 @@ extension AppModel {
         switch kind {
         case .interfaces:
             (adaptive.cache.defaults.data(forKey: "surfaces.v1")?.count ?? 0) + interfaceMemory.storedBytes
-        case .pages: (preferences.data(forKey: "history")?.count ?? 0) + sessions.storedBytes
-        case .conversations: preferences.data(forKey: "conversation.v1")?.count ?? 0
+        case .pages: (preferences.data(forKey: "history")?.count ?? 0) + sessions.storedBytes + memoryDB.bytes(scope: "site")
+        case .conversations: (preferences.data(forKey: "conversation.v1")?.count ?? 0) + memoryDB.bytes(scope: "task")
         case .web: 0  // The asynchronous browser estimate is separate; never present this as a measured size.
         }
     }
     @discardableResult func clearChatMessages(taskID: UUID? = nil) -> Bool {
         guard canClearChatMessages else { return false }
+        let receipts = Set(messages.filter { $0.pendingReminder != nil && (taskID == nil || $0.taskID == taskID) }.map(\.id))
+        removeReminders { receipts.contains($0.id) }
+        let cleared = eraseConversationData(taskID)
+        if taskID == nil || agent.calendarClarificationTaskID == taskID {
+            agent.calendarClarification = nil
+            agent.calendarClarificationTaskID = nil
+            agent.clarificationPrefix = nil
+        }
+        onCommandResize?(commandWindowHeight)
+        return cleared
+    }
+
+    private var pendingConversationClears: [String: Bool] {
+        preferences.dictionary(forKey: "pendingConversationClear.v1") as? [String: Bool] ?? [:]
+    }
+
+    func hasPendingMemoryClear(_ taskID: UUID) -> Bool {
+        let journal = pendingConversationClears
+        return journal["all"] != nil || journal[taskID.uuidString] != nil
+    }
+
+    private func setClearPhase(_ phase: Bool?, for key: String) {
+        var journal = pendingConversationClears
+        journal[key] = phase
+        if journal.isEmpty { preferences.removeObject(forKey: "pendingConversationClear.v1") }
+        else { preferences.set(journal, forKey: "pendingConversationClear.v1") }
+        preferences.synchronize()
+    }
+
+    // Journal both stores. Once text is gone, a storage retry only clears the derived records.
+    @discardableResult func eraseConversationData(_ taskID: UUID?) -> Bool {
+        let key = taskID?.uuidString ?? "all"
+        setClearPhase(true, for: key)
+        return finishConversationClear(taskID, eraseText: true)
+    }
+
+    private func finishConversationClear(_ taskID: UUID?, eraseText: Bool) -> Bool {
+        let key = taskID?.uuidString ?? "all"
+        if eraseText {
+            eraseConversationText(taskID)
+            setClearPhase(false, for: key)
+        }
+        let tasksCleared = forgetTaskMemory(taskID)
+        let sitesCleared = forgetSiteMemory(taskID: taskID)
+        guard tasksCleared && sitesCleared else { return false }
+        setClearPhase(nil, for: key)
+        return true
+    }
+
+    private func eraseConversationText(_ taskID: UUID?) {
         if let taskID {
             messages.removeAll { $0.taskID == taskID }
             conversationDrafts[taskID] = nil
@@ -122,13 +181,16 @@ extension AppModel {
         } else if let data = try? JSONEncoder().encode(messages) {
             preferences.set(data, forKey: "conversation.v1")
         }
-        if taskID == nil || agent.calendarClarificationTaskID == taskID {
-            agent.calendarClarification = nil
-            agent.calendarClarificationTaskID = nil
-            agent.clarificationPrefix = nil
+    }
+
+    func resumePendingConversationClear() {
+        guard !(preferences === UserDefaults.standard && MemoryDatabase.runsChecks) else { return }
+        for (key, eraseText) in pendingConversationClears {
+            if key == "all" { _ = finishConversationClear(nil, eraseText: eraseText) }
+            else if let taskID = UUID(uuidString: key) {
+                _ = finishConversationClear(taskID, eraseText: eraseText)
+            }
         }
-        onCommandResize?(commandWindowHeight)
-        return true
     }
     @discardableResult func clearLocalData(_ kind: LocalDataKind) async -> Bool {
         guard canClearLocalData else { return false }
@@ -139,7 +201,9 @@ extension AppModel {
             interfaceMemory.resetUserRecipes()
             agent.preparedRequest = nil
         case .web: await browser.clearResourceCache()
-        case .pages: clearRecentSessions()
+        case .pages:
+            guard forgetSiteMemory(taskID: nil) else { return false }
+            clearRecentSessions()
         case .conversations: return clearChatMessages()
         }
         return true

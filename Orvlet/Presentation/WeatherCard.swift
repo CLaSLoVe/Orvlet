@@ -75,6 +75,21 @@ extension APIDataSpec {
         usesEnglishPresetCopy && isWttrWeather && key == "weatherDay"
             ? (["0": "Today", "1": "Tomorrow", "2": "In 2 days"][value] ?? value) : value
     }
+    func alternateTemperature(in state: [String: String]) -> String {
+        guard let card, card.kind == .weather, let primary = displayRows.first(where: { $0.key == card.primaryKey }),
+            let raw = state[primary.key], let number = Double(raw), number.isFinite else { return "" }
+        let unit = (card.unitKey ?? primary.unitKey).flatMap { state[$0] } ?? primary.unit
+        let converted: Double
+        let suffix: String
+        switch unit {
+        case "°C": converted = number * 1.8 + 32; suffix = "°F"
+        case "°F": converted = (number - 32) / 1.8; suffix = "°C"
+        default: return ""
+        }
+        guard converted.isFinite else { return "" }
+        return converted.formatted(.number.precision(.fractionLength(0...1))) + " " + suffix
+    }
+
     var weatherLowKey: String? {
         guard card?.kind == .weather else { return nil }
         return fields.first { $0.pointer.hasSuffix("/mintempC") || $0.pointer.hasSuffix("/mintempF") }?.key

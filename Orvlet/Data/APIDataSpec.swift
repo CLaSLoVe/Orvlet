@@ -52,6 +52,7 @@ struct APIDataSpec: Codable {
     // Compiler-verified multi-segment path inputs. Query inputs remain escaped.
     var pathParameters: [String]? = nil
     var primarySourcePointer: String? = nil
+    var reminder: CardReminderRule? = nil
 
     var keys: Set<String> { Set(fields.map(\.key) + (outputs ?? []).map(\.key)) }
     var derivedKeys: Set<String> { Set((outputs ?? []).map(\.key)).subtracting(fields.map(\.key)) }
@@ -80,6 +81,7 @@ struct APIDataSpec: Codable {
         return rows
     }
     func validated() throws -> APIDataSpec {
+        try reminder?.validate(available: keys.union(inputs?.keys.map { $0 } ?? []))
         _ = try requestURL()
         if let refreshLabel, refreshLabel.count > 80 || refreshLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ToolArgumentError(path: "$.source.refreshLabel", issue: "provide a short button label")
@@ -88,7 +90,7 @@ struct APIDataSpec: Codable {
         let reserved: Set<String> = [
             "title", "status", "detail", "appearance", "accent", "compact", "resultStatus", "sourceRequest",
             "sourceHost", "sourceDate", "sourceChecked", "recordPageURL",
-            "sourceDateDisplay", "currencyFromName", "currencyToName", "currencyPair", "weatherSampleTime",
+            "sourceDateDisplay", "currencyFromName", "currencyToName", "currencyPair", "currencyRateEquation", "weatherSampleTime", "weatherAlternateTemperature",
         ]
         func validKey(_ key: String) -> Bool {
             key.range(of: "^[a-zA-Z][a-zA-Z0-9_]{0,30}$", options: .regularExpression) != nil && !reserved.contains(key)
@@ -228,6 +230,10 @@ struct APIDataSpec: Codable {
         }
         var normalized = bindingVisuals()
         normalized.card = try card?.bound(keys: keys.union(inputKeys), rows: displayRows)
+        if let rate = normalized.card?.rateKey,
+            normalized.card?.kind != .currency || !fields.contains(where: { $0.key == rate && $0.itemPointer == nil }) {
+            throw ToolArgumentError(path: "$.source.card.rateKey", issue: "bind the currency preset to a scalar unit rate from the source")
+        }
         normalized.controls = normalized.inputControls
         for control in normalized.inputControls where control.kind == "select" {
             guard control.accepts(inputs?[control.key] ?? "") else {
@@ -384,7 +390,7 @@ struct APIDataSpec: Codable {
         "type": "object",
         "description": "Acquisition recipe nested inside source; URL, fields, calculation and card belong here.",
         "properties": [
-            "card": DataCardPreset.schema, "visuals": CardVisual.schema,
+            "card": DataCardPreset.schema, "visuals": CardVisual.schema, "reminder": CardReminderRule.schema,
             "refreshLabel": ["type": "string", "description": "Refresh button label in the configured interface language; defaults to Refresh."],
             "refreshSeconds": ["type": "number", "minimum": 15, "maximum": 86400,
                 "description": "Background refresh interval for a changing reading, even when collapsed. Use 60 for current quotes unless requested otherwise; omit for one-time results."],

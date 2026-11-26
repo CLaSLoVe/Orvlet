@@ -45,10 +45,7 @@ Package files and the extension list live under Orvlet’s Application Support d
 Run native builds and checks outside the execution sandbox:
 
 ```sh
-python3 scripts/build-native-chromium.py Debug
-python3 scripts/check.py --skip-build \
-  --app .build-native/Build/Products/Debug/Orvlet.app/Contents/MacOS/Orvlet \
-  native-browser state-machines
+python3 scripts/check.py --native native-browser state-machines
 python3 scripts/build-native-chromium.py Release
 ```
 

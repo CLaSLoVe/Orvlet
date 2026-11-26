@@ -5,6 +5,38 @@ import WebKit
 
 @MainActor
 enum WorkSeparationCheck {
+    static func timerViews(_ model: AppModel) async throws -> [String] {
+        var checks: [String] = []
+        func require(_ condition: Bool, _ message: String) throws {
+            try StateMachineCheck.require(condition, message, &checks)
+        }
+        defer { model.taskClock?.invalidate() }
+        let timer = try model.startTimer(seconds:300,title:"Tea")
+        let timer2 = try model.startTimer(seconds:300,title:"Bread")
+        let resource = model.work.view(timer)!.selected
+        let resource2 = model.work.view(timer2)!.selected
+        let deadline = model.work.artifact(resource)!.native!.deadline
+        let alias = try model.presentWork([resource],layout:.single,title:"Tea",destination:UUID())[0]
+        model.closeTask(timer)
+        try require(resource != resource2 && model.work.artifact(resource)?.native?.deadline == deadline
+            && model.sideTasks.contains(where:{ $0.id == alias && !$0.hidden }), "Same-duration native resources stay distinct and closing a view keeps the timer running")
+        await model.performWorkOperation(resource,action:"stop",fields:[:])?.value
+        try require(model.work.artifact(resource)?.native?.finished == true
+            && model.work.artifact(resource2)?.native?.deadline != nil, "An explicit resource stop leaves the other timer running")
+        model.timerAction(timer, action: "restart")
+        if let index = model.sideTasks.firstIndex(where: { $0.id == timer }) {
+            model.sideTasks[index].deadline = .now.addingTimeInterval(-1)
+        }
+        model.tickTasks()
+        guard let alarm = model.reminders.first(where: { $0.owner == timer }) else {
+            throw AppError.message("The remaining Timer view lost the original countdown’s alarm")
+        }
+        try require(model.timerAlarmView(for: timer) == alias && model.timerEntries.contains { $0.pendingTimerReminderID == alarm.id },
+                    "A countdown with a surviving view delivers one alarm on its original resource")
+        model.acknowledgeTimerFromTool(timer)
+        return checks
+    }
+
     static func run(_ model: AppModel) async throws {
         func require(_ condition: Bool, _ message: String) throws {
             guard condition else { throw AppError.message(message) }
@@ -90,19 +122,7 @@ enum WorkSeparationCheck {
         try model.work.putView(broken)
         try model.projectWorkView(broken.id)
         await model.performWorkOperation(ids[0],action:operation,fields:["group":"6"])?.value
-        let timer = try model.startTimer(seconds:300,title:"Tea")
-        let timer2 = try model.startTimer(seconds:300,title:"Bread")
-        let resource = model.work.view(timer)!.selected
-        let resource2 = model.work.view(timer2)!.selected
-        let deadline = model.work.artifact(resource)!.native!.deadline
-        let alias = try model.presentWork([resource],layout:.single,title:"Tea",destination:UUID())[0]
-        model.closeTask(timer)
-        try require(resource != resource2 && model.work.artifact(resource)?.native?.deadline == deadline
-            && model.sideTasks.contains(where:{ $0.id == alias && !$0.hidden }), "Same-duration native resources stay distinct and closing a view keeps the timer running")
-        await model.performWorkOperation(resource,action:"stop",fields:[:])?.value
-        try require(model.work.artifact(resource)?.native?.finished == true
-            && model.work.artifact(resource2)?.native?.deadline != nil, "An explicit resource stop leaves the other timer running")
-        model.taskClock?.invalidate()
+        for check in try await timerViews(model) { print("PASS " + check) }
         let sourceID = UUID()
         let edit = RequestRun(model:model)
         model.sideTasks.append(SideTask(id:sourceID,kind:.web,title:"Working page"))

@@ -82,12 +82,18 @@ extension AppModel {
         let prior = request.placeholderID ?? (request.owner?.kind == .result ? request.owner?.id : nil)
         if let prior, prior != owner.id {
             taskAliases[prior] = owner.id
+            siteMemory.adopt(prior, as: owner.id)
+            adoptTaskMemory(prior, as: owner.id)
             for index in queuedTaskRequests.indices where queuedTaskRequests[index].taskID == prior {
                 queuedTaskRequests[index].taskID = owner.id
                 queuedTaskRequests[index].isNewTask = false
                 queuedTaskRequests[index].prepared = nil
             }
-            for index in messages.indices where messages[index].taskID == prior { messages[index].taskID = owner.id }
+            if messages.contains(where: { $0.taskID == prior }) {
+                var moved = messages
+                for index in moved.indices where moved[index].taskID == prior { moved[index].taskID = owner.id }
+                messages = moved
+            }
             if conversationTaskID == prior { conversationTaskID = owner.id }
             if let draft = conversationDrafts.removeValue(forKey: prior) { conversationDrafts[owner.id] = draft }
             archivedTaskHistory.removeAll { $0.id == prior }

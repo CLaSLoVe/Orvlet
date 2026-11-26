@@ -62,6 +62,9 @@ struct ModelAdvancedSettings: View {
                             Text("max_tokens").tag("max_tokens")
                         }
                     }
+                    field("Context window (tokens)", placeholder: "128000", value: Binding(
+                        get: { endpoint.options.contextWindow ?? "" },
+                        set: { endpoint.options.contextWindow = $0.isEmpty ? nil : $0 }))
                     field("Request timeout (seconds)", placeholder: "Automatic", value: $endpoint.options.timeout)
                     Toggle("Force required tool calls", isOn: $endpoint.options.forceTools)
                         .toggleStyle(.switch).controlSize(.small)

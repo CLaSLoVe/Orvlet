@@ -32,6 +32,7 @@ enum DataToolPlan {
             ],"required":["label"]]],
             "updatedAt":["type":"string","description":"Optional pointer to the source's publication/update timestamp. Standard timestamp formats are parsed by the host."],
             "refreshSeconds":["type":"number","minimum":15,"maximum":86400],
+            "reminder": CardReminderRule.schema(forKeyDescription: "A named binding or computed output (result0, result1, …). Set refreshSeconds to observe changes in the background."),
             "complete":["type":"boolean"],
         ], required:["source","title","bindings","results"])
 
@@ -209,6 +210,10 @@ enum DataToolPlan {
             refreshSeconds:plan["refreshSeconds"] as? Double,
             card:DataCardPreset(kind:.reading,primaryKey:"result0",unitKey:outputs.first?.unitKey,
                 subject:title,detailKeys:Array(outputs.dropFirst().dropLast().map(\.key)),displayNameKey:"toolSubject"))
+        if var rule = try CardReminderRule.decode(plan["reminder"]) {
+            rule.key = fieldKeys[rule.key] ?? inputKeys[rule.key] ?? rule.key
+            spec.reminder = rule
+        }
         if let binding = results.first?["value"] as? String, let pointer = bindings[binding] {
             spec.primarySourcePointer = canonicalPointer(pointer)
         }

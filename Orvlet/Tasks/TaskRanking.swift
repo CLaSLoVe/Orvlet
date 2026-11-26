@@ -55,9 +55,7 @@ struct TaskHabits: Codable {
         guard hasEvidence else { return tasks.map(\.id) }
         func priority(_ task: SideTask) -> Int {
             if task.id == request { return 3 }
-            if task.kind == .timer
-                && ((task.finished && task.status != "Stopped") || (task.deadline != nil && task.remaining <= 60))
-            {
+            if task.timerNeedsAttention {
                 return 2
             }
             if task.isMediaTask && task.playing { return 1 }

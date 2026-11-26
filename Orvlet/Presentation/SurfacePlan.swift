@@ -197,6 +197,16 @@ struct SurfacePlan: Codable {
             checked.binding = PageBinding(action: "media", operation: "toggleMute")
         }
         checked.binding = try checked.binding.validated(observation: observation)
+        if checked.compactLabel != nil {
+            let elements = observation["elements"] as? [[String: Any]] ?? []
+            guard checked.binding.action == "click", checked.submit == nil, checked.revealSource != true,
+                  let page = observation["url"] as? String, !page.isEmpty,
+                  let target = elements.first(where: { $0["label"] as? String == checked.binding.name && $0["role"] as? String == checked.binding.role }),
+                  target["href"] as? String == nil, target["editable"] as? Bool != true else {
+                throw AppError.message("Choose an observed in-page button for the capsule. Keep navigation and input in the expanded card.")
+            }
+            checked.compactPageURL = page
+        }
         if let submit = checked.submit { checked.submit = try submit.validated(observation: observation) }
         return checked
     }
@@ -283,6 +293,11 @@ struct SurfacePlan: Codable {
         }
         if let actions {
             guard markup != nil, actions.count <= 12 else { throw AppError.message("Too many card actions.") }
+            let shortcuts = actions.compactMap { CapsuleAction(id: $0.id, label: $0.compactLabel) }
+            try CapsuleAction.validate(shortcuts)
+            if let shortcut = shortcuts.first, markup?.boundControlIDs.contains(shortcut.id) != true {
+                throw AppError.message("Bind the capsule action to its existing button on the expanded card.")
+            }
             var ids = Set<String>()
             plan.actions = try actions.map { action in
                 guard action.id.range(of: "^[a-zA-Z][a-zA-Z0-9_-]{0,39}$", options: .regularExpression) != nil,

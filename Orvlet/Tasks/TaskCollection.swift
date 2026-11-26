@@ -75,7 +75,7 @@ extension AppModel {
             sideTasks[i].status =
                 agent.replyKind == .needsInput ? "Waiting for reply" : taskFailed ? "Needs attention" : "Done"
             if !taskFailed && (agent.replyKind == .success || agent.replyKind == .information) && sideTasks[i].terminalLabel == nil {
-                sideTasks[i].terminalLabel = sideTasks[i].title + " · Done"
+                sideTasks[i].terminalLabel = sideTasks[i].title + ", done"
                 sideTasks[i].expires = Date().addingTimeInterval(10)
             }
             if ambientRequestID == id { ambientRequestID = nil }
@@ -123,6 +123,37 @@ extension AppModel {
     }
     var listedTasks: [SideTask] { sideTasks.filter { work.view($0.id)?.closed != true } }
     var visibleTasks: [SideTask] { listedTasks.filter { !$0.hidden } }
+    /// Individual countdowns own their alarms; the shelf and strip share a single tool.
+    var timerEntries: [SideTask] {
+        let ownerIDs = Set(listedTasks.filter { $0.kind == .timer }.map { task in
+            work.view(task.id).flatMap { work.artifact($0.selected)?.native?.id } ?? task.id
+        })
+        return sideTasks.filter { ownerIDs.contains($0.id) && $0.kind == .timer && $0.timerToolLauncher != true }
+    }
+    var primaryTimerEntry: SideTask? {
+        let entries = timerEntries
+        return entries.filter { $0.pendingTimerReminderID != nil }.max { ($0.completedAt ?? $0.created) < ($1.completedAt ?? $1.created) }
+            ?? entries.filter { $0.deadline != nil }.min { ($0.deadline ?? .distantFuture) < ($1.deadline ?? .distantFuture) }
+            ?? entries.first(where: { !$0.finished })
+            ?? entries.max { ($0.completedAt ?? $0.created) < ($1.completedAt ?? $1.created) }
+    }
+    var timerTool: SideTask? {
+        let views = listedTasks.filter { $0.kind == .timer }
+        guard let anchor = views.first(where: { $0.timerToolLauncher == true }) ?? views.min(by: { a, b in
+            a.created == b.created ? a.id.uuidString < b.id.uuidString : a.created < b.created
+        }) else { return nil }
+        var tool = primaryTimerEntry ?? anchor
+        tool.id = anchor.id
+        tool.title = "Timer"
+        tool.terminalLabel = nil
+        tool.hidden = views.allSatisfy(\.hidden)
+        return tool
+    }
+    var listedToolCount: Int {
+        let tasks = listedTasks
+        let timers = tasks.filter { $0.kind == .timer }.count
+        return tasks.count - max(0, timers - 1)
+    }
     var selectedSideTask: SideTask? { visibleTasks.first { $0.id == selectedTaskID } ?? visibleTasks.first }
     func loadSideTasks() {
         taskOrder = (preferences.stringArray(forKey: "taskOrder.v1") ?? []).compactMap(UUID.init(uuidString:))
@@ -143,7 +174,7 @@ extension AppModel {
             }
             if [.workspace, .result].contains(sideTasks[i].kind),
                 ["Preparing…", "Working…", "Queued", "Calculating…"].contains(sideTasks[i].status) {
-                sideTasks[i].status = "Interrupted · retry"
+                sideTasks[i].status = "Interrupted. Retry"
             }
         }
         for task in sideTasks where task.taskSurface != nil { migrateWorkSurface(task) }
@@ -158,6 +189,11 @@ extension AppModel {
         work.save()
         scheduleDataRefresh()
         for artifact in work.snapshot.artifacts.values where artifact.definition.runtime != nil { taskRuntime.attach(artifact.id) }
+        for task in sideTasks {
+            guard let alarm = task.pendingTimerReminderID, timerAlarmView(for: task.id) != nil else { continue }
+            presentTimerAlarm(for: task, eventID: alarm, restoring: true)
+        }
+        restoreMessageReminders()
         reconcileTasks()
         refreshTaskClock()
     }
@@ -199,7 +235,8 @@ extension AppModel {
         }
     }
     func taskClickWillCollapse(_ id: UUID) -> Bool {
-        !collapsed && !taskShelfVisible && !commandPanelVisible && selectedTaskID == id
+        guard !collapsed, !taskShelfVisible, !commandPanelVisible else { return false }
+        return selectedTaskID == id || (selectedSideTask?.kind == .timer && timerTool?.id == id)
     }
     func openHandoff(_ url: URL, taskID: UUID) {
         if selectedTaskID == taskID, let source = handoffSource, source.taskID == taskID, source.destination == url {
@@ -213,7 +250,7 @@ extension AppModel {
             webExpanded = true
             onResize?(windowSize)
         } catch {
-            deliverReply(userText("无法读取这份原件。", "Could not read this source."), kind: .attention, taskID: taskID)
+            deliverReply(userText("无法读取这份原件。", "Could not read this source."), kind: .failure, taskID: taskID)
         }
     }
     func openTaskFromDoubleClick(_ id: UUID) {
@@ -221,7 +258,7 @@ extension AppModel {
         taskRanking.record(id, .open)
         if let file = task.workFile {
             guard let url = try? file.existingURL() else {
-                deliverReply(userText("找不到或无法打开这份文件。", "This file is missing or could not be opened."), kind: .attention, taskID: id)
+                deliverReply(userText("找不到或无法打开这份文件。", "This file is missing or could not be opened."), kind: .failure, taskID: id)
                 return
             }
             openHandoff(url, taskID: id)
@@ -277,7 +314,7 @@ extension AppModel {
         onResize?(windowSize)
         onShow?()
         refreshHover()
-        if expanded && task.kind != .web && !task.generated { decorateTask(id) }
+        if expanded && task.kind != .web && task.kind != .timer && !task.generated { decorateTask(id) }
         return true
     }
 
@@ -298,6 +335,33 @@ extension AppModel {
         sideTasks[i].expires = nil
         persistSideTasks()
         reconcileTasks()
+    }
+    func setToolHidden(_ id: UUID, hidden: Bool) {
+        guard sideTasks.first(where: { $0.id == id })?.kind == .timer else {
+            if hidden { dismissTask(id) } else { showTask(id) }
+            return
+        }
+        let ids = Set(listedTasks.filter { $0.kind == .timer }.map(\.id))
+        for index in sideTasks.indices where ids.contains(sideTasks[index].id) {
+            let entryID = sideTasks[index].id
+            if hidden { work.hideView(entryID) } else { work.showView(entryID) }
+            sideTasks[index].hidden = hidden
+            sideTasks[index].expires = nil
+        }
+        if hidden {
+            taskRanking.record(id, .hide)
+            if let selectedTaskID, ids.contains(selectedTaskID), !taskShelfVisible { collapse() }
+        }
+        persistSideTasks()
+        reconcileTasks()
+    }
+    func closeTaskTool(_ id: UUID) {
+        guard sideTasks.first(where: { $0.id == id })?.kind == .timer else {
+            closeTask(id)
+            return
+        }
+        for entry in listedTasks where entry.kind == .timer { closeTask(entry.id) }
+        refreshTaskClock()
     }
     func upsertWebTask(_ plan: SurfacePlan? = nil, activate: Bool = false) {
         guard !webURL.isEmpty else { return }
@@ -422,18 +486,34 @@ extension AppModel {
         if sideTasks[i].liveValues != bound { sideTasks[i].liveValues = bound }
     }
     func closeTask(_ id: UUID) {
-        if work.view(id) != nil {
+        if let view = work.view(id) {
             work.closeView(id)
+            let retainedAlarm = timerAlarmView(for: id) == nil ? nil : sideTasks.first { $0.id == id }?.pendingTimerReminderID
+            if retainedAlarm == nil { clearPendingTimerAlarm(for: id) }
+            removeReminders { $0.owner == id && $0.id != retainedAlarm }
             if let task = sideTasks.first(where: { $0.id == id }) { archiveTaskHistory(task) }
-            if let view = work.view(id), work.artifact(view.selected)?.native?.id == id,
-                let index = sideTasks.firstIndex(where: { $0.id == id }) {
-                sideTasks[index].hidden = true
-            } else { sideTasks.removeAll { $0.id == id } }
+            try? projectWorkView(id)
+            for artifactID in view.artifacts {
+                guard !work.hasOpenView(for: artifactID), let resource = work.artifact(artifactID)?.native else { continue }
+                if resource.kind == .web {
+                    closeWebTask(resource.id)
+                } else if resource.kind == .timer {
+                    clearPendingTimerAlarm(for: resource.id)
+                    guard let i = sideTasks.firstIndex(where: { $0.id == resource.id }), sideTasks[i].deadline != nil else { continue }
+                    sideTasks[i].pausedSeconds = sideTasks[i].remaining
+                    sideTasks[i].deadline = nil
+                    sideTasks[i].resumeOnHistoryRestore = true
+                    sideTasks[i].status = "Paused"
+                    refreshTaskClock()
+                }
+            }
             if selectedTaskID == id && !taskShelfVisible { collapse() }
             persistSideTasks()
             reconcileTasks()
             return
         }
+        clearPendingTimerAlarm(for: id)
+        removeReminders { $0.owner == id }
         adaptive.blockedSources.remove(id)
         stopTaskActions(id)
         if ownsRequest(id) && busy { stopCommand(for: id) }
@@ -497,7 +577,7 @@ extension AppModel {
         Array(parkedBrowsers.values).sorted { $0.id.uuidString < $1.id.uuidString } + [browser]
     }
     /// UI opening and execution share the same restoration job and task identity.
-    private func beginTaskSourceRestore(_ task: SideTask) throws -> Task<Void, Error> {
+    private func beginTaskSourceRestore(_ task: SideTask, replacingMedia: Bool = false) throws -> Task<Void, Error> {
         if let job = taskSourceRestorations[task.id] { return job }
         guard let raw = task.sourceURL, let url = URL(string: raw),
             ["https", "http"].contains(url.scheme?.lowercased() ?? "")
@@ -528,8 +608,19 @@ extension AppModel {
                     restored.setUserPlaybackPaused(true, origin: "restore_saved_task")
                     await restored.applyPlaybackPolicy()
                 }
-                var page = try await restored.action(["action": "navigate", "url": raw])
-                if let saved {
+                if replacingMedia && task.isMediaTask && playbackSources.avoids(raw) {
+                    if dormantLaunchSession?.taskID == id { dormantLaunchSession = nil }
+                    return
+                }
+                let replacement = task.isMediaTask ? try await savedPlaybackReplacement(raw, title: task.title, task: task) : nil
+                let source = replacement?.selected.url ?? raw
+                try Task.checkCancellation()
+                guard !restored.disposed else { throw CancellationError() }
+                var page = try await restored.action(["action": "navigate", "url": source])
+                try Task.checkCancellation()
+                restored.restoredPlaybackReplacement = replacement
+                if var saved {
+                    if source != raw { saved.url = source; saved.position = 0 }
                     page = try await restoredObservation(page, entry: saved, browser: restored)
                     await restoreMediaSettings(saved, page: page, browser: restored)
                 }
@@ -539,7 +630,7 @@ extension AppModel {
                 }
                 if let plan = saved?.plan ?? task.plan, let checked = try? plan.validated(observation: page) {
                     sideTasks[i].plan = checked
-                    restored.rememberMediaSurface(checked, url: raw)
+                    restored.rememberMediaSurface(checked, url: source)
                     try await restored.bindReadings(checked.readings ?? [])
                     try Task.checkCancellation()
                 } else {
@@ -566,22 +657,22 @@ extension AppModel {
         taskSourceRestorations[id] = job
         return job
     }
-    func wakeDormantSource(_ id: UUID) async throws {
+    func wakeDormantSource(_ id: UUID, replacingMedia: Bool = false) async throws {
         guard dormantLaunchSession?.taskID == id else { return }
-        guard let task = listedTasks.first(where: { $0.id == id }) else { throw CancellationError() }
-        try await beginTaskSourceRestore(task).value
+        guard let task = sideTasks.first(where: { $0.id == id }) else { throw CancellationError() }
+        try await beginTaskSourceRestore(task, replacingMedia: replacingMedia).value
         try Task.checkCancellation()
         // A direct Play from the restored capsule becomes the active session
         // when the shell has no other page open, so its progress is saved.
         if webURL.isEmpty { try activateTaskSource(id) }
     }
 
-    func prepareTaskSource(_ id: UUID) async throws {
+    func prepareTaskSource(_ id: UUID, replacingMedia: Bool = false) async throws {
         guard let task = sideTasks.first(where: { $0.id == id }), task.kind == .web else { throw CancellationError() }
         if let job = taskSourceRestorations[id] {
             try await job.value
         } else if dormantLaunchSession?.taskID == id || (browser.id != id && parkedBrowsers[id] == nil) {
-            try await beginTaskSourceRestore(task).value
+            try await beginTaskSourceRestore(task, replacingMedia: replacingMedia).value
         }
         try Task.checkCancellation()
         try activateTaskSource(id)
@@ -678,18 +769,28 @@ extension AppModel {
         return true
     }
     func closeWebTask(_ id: UUID) {
+        stopCommand(for: id)
+        if dormantLaunchSession?.taskID == id { dormantLaunchSession = nil }
         musicJobs.removeValue(forKey: id)?.cancel()
         musicRevisions.removeValue(forKey: id)
         musicLoading.remove(id)
         musicPlayback.removeValue(forKey: id)
         musicQueueExpanded.remove(id)
         musicErrors.removeValue(forKey: id)
-        if let task = sideTasks.first(where: { $0.id == id }) { archiveTaskHistory(task) }
+        if var task = sideTasks.first(where: { $0.id == id }) {
+            archiveTaskHistory(task)
+            if work.view(id)?.closed == true {
+                if task.isMediaTask { task.status = "Paused" }
+                task.playing = false
+                task.listening = false
+                _ = work.syncNative(task, goalID: nil)
+            }
+        }
         taskSourceRestorations.removeValue(forKey: id)?.cancel()
         stopTaskActions(id)
         if preferredMediaTaskID == id { preferredMediaTaskID = nil }
         if id == browser.id {
-            if busy && agent.operatedPage { cancel() }
+            if busy && agent.operatedPage && requestPageID == id { cancel() }
             adaptive.invalidate()
             cancelRestoration()
             endBackgroundListening(clearTaskIntent: true)
@@ -711,10 +812,10 @@ extension AppModel {
         persistSideTasks()
         reconcileTasks()
     }
-    func cardAction(_ id: UUID, action: String, value: String?) {
+    func cardAction(_ id: UUID, action: String, value: String?, fromCapsule: Bool = false) {
         if !["expand","dismiss","source","calendar"].contains(action), let view = work.view(id),
             let native = work.artifact(view.selected)?.native, native.id != id {
-            cardAction(native.id,action:action,value:value)
+            cardAction(native.id,action:action,value:value,fromCapsule:fromCapsule)
             return
         }
         taskRanking.record(id, .control)
@@ -773,6 +874,7 @@ extension AppModel {
                     var arguments = binding.dictionary
                     if let value { arguments["text"] = value }
                     if externalBrowser && id == browser.id {
+                        guard !fromCapsule else { return }
                         _ = try await performBrowserAction(arguments)
                     } else if let controller {
                         // Validate against the owning page just before execution, not another task's page.
@@ -786,6 +888,13 @@ extension AppModel {
                             checked = nil
                         }
                         arguments = try (checked?.binding ?? binding).validated(observation: observation).dictionary
+                        if fromCapsule {
+                            guard let expected = bound?.compactPageURL, expected == observation["url"] as? String,
+                                  bound?.compactLabel != nil, checked?.binding.action == "click" else {
+                                throw AppError.message("The source page has changed.")
+                            }
+                            arguments["expectedPage"] = expected
+                        }
                         if let value { arguments["text"] = value }
                         _ = try await controller.action(arguments)
                         if let submit = checked?.submit { _ = try await controller.action(submit.dictionary) }
@@ -804,7 +913,7 @@ extension AppModel {
                 } catch {
                     guard sideTasks.contains(where: { $0.id == id }) else { return }
                     if let i = sideTasks.firstIndex(where: { $0.id == id }) {
-                        sideTasks[i].status = "Control changed · open page"
+                        sideTasks[i].status = "Control changed. Open page"
                     }
                     deliverReply(
                         "This page control is no longer available. Open its source page to continue.", kind: .failure,
@@ -813,13 +922,14 @@ extension AppModel {
             }
         }
     }
-    @discardableResult func startTimer(seconds: Double, title: String = "Timer", receivedAt: Date = Date()) throws
+    @discardableResult func startTimer(seconds: Double, title: String = "Timer", receivedAt: Date = Date(), keepExpanded: Bool = false) throws
         -> UUID
     {
         guard seconds.isFinite, seconds >= 1, seconds <= 86400 * 7 else {
             throw AppError.message("Choose a timer between one second and seven days.")
         }
         ToolExecutionScope.current?.effectStarted = true
+        let stayOpen = keepExpanded || (!collapsed && !commandPanelVisible && !taskShelfVisible && selectedSideTask?.kind == .timer)
         var task = SideTask(kind: .timer, title: title.isEmpty ? "Timer" : String(title.prefix(80)))
         task.created = receivedAt
         task.duration = seconds
@@ -828,8 +938,8 @@ extension AppModel {
         sideTasks.append(task)
         selectedTaskID = task.id
         ambientRequestID = task.id
-        collapsed = true
-        clickExpanded = false
+        collapsed = !stayOpen
+        clickExpanded = stayOpen
         webExpanded = false
         persistSideTasks()
         refreshTaskClock()
@@ -838,10 +948,32 @@ extension AppModel {
         if task.deadline! <= Date() { tickTasks() }
         return task.id
     }
+    func openTimerTool() {
+        if let tool = timerTool {
+            selectTask(tool.id, expanded: true)
+            return
+        }
+        var launcher = SideTask(kind: .timer, title: "Timer")
+        launcher.timerToolLauncher = true
+        launcher.finished = true
+        launcher.status = "Ready"
+        sideTasks.append(launcher)
+        persistSideTasks()
+        selectTask(launcher.id, expanded: true)
+    }
+    @discardableResult
+    func startTimerFromTool(seconds: Double, title: String) throws -> UUID {
+        try startTimer(seconds: seconds, title: title, keepExpanded: true)
+    }
+    func acknowledgeTimerFromTool(_ id: UUID) {
+        guard let event = sideTasks.first(where: { $0.id == id })?.pendingTimerReminderID else { return }
+        dismissReminder(event)
+    }
     func timerAction(_ id: UUID, action: String) {
         guard ["toggle", "stop", "restart", "addMinute"].contains(action),
-            let i = sideTasks.firstIndex(where: { $0.id == id && $0.kind == .timer }) else { return }
+            let i = sideTasks.firstIndex(where: { $0.id == id && $0.kind == .timer && $0.timerToolLauncher != true }) else { return }
         guard action != "addMinute" || !sideTasks[i].finished else { return }
+        clearPendingTimerAlarm(for: id)
         var task = sideTasks[i]
         task.resumeOnHistoryRestore = nil
         if action == "addMinute", !task.finished {
@@ -858,8 +990,8 @@ extension AppModel {
             task.finished = true
             task.hidden = false
             task.status = "Stopped"
-            task.terminalLabel = task.title + " · Stopped"
-            task.expires = Date().addingTimeInterval(10)
+            task.terminalLabel = task.title + ", stopped"
+            task.expires = nil
         } else if action == "restart" || task.finished {
             task.terminalLabel = nil
             task.expires = nil
@@ -905,15 +1037,19 @@ extension AppModel {
                 sideTasks[i].finished = true
                 sideTasks[i].completedAt = Date()
                 sideTasks[i].status = "Time is up"
-                sideTasks[i].hidden = false
                 sideTasks[i].pausedSeconds = 0
-                sideTasks[i].terminalLabel = sideTasks[i].title + " · Done"
-                sideTasks[i].expires = Date().addingTimeInterval(10)
-                ambientRequestID = sideTasks[i].id
-                if selectedTaskID == nil { selectedTaskID = sideTasks[i].id }
-                if !isLiveTest { NSSound.beep() }
-                deliverReply(sideTasks[i].title + " · Time is up.", kind: .attention, taskID: sideTasks[i].id)
-                onShow?()
+                sideTasks[i].terminalLabel = sideTasks[i].title + ", done"
+                sideTasks[i].expires = nil
+                if timerAlarmView(for: sideTasks[i].id) != nil {
+                    if !sideTasks[i].hidden {
+                        ambientRequestID = sideTasks[i].id
+                        if selectedTaskID == nil { selectedTaskID = sideTasks[i].id }
+                    }
+                    let task = sideTasks[i]
+                    let event = appendMessage(task.timerAlarmText, isUser: false, taskID: task.id)
+                    sideTasks[i].pendingTimerReminderID = event
+                    presentTimerAlarm(for: task, eventID: event)
+                }
                 changed = true
             }
             if let end = sideTasks[i].expires, end <= Date(), !sideTasks[i].hidden {
@@ -925,6 +1061,8 @@ extension AppModel {
                 changed = true
             }
         }
+        // The countdown is derived from its deadline, so ordinary seconds do not mutate sideTasks.
+        if !cardReminderValues.isEmpty { observeCardReminders() }
         objectWillChange.send()
         if changed {
             persistSideTasks()
@@ -941,7 +1079,7 @@ extension AppModel {
         task.detail = [event["start"] as? String, event["end"] as? String, event["location"] as? String].compactMap {
             $0
         }.filter { !$0.isEmpty }.joined(separator: "\n")
-        task.terminalLabel = task.title + " · " + task.status
+        task.terminalLabel = task.title + ", " + task.status
         task.expires = Date().addingTimeInterval(10)
         sideTasks.append(task)
         selectedTaskID = task.id

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run local Debug-app suites serially; never select a live/provider check."""
+"""Run local Debug-app suites, or an explicitly selected live generation benchmark."""
 from __future__ import annotations
 
 import argparse
@@ -16,8 +16,11 @@ import tempfile
 from pathlib import Path
 from urllib.request import urlopen
 
+from build_workspace import native_check_profile, use_workspace
+
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = {
+    'memory': ('--memory-check', 'orvlet-memory-checks.json'),
     'state-machines': ('--state-machine-check', 'orvlet-state-machine-checks.json'),
     'system-browser': ('--system-browser-check', 'orvlet-system-browser-checks.json'),
     'native-browser': ('--native-browser-check', 'orvlet-native-browser-checks.json'),
@@ -41,7 +44,7 @@ SUITES = {
 
 
 # Only these suites are audited to avoid visible windows, activation and user media.
-BACKGROUND_SUITES = ('state-machines', 'model-api')
+BACKGROUND_SUITES = ('state-machines', 'model-api', 'memory')
 
 def verify_report(path: Path, started: float) -> int:
     if not path.is_file() or path.stat().st_mtime < started:
@@ -55,12 +58,23 @@ def verify_report(path: Path, started: float) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--skip-build', action='store_true')
+    build_mode = parser.add_mutually_exclusive_group()
+    build_mode.add_argument('--skip-build', action='store_true')
+    build_mode.add_argument('--native', action='store_true', help='Build and test native Chromium in a temporary directory')
     parser.add_argument('--app', type=Path, help='Explicit native test executable')
+    parser.add_argument('--generative-latency', type=Path, metavar='REPORT_DIR',
+                        help='Opt in to a live provider benchmark with synthetic requests in offscreen windows')
+    parser.add_argument('--latency-repeats', type=int, choices=range(1, 11), metavar='N', default=1,
+                        help='Independent cold-design trials per synthetic task (1–10)')
+    parser.add_argument('--latency-case', metavar='CASE', help='Run one named synthetic case')
     parser.add_argument('--full', action='store_true', help='Run all background-safe suites; add --show-ui for visible UI suites')
     parser.add_argument('--show-ui', action='store_true', help='Explicitly allow test windows and focus changes')
     parser.add_argument('suites', nargs='*', help=', '.join(SUITES))
     args = parser.parse_args()
+    if not args.generative_latency and (args.latency_case or args.latency_repeats != 1):
+        parser.error('Latency options require the live benchmark')
+    if args.generative_latency and (args.full or args.suites or args.show_ui):
+        parser.error('Run the background live benchmark separately from local suites')
     if args.full and args.suites:
         parser.error('Choose --full or explicit suites, not both')
     selected = list(dict.fromkeys(args.suites or (list(SUITES) if args.full and args.show_ui else BACKGROUND_SUITES)))
@@ -73,11 +87,39 @@ def main() -> int:
     signal.signal(signal.SIGTERM, interrupted)
     if sys.platform != 'darwin':
         parser.error('Native checks require a logged-in macOS desktop session')
-    if not args.skip_build:
-        subprocess.run([str(ROOT / 'scripts/build.sh'), 'Debug'], cwd=ROOT, check=True)
-    app = args.app.resolve() if args.app else ROOT / '.build/Build/Products/Debug/Orvlet.app/Contents/MacOS/Orvlet'
-    if not app.is_file():
-        parser.error('Debug app missing; run scripts/build.sh Debug first')
+    executable = Path('Build/Products/Debug/Orvlet.app/Contents/MacOS/Orvlet')
+    if args.native and args.app:
+        parser.error('--native builds its own test executable')
+    if args.skip_build:
+        app = args.app.resolve() if args.app else ROOT / '.build' / executable
+        if not app.is_file():
+            parser.error('Debug app missing; build a Debug app or omit --skip-build')
+        return run_suites(args, parser, selected, app)
+
+    with tempfile.TemporaryDirectory(prefix='orvlet-test-build-') as temporary:
+        build_root = Path(temporary)
+        if args.native:
+            subprocess.run([sys.executable, str(ROOT / 'scripts/build-native-chromium.py'),
+                            'Debug', '--build-root', temporary], cwd=ROOT, check=True)
+        else:
+            subprocess.run([str(ROOT / 'scripts/build.sh'), 'Debug'], cwd=ROOT, check=True,
+                           env={**os.environ, 'ORVLET_DERIVED_DATA': temporary})
+        app = args.app.resolve() if args.app else build_root / executable
+        if not app.is_file():
+            parser.error('Debug test executable missing')
+        return run_suites(args, parser, selected, app)
+
+
+def run_suites(args, parser, selected, app):
+    if args.generative_latency:
+        folder = args.generative_latency.resolve()
+        folder.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='orvlet-live-card-profile-') as profile:
+            return subprocess.run([str(app), '--generative-latency', '--allow-live-services', '--background-checks'],
+                cwd=ROOT, env={**os.environ, 'ORVLET_NATIVE_CHECK_PROFILE': profile,
+                               'ORVLET_LATENCY_OUTPUT': str(folder), 'ORVLET_LATENCY_REPEATS': str(args.latency_repeats),
+                               **({'ORVLET_LATENCY_CASE': args.latency_case} if args.latency_case else {})},
+                timeout=480 * args.latency_repeats).returncode
     with socket.socket() as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -112,7 +154,8 @@ def main() -> int:
                 try:
                     command = [str(app), flag] + ([] if args.show_ui else ['--background-checks'])
                     count = 0
-                    with tempfile.TemporaryDirectory(prefix='orvlet-native-check-') as profile:
+                    profile_dir = native_check_profile() if name == 'native-browser' else tempfile.TemporaryDirectory(prefix='orvlet-native-check-')
+                    with profile_dir as profile:
                         for phase in range(4 if name == 'native-browser' else 1):
                             phase_started = time.time()
                             suffix = ['', '-restart', '-disabled', '-saved'][phase]
@@ -122,7 +165,8 @@ def main() -> int:
                                     if phase >= 2: phase_flags.append('--verify-native-disabled')
                                     if phase == 3: phase_flags.append('--verify-saved-logins')
                                     subprocess.run(command + phase_flags, cwd=ROOT,
-                                        env={**os.environ, 'ORVLET_NATIVE_CHECK_PROFILE': profile},
+                                        env={**os.environ, 'ORVLET_NATIVE_CHECK_PROFILE': profile,
+                                             **({'TMPDIR': str(Path(profile).parent)} if name == 'native-browser' else {})},
                                         stdout=suite_log, stderr=suite_log, timeout=240, check=True)
                                 finally:
                                     native_log = Path(profile) / 'chromium.log'
@@ -153,6 +197,7 @@ def main() -> int:
 
 
 if __name__ == '__main__':
+    use_workspace()
     try:
         sys.exit(main())
     except KeyboardInterrupt:

@@ -73,6 +73,11 @@ extension AgentController {
             try await model.browser.bindReadings(checked.readings ?? [])
             let observation = try await model.observation()
             model.updateLiveReadings(ticket.taskID, data: observation)
+            let actual = observation["readings"] as? [String: String] ?? [:]
+            if !model.externalBrowser, let requested = recovery.siteDestination, let profile = model.browser.siteMemoryProfile,
+                (checked.readings ?? []).allSatisfy({ !(actual[$0.key] ?? "").isEmpty }) {
+                model.siteMemory.observe(requested: requested, page: observation, profile: profile, taskID: ticket.taskID, verifiedReading: true)
+            }
             guard model.accepts(ticket), model.browser.id == ticket.taskID else { throw CancellationError() }
         }
         model.hasCustomSurface = true
@@ -87,6 +92,15 @@ extension AgentController {
         // The next tool schema and its validation must refer to the same page evidence.
         model.lastObservation = observation
         var result = observation
+        if model.activeRequest?.expectsPlayback == true || requestIntent.playbackIntent == "play" {
+            if let links = observation["elements"] as? [[String: Any]] {
+                result["elements"] = links.filter { !model.playbackSources.avoidsLink($0["href"] as? String, on: observation["url"] as? String ?? "") }
+            }
+            if observation["playbackFailed"] as? Bool == true {
+                model.playbackSources.recordPlayerFailure(observation)
+                result["error"] = PlaybackSourceUnavailable().localizedDescription
+            }
+        }
         if nativeRequestActive, !(observation["url"] as? String ?? "").isEmpty { ownCurrentPage() }
         if !model.externalBrowser,
             let task = model.sideTasks.first(where: { $0.id == model.browser.id }), task.isMediaTask,
@@ -99,7 +113,32 @@ extension AgentController {
         if let plan = reusablePlan(observation) {
             result["reusable_ui"] = ["available": true, "title": plan.title ?? "Saved controls"]
         }
-        return AgentContext.page(result, detail: detail ?? requestIntent.contextDetail, offset: offset)
+        var packet = AgentContext.page(result, detail: detail ?? requestIntent.contextDetail, offset: offset)
+        if !model.externalBrowser, let requested = recovery.siteDestination, let profile = model.browser.siteMemoryProfile {
+            model.siteMemory.observe(requested: requested, page: observation, profile: profile, taskID: activeTaskID)
+            if let access = model.siteMemory.hint(url: requested, profile: profile) {
+                if observation["loginFormVisible"] as? Bool == true || observation["browserLoginRejected"] as? Bool == true,
+                    let route = SiteMemory.Route(requested, client: profile.client), !route.login,
+                    let path = URLComponents(string: requested)?.percentEncodedPath {
+                    // Keep the return route in this browser only. Drop analytics, return URLs and credentials.
+                    model.browser.pendingSignInEntry = access.origin + path
+                    if model.browser.waitingForInterface { model.browser.releaseInterface() }
+                    if let index = model.sideTasks.firstIndex(where: { $0.id == model.browser.id }) {
+                        model.sideTasks[index].prefersSource = true
+                    }
+                }
+                var history = ["origin": access.origin, "operation": access.operation, "observation": access.detail, "observed": access.date.ISO8601Format()]
+                if ModelContextBudget.estimate(history) > 190 { history["observation"] = access.access.description }
+                if ModelContextBudget.estimate(history) <= 190 { packet["previousAccess"] = history }
+                if model.browser.pendingSignInEntry != nil, observation["loginFormVisible"] as? Bool == true {
+                    packet["next"] = "The source is ready in the side screen. Ask the human to sign in there."
+                }
+            } else if let pending = model.browser.pendingSignInEntry,
+                SiteMemory.Route(pending, client: profile.client)?.key == SiteMemory.Route(requested, client: profile.client)?.key {
+                model.browser.pendingSignInEntry = nil
+            }
+        }
+        return packet
     }
 
 }

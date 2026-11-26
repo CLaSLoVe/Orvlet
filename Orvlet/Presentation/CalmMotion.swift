@@ -54,11 +54,20 @@ final class CalmMotionDriver: NSObject {
         // Use the owning display's cadence, including ProMotion.
         // Common modes keep animation alive while the user drags or tracks a menu.
         displayLink.add(to: .main, forMode: .common)
+        // A sleeping display can stop its link entirely. The model and hit targets
+        // still need to reach the settled geometry when this transition ends.
+        let ticket = revision
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            guard let self, self.revision == ticket else { return }
+            self.frame(1)
+        }
     }
     private func tick(_ link: CADisplayLink) {
         guard self.link === link else { return }
+        frame(max(0, min(1, (CACurrentMediaTime() - started) / duration)))
+    }
+    private func frame(_ t: Double) {
         let ticket = revision
-        let t = max(0, min(1, (CACurrentMediaTime() - started) / duration))
         // Zero velocity at both ends: a quiet departure and a soft, exact landing.
         update?(t * t * t * (t * (6 * t - 15) + 10))
         guard ticket == revision else { return }

@@ -33,6 +33,29 @@
             let messages: [[String: Any]] = [
                 ["role": "system", "content": "Fixture instructions"], ["role": "user", "content": "Check tools"],
             ]
+            let old = String(repeating: "过往记录", count: 300)
+            for api in ModelAPI.allCases {
+                var limited = Endpoint(baseURL: "https://fixture.invalid/v1", model: "budget-fixture")
+                limited.options.api = api
+                limited.options.contextWindow = "1250"
+                limited.options.outputTokens = "200"
+                let turns: [[String: Any]] = [
+                    ["role": "user", "content": old, ModelWire.contextPriorityKey: 2],
+                    ["role": "user", "content": "Use USD", ModelWire.contextPriorityKey: 3],
+                    ["role": "user", "content": "Export my table"],
+                ]
+                func encoded(_ turns: [[String: Any]]) throws -> [String: Any] {
+                    try ModelWire.body(endpoint: limited, messages: turns, tools: [tool],
+                        reasoning: false, requiredTool: nil, budget: .standard)
+                }
+                let body = try encoded(turns)
+                let json = JSONText.encode(body)
+                try check(json.contains("Use USD") && json.contains("Export my table") && !json.contains(old)
+                    && !json.contains(ModelWire.contextPriorityKey) && ModelContextBudget.estimate(body) <= 1050,
+                    "\(api.title) budgets tool schemas and history while retaining current input and active constraints")
+                try check(rejects { _ = try encoded([["role": "user", "content": old]]) },
+                    "\(api.title) reports an oversized current request before transport")
+            }
             var endpoint = Endpoint(baseURL: "https://gateway.example/v1/?api-version=2026-01-01", model: "any-model")
             try check(
                 endpoint.completionURL?.path == "/v1/chat/completions"

@@ -17,6 +17,16 @@ enum NativeChromium {
             || CommandLine.arguments.contains("--native-browser-check"))
     }
     private static var endpoint: URL?
+    private static var activeMemorySession: (id: String, persistent: Bool)?
+    private static var guestMemoryID = UUID().uuidString
+
+    static func siteSession(profile: URL, keepLogins: Bool) -> (id: String, persistent: Bool) {
+        if let activeMemorySession { return activeMemorySession }
+        if keepLogins, let created = try? profile.resourceValues(forKeys: [.creationDateKey]).creationDate {
+            return ("native-profile-" + String(created.timeIntervalSince1970), true)
+        }
+        return (guestMemoryID, false)
+    }
     private static var guestDirectory: URL?
     private static var activeProfile: URL?
     private static var bootstrapError: Error?
@@ -187,7 +197,12 @@ enum NativeChromium {
         let keepLogins = FileManager.default.fileExists(atPath: profile.appendingPathComponent(NativeExtensions.loginOptIn).path)
         var storage = profile
         if !keepLogins {
-            storage = FileManager.default.temporaryDirectory.appendingPathComponent("orvlet-guest-" + UUID().uuidString)
+            var guestRoot = FileManager.default.temporaryDirectory
+            #if DEBUG
+            // The runner can reclaim an interrupted guest along with its isolated profile.
+            if CommandLine.arguments.contains("--native-browser-check") { guestRoot = profile }
+            #endif
+            storage = guestRoot.appendingPathComponent("orvlet-guest-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: false,
                 attributes: [.posixPermissions: 0o700])
             guestDirectory = storage
@@ -195,6 +210,8 @@ enum NativeChromium {
         try ORNativeChromium.start(withProfile: storage.path, extensions: profile.path, guest: !keepLogins, port: port)
         let url = URL(string: "http://127.0.0.1:\(port)")!
         endpoint = url
+        // The profile marker survives restarts, and a replaced profile gets a new creation date.
+        activeMemorySession = siteSession(profile: profile, keepLogins: keepLogins)
         activeProfile = profile
         return url
     }
@@ -224,6 +241,8 @@ enum NativeChromium {
         #endif
         endpoint = nil
         activeProfile = nil
+        activeMemorySession = nil
+        guestMemoryID = UUID().uuidString
     }
 }
 

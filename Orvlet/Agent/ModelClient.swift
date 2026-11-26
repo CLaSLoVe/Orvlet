@@ -229,7 +229,7 @@ enum ModelClient {
         case 400, 404, 422: hint = "Check API format, model ID and request parameters."
         default: hint = "The model service could not complete the request."
         }
-        return "HTTP \(status) · " + (detail.isEmpty ? hint : detail)
+        return "HTTP \(status): " + (detail.isEmpty ? hint : detail)
     }
 
 }

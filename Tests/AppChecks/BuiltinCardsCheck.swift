@@ -1,9 +1,163 @@
 #if DEBUG
     import AppKit
+    import SwiftUI
     import WebKit
 
     @MainActor
     enum BuiltinCardsCheck {
+        static func background() async throws -> [String] {
+            var checks: [String] = []
+            let focus = BackgroundFocusCheck()
+            let panel = NSPanel(contentRect: NSRect(x: -18000, y: -18000, width: 320, height: 320),
+                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            defer { panel.orderOut(nil) }
+
+            var lastAction: String?
+            @discardableResult func render(_ name: String, markup: CardMarkup, state: [String: String], selector: String,
+                        expected: String, click: String? = nil, expectedAction: String? = nil) async throws -> WKWebView {
+                let host = NSHostingView(rootView: HTMLCardView(markup: markup, compact: false, state: state,
+                    allowedActions: ["calendar", "configureClock", "swapCurrencies", "refreshData"], collectFields: true,
+                    appearance: .light, action: { id, _ in lastAction = id }).background(Color.white))
+                panel.contentView = host
+                panel.orderBack(nil)
+                func webView(in node: NSView) -> WKWebView? {
+                    (node as? WKWebView) ?? node.subviews.lazy.compactMap { webView(in: $0) }.first
+                }
+                for _ in 0..<60 where webView(in: host) == nil {
+                    host.layoutSubtreeIfNeeded()
+                    try await Task.sleep(for: .milliseconds(40))
+                }
+                guard let web = webView(in: host) else { throw AppError.message("Missing " + name + " web view") }
+                var rendered = ""
+                for _ in 0..<100 {
+                    rendered = (try? await web.evaluateJavaScript("document.querySelector('" + selector + "')?.textContent")) as? String ?? ""
+                    if rendered.contains(expected) { break }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                try StateMachineCheck.require(rendered.contains(expected), name + " renders its verified detail (" + rendered + ")", &checks)
+                let fits = try await web.evaluateJavaScript("""
+                    (() => [...document.querySelectorAll('.clock-reading,.preset-number,.event-date,button,select,input')]
+                        .every(e => e.getBoundingClientRect().right <= innerWidth + 1))()
+                    """)
+                try StateMachineCheck.require(fits as? Bool == true, name + " fits the standard card width", &checks)
+                let image = try await web.takeSnapshot(configuration: nil)
+                if let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+                    try png.write(to: URL(fileURLWithPath: "/tmp/orvlet-refined-" + name + ".png"))
+                }
+                if let click, let expectedAction {
+                    lastAction = nil
+                    _ = try await web.evaluateJavaScript(click)
+                    for _ in 0..<20 where lastAction == nil { try await Task.sleep(for: .milliseconds(25)) }
+                    try StateMachineCheck.require(lastAction == expectedAction, name + " dispatches its rendered control", &checks)
+                }
+                return web
+            }
+            let findings = TaskForm(inputs: [], outputs: [.init(key: "count", label: "Open issues"),
+                    .init(key: "findings", label: "Findings")], buttons: [], compactSubject: "Review", compactKey: "count")
+            let details = try await render("multiline", markup: findings.markup(),
+                state: ["count": "4", "findings": "Spacing\nContrast\nOverflow\nFocus"],
+                selector: ".supporting-reading summary", expected: "Findings")
+            let disclosureWorks = try await details.evaluateJavaScript("""
+                (() => {
+                    const region = document.querySelector('.supporting-reading');
+                    const bound = region.querySelector('[data-bind=findings]');
+                    if (region.open || !document.querySelector('[data-bind=count]').getClientRects().length) return false;
+                    region.querySelector('summary').click();
+                    const update = findings => window.updateCard({values:{count:'4',findings},view:{compact:'false'}});
+                    update(bound.textContent + '\\nNew finding');
+                    if (!region.open || !bound.textContent.endsWith('New finding')) return false;
+                    update('Spacing');
+                    return !document.querySelector('.supporting-reading') && bound.getClientRects().length > 0;
+                })()
+                """)
+            try StateMachineCheck.require(disclosureWorks as? Bool == true,
+                "Long supporting text expands on demand, stays open on update and returns to plain text when short", &checks)
+            let runtime = TaskRuntimeSpec(sources: [TaskDataSource(key: "cityTime", kind: .clock, format: .time, timeZone: "Asia/Kathmandu")])
+            let clock = try TaskSurface(title: "Kathmandu", markup: BuiltinCards.clock(runtime),
+                fields: [], actions: [], state: ["cityTime": "12:35:20"], runtime: runtime, preset: "clock").validated()
+            try await render("clock", markup: clock.markup, state: clock.state, selector: ".clock-offset", expected: "UTC+5:45",
+                click: "const field=document.querySelector('[data-field=clockHourStyle]');field.value='12h';field.dispatchEvent(new Event('change',{bubbles:true}));true",
+                expectedAction: "configureClock")
+            let weather = APIDataSpec(url: "https://example.com/forecast", fields: [
+                APIDataField(key: "high", label: "High", pointer: "/high", unit: "°C")],
+                card: DataCardPreset(kind: .weather, primaryKey: "high"))
+            let forecast = try weather.surface(title: "Weather", state: ["high": "25", "sourceHost": "example.com", "resultStatus": ""])
+            try await render("weather", markup: forecast.markup, state: forecast.state, selector: ".weather-alternate", expected: "77 °F")
+            let conversion = APIDataCheck.currency()
+            let currency = try conversion.surface(title: "Currency", state: ["base":"HKD","quote":"CNY","rate":"0.92","converted":"51.52",
+                    "sourceHost":"api.frankfurter.dev","sourceRequest":try conversion.requestURL().absoluteString,"resultStatus":""])
+            try await render("currency", markup: currency.markup, state: currency.state, selector: ".currency-preset", expected: "1 HKD",
+                click: "document.querySelector('[data-action=swapCurrencies]').click();true", expectedAction: "swapCurrencies")
+            let event = CalendarService.cardState(["start":"2026-11-25T14:00:00","end":"2026-11-25T14:45:00",
+                "sourceTimeZone":TimeZone.current.identifier, "location":"Studio 2"])!
+            let calendar = SideTask(kind: .calendar, title: "Design review", status: "Scheduled", liveValues: event)
+            try await render("calendar", markup: calendar.presentation, state: calendar.state, selector: "[data-bind=eventDuration]", expected: "45",
+                click: "document.querySelector('[data-action=calendar]').click();true", expectedAction: "calendar")
+            let suite = "orvlet-preset-player-" + UUID().uuidString
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let model = AppModel(defaults: defaults)
+            model.isLiveTest = true
+            var music = SideTask(kind: .web, title: "Piano study", sourceURL: "https://example.com/music")
+            music.listening = true
+            let transport = MusicPlayback(["duration": 375.0, "currentTime": 100.0, "seekable": true, "hasMedia": true])
+            model.musicPlayback[music.id] = transport
+            panel.setContentSize(NSSize(width: 320, height: 215))
+            panel.contentView = NSHostingView(rootView: MusicCard(model: model, task: music).background(Color.white))
+            try await Task.sleep(for: .milliseconds(220))
+            try await SideScreenCheck.snapshot(panel, path: "/tmp/orvlet-refined-music.png")
+            try StateMachineCheck.require(transport.endTimeLabel(showRemaining: false, position: 100) == "6:15"
+                && transport.endTimeLabel(showRemaining: true, position: 100) == "−4:35",
+                "The player offers total or remaining time for the same position", &checks)
+            let titles = ["Indigo yarn", "Copper yarn"]
+            var samples: [SideTask] = []
+            for title in titles {
+                let form = TaskForm(inputs: [], outputs: [.init(key: "rows", label: "Rows")],
+                                    buttons: [.init(action: "addRow", label: "Add row")], compactSubject: title, compactKey: "rows")
+                let surface = try TaskSurface(title: title, markup: form.markup(), fields: [],
+                    actions: [.init(id: "addRow", kind: .code, code: "return {state:{rows:String(Number(state.rows)+1)}}", compactLabel: "记一行")],
+                    state: ["rows": "14"]).validated()
+                let restored = try JSONDecoder().decode(TaskSurface.self, from: JSONEncoder().encode(surface))
+                samples.append(SideTask(kind: .workspace, title: title, markup: restored.markup, taskSurface: restored, liveValues: restored.state))
+            }
+            panel.setContentSize(NSSize(width: 260, height: 44))
+            let host = NSHostingView(rootView: HStack(spacing: 6) {
+                ForEach(samples) { task in CalmTaskControl(model: model, task: task) }
+            }.background(Color.white))
+            panel.contentView = host
+            panel.orderBack(nil)
+            func compactWebViews(_ node: NSView) -> [WKWebView] {
+                if let page = node as? WKWebView { return [page] }
+                return node.subviews.flatMap(compactWebViews)
+            }
+            var names = Set<String>()
+            for _ in 0..<60 {
+                names.removeAll()
+                for page in compactWebViews(host) {
+                    let name = try? await page.evaluateJavaScript("""
+                        (() => {const s=document.querySelector('.calm-glance small'),v=document.querySelector('.calm-glance strong');
+                            return s && s.scrollWidth <= s.clientWidth && v?.textContent==='14' ? s.textContent : ''})()
+                        """)
+                    if let name = name as? String { names.insert(name) }
+                }
+                if names == Set(titles) { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            try StateMachineCheck.require(names == Set(titles), "Two saved interactive capsules show distinct unclipped names beside identical values", &checks)
+            func primaryButtons(_ node: NSView) -> [WindowDragArea.DragView] {
+                if let button = node as? WindowDragArea.DragView, button.onDoubleClick == nil, button.onClick != nil {
+                    return [button]
+                }
+                return node.subviews.flatMap(primaryButtons)
+            }
+            let requiredWidth = ("记一行" as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 10, weight: .semibold)]).width
+            let controls = primaryButtons(host)
+            try StateMachineCheck.require(controls.count == 2 && controls.allSatisfy { $0.bounds.width >= requiredWidth },
+                "The complete three-character capsule action fits beside each name", &checks)
+            try StateMachineCheck.require(!focus.tookFocus, "Rendering and operating presets keeps desktop focus", &checks)
+            return checks
+        }
+
         static func start(_ model: AppModel, delegate: AppDelegate) async {
             var checks: [String] = []
             func check(_ ok: Bool, _ name: String) throws {
@@ -398,44 +552,7 @@
                 do { _ = try invalid.validated() } catch { rejected = true }
                 try check(rejected, "A preset cannot bind a fabricated primary result")
 
-                let timerID = try model.startTimer(seconds: 720, title: "Tea break")
-                model.activeRequest = nil
-                model.selectTask(timerID, expanded: true)
-                let timerCard = try await rendered(".timer-preset")
-                _ = try await timerCard.evaluateJavaScript("document.querySelector('[data-action=toggle]').click()")
-                for _ in 0..<30 {
-                    if model.sideTasks.first(where: { $0.id == timerID })?.deadline == nil { break }
-                    try await Task.sleep(for: .milliseconds(100))
-                }
-                try check(
-                    model.sideTasks.first(where: { $0.id == timerID })?.status == "Paused",
-                    "The designed timer pauses the real native deadline")
-                let paused = model.sideTasks.first(where: { $0.id == timerID })!.remaining
-                _ = try await timerCard.evaluateJavaScript("document.querySelector('[data-action=addMinute]').click()")
-                try await Task.sleep(for: .milliseconds(250))
-                try check(
-                    abs(model.sideTasks.first(where: { $0.id == timerID })!.remaining - paused - 60) < 1
-                        && model.sideTasks.first(where: { $0.id == timerID })?.deadline == nil,
-                    "Add one minute changes the actual paused timer without resuming it")
-                _ = try await timerCard.evaluateJavaScript("document.querySelector('[data-action=restart]').click()")
-                for _ in 0..<30 {
-                    if let timer = model.sideTasks.first(where: { $0.id == timerID }), timer.deadline != nil,
-                        timer.remaining > 719
-                    {
-                        break
-                    }
-                    try await Task.sleep(for: .milliseconds(100))
-                }
-                try check(
-                    (model.sideTasks.first(where: { $0.id == timerID })?.remaining ?? 0) > 718,
-                    "Restart resets the actual timer to its original duration")
-                _ = try await rendered(
-                    ".timer-preset", ready: "document.querySelector('[data-action=toggle]').textContent==='Pause'")
-                try await inspect(timerCard, name: "timer-light")
-                model.settings.appearance = .dark
-                try await Task.sleep(for: .milliseconds(350))
-                try await inspect(timerCard, name: "timer-dark")
-                model.settings.appearance = .light
+                checks += try await CardReminderCheck.timerTool(in: NSRect(x: -18000, y: -18000, width: 1000, height: 800))
 
                 let event: [String: Any] = [
                     "verified": true, "title": "Design review", "start": today + "T14:00:00",
@@ -448,13 +565,28 @@
                 ])
                 try check(
                     allDay?["eventDate"] == "Wed, Nov 4, 2026" && allDay?["eventTime"] == "All day"
-                        && allDay?["eventZone"] == "",
+                        && allDay?["eventZone"] == "" && allDay?["eventLocal"] == "" && allDay?["eventDuration"] == "",
                     "All-day cards preserve the calendar date without shifting it into another time zone")
+                let crossZone = CalendarService.cardState([
+                    "start": "2026-11-04T23:30:00", "end": "2026-11-05T01:00:00",
+                    "sourceTimeZone": "America/New_York",
+                ], hostTimeZone: TimeZone(identifier: "Asia/Hong_Kong")!)
+                try check(crossZone?["eventTime"] == "10:30–12:00"
+                    && crossZone?["eventLocal"] == "Nov 4, 23:30–Nov 5, 01:00, Hong Kong time"
+                    && crossZone?["eventDuration"] == Duration.seconds(5400).formatted(
+                        .units(allowed: [.days, .hours, .minutes, .seconds], width: .narrow).locale(Locale(identifier: "en_US")))
+                    && crossZone?["eventGlance"] == "Nov 4, 23:30",
+                    "A cross-zone calendar capsule shows the device time and its detail includes both local dates and elapsed duration")
+                var legacyCalendar = SideTask(kind: .calendar, title: "Design review")
+                legacyCalendar.liveValues = ["eventDate": "Wed, Nov 4, 2026", "eventTime": "14:00–15:00"]
+                try check(legacyCalendar.state["eventGlance"] == "14:00–15:00"
+                    && legacyCalendar.state["eventDuration"] == "" && legacyCalendar.state["eventLocal"] == "",
+                    "An older saved calendar card keeps its recorded schedule in the capsule")
                 let multiDay = CalendarService.cardState([
                     "start": "2026-11-04T00:00:00", "end": "2026-11-06T00:00:00", "allDay": true,
                 ])
                 try check(
-                    multiDay?["eventTime"] == "All day · through Nov 5",
+                    multiDay?["eventTime"] == "All day through Nov 5",
                     "Multi-day calendar cards display the inclusive last day, not the exclusive end boundary")
                 if let i = model.sideTasks.firstIndex(where: { $0.id == calendarID }) {
                     model.sideTasks[i].expires = nil
@@ -463,7 +595,7 @@
                 let calendarCard = try await rendered(".calendar-preset")
                 try check(
                     (try await calendarCard.evaluateJavaScript(
-                        "document.querySelector('[data-bind=eventTime]').textContent==='14:00–15:00' && document.querySelector('[data-bind=eventLocation]').textContent==='Studio 2'"
+                        "document.querySelector('[data-bind=eventTime]').textContent==='14:00–15:00' && document.querySelector('[data-bind=eventLocation]').textContent==='Studio 2' && document.querySelector('[data-bind=eventDuration]').textContent.length>0 && !document.querySelector('[data-bind=eventLocal]').getClientRects().length"
                     )) as? Bool == true,
                     "Calendar presents the actual event time and location as separate readable values")
                 let previousApp = NSWorkspace.shared.frontmostApplication

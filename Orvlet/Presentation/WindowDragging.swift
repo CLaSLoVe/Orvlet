@@ -14,8 +14,20 @@ extension AppModel {
     func dragAppearance(_ id: UUID) -> TaskDragAppearance {
         let task = sideTasks.first { $0.id == id }
         return TaskDragAppearance(
-            title: task?.title ?? "Task", symbol: task?.symbol ?? "square", accent: accent,
+            title: task?.kind == .timer ? "Timer" : task?.title ?? "Task", symbol: task?.symbol ?? "square", accent: accent,
             closeLabel: "Release to close", reducedMotion: motionReduced)
+    }
+}
+
+/// Identifies the complete capsule even when the drag begins on its smaller playback control.
+struct TaskDragSourceMarker: NSViewRepresentable {
+    let id: UUID
+    final class Marker: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+    func makeNSView(context: Context) -> Marker { Marker() }
+    func updateNSView(_ view: Marker, context: Context) {
+        view.identifier = NSUserInterfaceItemIdentifier(id.uuidString)
     }
 }
 
@@ -25,30 +37,160 @@ private final class TaskDragPreviewState: ObservableObject {
 
 private struct TaskDragPreview: View {
     let appearance: TaskDragAppearance
+    let image: NSImage?
     @ObservedObject var state: TaskDragPreviewState
-    @Environment(\.colorScheme) private var scheme
     var body: some View {
-        VStack(spacing: 5) {
-            HStack(spacing: 6) {
-                CalmGlyph(symbol: appearance.symbol, accent: appearance.accent)
-                Text(appearance.title).font(.system(size: 11, weight: .medium, design: .rounded)).lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }.padding(.horizontal, 6).frame(width: 120, height: 34)
-                .background(
-                    scheme == .dark ? Color(nsColor: .windowBackgroundColor) : Color.white.opacity(0.96),
-                    in: RoundedRectangle(cornerRadius: 10)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10).strokeBorder(
-                        appearance.accent.opacity(state.outside ? 0.6 : 0.18), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.14), radius: 6, y: 3)
-                .scaleEffect(state.outside && !appearance.reducedMotion ? 0.94 : 1)
+        ZStack {
+            if let image {
+                Image(nsImage: image).resizable()
+                    .mask { RoundedRectangle(cornerRadius: 9).inset(by: 2).blur(radius: 0.6) }
+            } else {
+                HStack(spacing: 6) {
+                    CalmGlyph(symbol: appearance.symbol, accent: appearance.accent)
+                    Text(appearance.title).font(.system(size: 11, weight: .medium, design: .rounded)).lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }.padding(.horizontal, 6)
+            }
+        }
+        .frame(width: CalmVisualStyle.rowWidth, height: CalmVisualStyle.rowHeight)
+        .overlay(alignment: .bottom) {
             Label(appearance.closeLabel, systemImage: "xmark.circle.fill")
                 .font(.system(size: 10, weight: .medium)).padding(.horizontal, 7).padding(.vertical, 3)
-                .background(.regularMaterial, in: Capsule()).opacity(state.outside ? 1 : 0)
-        }.padding(10).frame(width: 160, height: 82)
-            .animation(CalmMotion.animation(reduced: appearance.reducedMotion), value: state.outside)
+                .fixedSize().background(.regularMaterial, in: Capsule())
+                .offset(y: 23).opacity(state.outside ? 1 : 0)
+        }
+        .animation(state.outside ? CalmMotion.animation(reduced: appearance.reducedMotion) : nil, value: state.outside)
+    }
+}
+
+/// Both sides of the neck are computed from the current pointer offset, so reversing a drag
+/// retraces the same contour. Only the small, transparent preview window needs repainting.
+private final class PeelPreviewView: NSView {
+    var displacement = NSSize.zero { didSet { needsDisplay = true } }
+    var cardCenter = NSPoint(x: PeelPreviewView.previewSize.width / 2, y: PeelPreviewView.previewSize.height / 2) {
+        didSet {
+            subviews.first?.setFrameOrigin(NSPoint(x: cardCenter.x - bounds.midX, y: cardCenter.y - bounds.midY))
+            needsDisplay = true
+        }
+    }
+    private let appearanceStyle: TaskDragAppearance
+    private let material: NSColor?
+    private let state: TaskDragPreviewState
+    init(appearance: TaskDragAppearance, image: NSImage?, material: NSColor?, state: TaskDragPreviewState) {
+        self.appearanceStyle = appearance
+        self.material = material
+        self.state = state
+        super.init(frame: NSRect(origin: .zero, size: Self.previewSize))
+        let content = NSHostingView(rootView: TaskDragPreview(appearance: appearance, image: image, state: state))
+        content.frame = bounds
+        content.autoresizingMask = [.width, .height]
+        addSubview(content)
+    }
+    required init?(coder: NSCoder) { return nil }
+    static let previewSize = NSSize(width: 244, height: 148)
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let size = NSSize(width: CalmVisualStyle.rowWidth, height: CalmVisualStyle.rowHeight)
+        let card = CGRect(x: cardCenter.x - size.width / 2, y: cardCenter.y - size.height / 2,
+                          width: size.width, height: size.height)
+        let dx = displacement.width, dy = displacement.height
+        let peel = min(1, hypot(dx / (size.width + 22), dy / (size.height + 22)))
+        let path: NSBezierPath
+        if !appearanceStyle.reducedMotion && peel > 0 && peel < 1 {
+            // The ink travels on the intact moving card. The empty pearl at its old position
+            // draws inward as the gap grows. A single outline owns both contact shoulders.
+            let remaining = 1 - peel * peel * (3 - 2 * peel)
+            let width = max(0.01, size.width * remaining), height = max(0.01, size.height * remaining)
+            let source = CGRect(x: cardCenter.x - dx * 0.94 - width / 2,
+                                y: cardCenter.y - dy * 0.94 - height / 2, width: width, height: height)
+            let smoothing = 20 * sqrt(remaining) * min(1, peel / 0.2)
+            path = Self.joinedOutline(card: card, source: source, smoothing: max(0.01, smoothing))
+        } else {
+            path = NSBezierPath(roundedRect: card, xRadius: 10, yRadius: 10)
+        }
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let fill = material ?? NSColor(CalmVisualStyle.windowFill(dark ? .dark : .light))
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(dark ? 0.18 : 0.08)
+        shadow.shadowBlurRadius = 3
+        shadow.shadowOffset = NSSize(width: 0, height: -1.5)
+        shadow.set()
+        fill.setFill()
+        path.fill()
+        NSGraphicsContext.restoreGraphicsState()
+        NSColor(appearanceStyle.accent).withAlphaComponent(state.outside ? 0.48 : 0.14).setStroke()
+        path.lineWidth = 0.65
+        path.lineJoinStyle = .round
+        path.stroke()
+    }
+
+    /// Sample the exact rounded-rectangle distance fields only around these two small pills.
+    /// A smooth minimum makes their contours tangent where they meet, including at corners.
+    /// Shared grid edges let both lobes close independently as the narrowing neck separates.
+    private static func joinedOutline(card: CGRect, source: CGRect, smoothing: CGFloat) -> NSBezierPath {
+        let box = card.union(source).insetBy(dx: -smoothing / 4 - 3, dy: -smoothing / 4 - 3)
+        let pitch: CGFloat = 2
+        let columns = Int(ceil(box.width / pitch)) + 1, rows = Int(ceil(box.height / pitch)) + 1
+        func distance(_ x: CGFloat, _ y: CGFloat, _ r: CGRect, _ radius: CGFloat) -> CGFloat {
+            let qx = abs(x - r.midX) - r.width / 2 + radius, qy = abs(y - r.midY) - r.height / 2 + radius
+            return hypot(max(qx, 0), max(qy, 0)) + min(max(qx, qy), 0) - radius
+        }
+        let radius = min(10, source.height / 2, source.width / 2)
+        var samples = [CGFloat](repeating: 0, count: columns * rows)
+        for y in 0..<rows {
+            for x in 0..<columns {
+                let px = box.minX + CGFloat(x) * pitch, py = box.minY + CGFloat(y) * pitch
+                let a = distance(px, py, card, 10), b = distance(px, py, source, radius)
+                let overlap = max(0, smoothing - abs(a - b))
+                samples[y * columns + x] = min(a, b) - overlap * overlap / (4 * smoothing)
+            }
+        }
+        var points = [Int: NSPoint](), neighbors = [Int: [Int]]()
+        func crossing(_ edge: Int, vertical: Bool) -> Int {
+            let key = 2 * edge + (vertical ? 1 : 0)
+            if points[key] == nil {
+                let a = samples[edge], b = samples[edge + (vertical ? columns : 1)], t = a / (a - b)
+                points[key] = NSPoint(x: box.minX + (CGFloat(edge % columns) + (vertical ? 0 : t)) * pitch,
+                                      y: box.minY + (CGFloat(edge / columns) + (vertical ? t : 0)) * pitch)
+            }
+            return key
+        }
+        func connect(_ a: Int, _ b: Int) {
+            neighbors[a, default: []].append(b)
+            neighbors[b, default: []].append(a)
+        }
+        for y in 0..<(rows - 1) {
+            for x in 0..<(columns - 1) {
+                let i = y * columns + x
+                let a = samples[i], b = samples[i + 1], c = samples[i + columns + 1], d = samples[i + columns]
+                let ab = (a < 0) != (b < 0), bc = (b < 0) != (c < 0)
+                let cd = (c < 0) != (d < 0), da = (d < 0) != (a < 0)
+                guard ab || bc || cd || da else { continue }
+                var edges = [Int]()
+                if ab { edges.append(crossing(i, vertical: false)) }
+                if bc { edges.append(crossing(i + 1, vertical: true)) }
+                if cd { edges.append(crossing(i + columns, vertical: false)) }
+                if da { edges.append(crossing(i, vertical: true)) }
+                if edges.count == 4 && (a < 0) != (a + b + c + d < 0) { edges.swapAt(1, 3) }
+                connect(edges[0], edges[1])
+                if edges.count == 4 { connect(edges[2], edges[3]) }
+            }
+        }
+        let path = NSBezierPath()
+        path.windingRule = .evenOdd
+        var seen = Set<Int>()
+        for start in points.keys where !seen.contains(start) {
+            path.move(to: points[start]!)
+            var node = start
+            while seen.insert(node).inserted, let next = neighbors[node]?.first(where: { !seen.contains($0) }) {
+                path.line(to: points[next]!)
+                node = next
+            }
+            path.close()
+        }
+        return path
     }
 }
 
@@ -107,7 +249,9 @@ struct WindowDragArea: NSViewRepresentable {
         private(set) var outsideDropArmed = false
         private var previewState = TaskDragPreviewState()
         private let previewMotion = CalmMotionDriver()
-        private var previewHome = NSRect.zero
+        // Screen coordinates of the original and moving capsule centers.
+        private var previewHome = NSPoint.zero
+        private var previewCenter = NSPoint.zero
         private var committedDrop = false
         private var startPoint: NSPoint?
         private weak var movingPanel: ShellPanel?
@@ -141,9 +285,9 @@ struct WindowDragArea: NSViewRepresentable {
             if onOutsideDrop != nil {
                 if firstDrag { beginPreview(at: startPoint) }
                 outsideDropArmed = !window.frame.insetBy(dx: -28, dy: -28).contains(point)
-                previewState.outside = outsideDropArmed
-                dragPreviewPanel?.setFrameOrigin(previewFrame(at: point).origin)
-                if outsideDropArmed { NSCursor.disappearingItem.set() } else { NSCursor.closedHand.set() }
+                if previewState.outside != outsideDropArmed { previewState.outside = outsideDropArmed }
+                positionPreview(at: NSPoint(x: previewHome.x + dx, y: previewHome.y + dy))
+                setDragCursor(outsideDropArmed ? .disappearingItem : .closedHand)
                 return
             }
             guard allowsWindowDrag else { return }
@@ -162,7 +306,7 @@ struct WindowDragArea: NSViewRepresentable {
             guard startPoint != nil else { return }
             startPoint = nil
             pressed(false)
-            NSCursor.arrow.set()
+            setDragCursor(.arrow)
             endWindowMove()
             if didDrag, onOutsideDrop != nil, let window {
                 let closing =
@@ -202,7 +346,7 @@ struct WindowDragArea: NSViewRepresentable {
                 startPoint = nil
                 didDrag = false
                 pressed(false)
-                NSCursor.arrow.set()
+                setDragCursor(.arrow)
                 finishPreview(closing: false)
                 return
             }
@@ -212,12 +356,41 @@ struct WindowDragArea: NSViewRepresentable {
                 super.keyDown(with: event)
             }
         }
+        private func setDragCursor(_ cursor: NSCursor) {
+            if !CommandLine.arguments.contains("--background-checks") { cursor.set() }
+        }
         private func beginPreview(at point: NSPoint) {
-            guard let appearance = taskPreview, let window else { return }
+            guard let appearance = taskPreview, let window, let root = window.contentView else { return }
+            let grab = window.convertPoint(fromScreen: point)
+            func marker(in view: NSView) -> TaskDragSourceMarker.Marker? {
+                if let marker = view as? TaskDragSourceMarker.Marker, marker.identifier == identifier,
+                    marker.bounds.contains(marker.convert(grab, from: nil)) { return marker }
+                for child in view.subviews {
+                    if let match = marker(in: child) { return match }
+                }
+                return nil
+            }
+            var image: NSImage?
+            var material: NSColor?
+            previewHome = point
+            if let source = marker(in: root) {
+                let rect = source.convert(source.bounds, to: root)
+                let screenRect = window.convertToScreen(root.convert(rect, to: nil))
+                previewHome = NSPoint(x: screenRect.midX, y: screenRect.midY)
+                if let bitmap = root.bitmapImageRepForCachingDisplay(in: rect) {
+                    root.cacheDisplay(in: rect, to: bitmap)
+                    let snapshot = NSImage(size: rect.size)
+                    snapshot.addRepresentation(bitmap)
+                    image = snapshot
+                    // An unprinted point just inside the capsule matches its current composited material.
+                    material = bitmap.colorAt(x: min(bitmap.pixelsWide - 1, max(1, bitmap.pixelsWide / 32)),
+                                              y: bitmap.pixelsHigh / 2)
+                }
+            }
             previewState = TaskDragPreviewState()
-            let panel = NSPanel(
-                contentRect: previewFrame(at: point), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
-                defer: false)
+            let content = PeelPreviewView(appearance: appearance, image: image, material: material, state: previewState)
+            let panel = NSPanel(contentRect: content.bounds, styleMask: [.borderless, .nonactivatingPanel],
+                                backing: .buffered, defer: false)
             panel.isReleasedWhenClosed = false
             panel.isOpaque = false
             panel.backgroundColor = .clear
@@ -226,24 +399,32 @@ struct WindowDragArea: NSViewRepresentable {
             panel.level = window.level
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             panel.appearance = window.effectiveAppearance
-            panel.contentView = NSHostingView(rootView: TaskDragPreview(appearance: appearance, state: previewState))
-            previewHome = panel.frame
+            panel.contentView = content
             dragPreviewPanel = panel
-            panel.alphaValue = appearance.reducedMotion ? 1 : 0
+            positionPreview(at: previewHome)
             panel.orderFrontRegardless()
             dragging(true)
-            previewMotion.run(
-                duration: appearance.reducedMotion ? 0 : CalmMotion.content, window: panel,
-                update: { [weak panel] t in panel?.alphaValue = t })
         }
-        private func previewFrame(at point: NSPoint) -> NSRect {
-            var frame = NSRect(x: point.x - 80, y: point.y - 58, width: 160, height: 82)
-            if let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? window?.screen {
-                let visible = screen.visibleFrame.insetBy(dx: 4, dy: 4)
-                frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
-                frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+        private func positionPreview(at center: NSPoint) {
+            guard let panel = dragPreviewPanel, let content = panel.contentView as? PeelPreviewView else { return }
+            var card = center
+            var origin = NSPoint(x: card.x - content.bounds.midX, y: card.y - content.bounds.midY)
+            if let source = window, NSScreen.screens.contains(where: { $0.frame.intersects(source.frame) }),
+                let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? source.screen
+            {
+                let visible = screen.visibleFrame
+                let marginX = CalmVisualStyle.rowWidth / 2 + 4
+                let marginY = CalmVisualStyle.rowHeight / 2 + 4
+                let hintHeight: CGFloat = previewState.outside ? 23 : 0
+                card.x = min(max(card.x, visible.minX + marginX), visible.maxX - marginX)
+                card.y = min(max(card.y, visible.minY + marginY + hintHeight), visible.maxY - marginY)
+                origin.x = min(max(card.x - content.bounds.midX, visible.minX), visible.maxX - content.bounds.width)
+                origin.y = min(max(card.y - content.bounds.midY, visible.minY), visible.maxY - content.bounds.height)
             }
-            return frame
+            previewCenter = card
+            panel.setFrameOrigin(origin)
+            content.cardCenter = NSPoint(x: card.x - origin.x, y: card.y - origin.y)
+            content.displacement = NSSize(width: card.x - previewHome.x, height: card.y - previewHome.y)
         }
         private func finishPreview(closing: Bool) {
             let action = closing ? onOutsideDrop : nil
@@ -255,16 +436,19 @@ struct WindowDragArea: NSViewRepresentable {
                 action?()
                 return
             }
-            let from = panel.frame
+            let from = previewCenter
+            let target = previewHome
             let reduced = taskPreview?.reducedMotion == true
-            let target =
-                reduced ? from : closing ? from.insetBy(dx: from.width * 0.13, dy: from.height * 0.13) : previewHome
-            let alpha = panel.alphaValue
+            previewState.outside = false
             previewMotion.run(
-                duration: reduced ? 0 : CalmMotion.content, window: panel,
-                update: { [weak panel] t in
-                    panel?.setFrame(CalmMotion.blend(from, target, t), display: true)
-                    panel?.alphaValue = alpha * (1 - t)
+                duration: reduced ? 0 : (closing ? 0.15 : 0.24), window: panel,
+                update: { [weak self, weak panel] t in
+                    if closing {
+                        panel?.alphaValue = 1 - t
+                    } else {
+                        self?.positionPreview(at: NSPoint(x: from.x + (target.x - from.x) * t,
+                                                        y: from.y + (target.y - from.y) * t))
+                    }
                 },
                 completion: { [self] in
                     clearPreview()
@@ -438,7 +622,7 @@ private struct PressableTaskCard: View {
                     onClick: configuration.trigger,
                     onDoubleClick: opensTask ? { model.openTaskFromDoubleClick(id) } : nil,
                     delaySingleClick: opensTask && model.taskClickWillCollapse(id),
-                    onOutsideDrop: { model.closeTask(id) }, taskID: id,
+                    onOutsideDrop: { model.closeTaskTool(id) }, taskID: id,
                     taskPreview: model.dragAppearance(id), dragging: { model.draggingTaskID = $0 ? id : nil },
                     enabled: enabled, pressed: { pressed = $0 }
                 ).accessibilityHidden(true)

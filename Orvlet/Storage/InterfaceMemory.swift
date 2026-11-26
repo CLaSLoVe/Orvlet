@@ -30,7 +30,7 @@ final class InterfaceMemory {
     func remember(_ task: SideTask, purpose: String) {
         guard task.kind == .web || task.kind == .workspace else { return }
         let id = task.interfaceRecipeID ?? task.id
-        var surface = task.taskSurface
+        var surface = task.taskSurface?.excludingJournalPresentation
         surface?.state = [:]
         surface?.runID = nil
         if var spec = surface?.runtime {
@@ -47,11 +47,11 @@ final class InterfaceMemory {
                 SavedMethod.signature(prior.surface) == SavedMethod.signature(surface) ? prior.purpose : nil
             } ?? ((surface?.title ?? task.title) + ": " + purpose)
         let recipe = InterfaceRecipe(
-            id: id, purpose: String(stablePurpose.prefix(240)), kind: task.kind, markup: task.presentation,
+            id: id, purpose: String(stablePurpose.prefix(240)), kind: task.kind, markup: surface?.journal == nil ? task.presentation : task.presentation.excludingJournal,
             plan: task.plan, surface: surface,
             stateKeys: Array(
                 Set((task.liveValues ?? task.taskSurface?.state ?? [:]).keys).subtracting(
-                    Set(surface?.runtime?.sources.map(\.key) ?? []))
+                    Set(surface?.runtime?.sources.map(\.key) ?? []).union(surface?.journal == nil ? [] : ["journalRecent"]))
             ).sorted(), sourceURL: task.sourceURL)
         userRecipes.removeAll { $0.id == id }
         userRecipes.insert(recipe, at: 0)
@@ -104,7 +104,7 @@ final class InterfaceMemory {
     }
     func interactiveMethods(language: String) -> [[String: Any]] {
         catalogue(language: language).filter { $0["interactive"] as? Bool == true }.prefix(8).map {
-            $0.filter { ["id", "purpose", "fields", "actions", "state_keys"].contains($0.key) }
+            $0.filter { ["id", "purpose", "fields", "actions", "state_keys", "journalScope"].contains($0.key) }
         }
     }
     /// Semantic selection is made by the agent, never by title/keyword matching.
@@ -116,6 +116,7 @@ final class InterfaceMemory {
                 "fields": $0.surface?.fields ?? [], "interactive": $0.surface?.hasEditableOperation == true,
                 "actions": $0.surface?.actions.map(\.id) ?? $0.plan?.actions?.map(\.id) ?? [],
             ]
+            if let journal = $0.surface?.journal { entry["journalScope"] = journal.scope.rawValue }
             if let spec = $0.surface?.apiData {
                 entry["api"] =
                     [

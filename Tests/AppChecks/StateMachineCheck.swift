@@ -3,21 +3,62 @@
     import SwiftUI
     import WebKit
 
+    /// The person may switch desktop apps during a background check. Record any activation of Orvlet itself.
+    @MainActor
+    final class BackgroundFocusCheck: NSObject {
+        private(set) var tookFocus = false
+
+        override init() {
+            super.init()
+            tookFocus = NSApp.isActive
+            NotificationCenter.default.addObserver(self, selector: #selector(becameActive),
+                                                   name: NSApplication.didBecomeActiveNotification, object: NSApp)
+        }
+
+        @objc private func becameActive(_ notification: Notification) { tookFocus = true }
+    }
+
     @MainActor
     enum StateMachineCheck {
         static func start() async {
             var checks: [String] = []
+            let remindersOnly = CommandLine.arguments.contains("--card-reminders-only")
+            if CommandLine.arguments.contains("--probe-reminder-policy") {
+                guard CommandLine.arguments.contains("--allow-live-services") else {
+                    fputs("The reminder policy probe needs --allow-live-services.\n", stderr)
+                    exit(2)
+                }
+                do {
+                    try await ModelPolicyProbe.checkReminderDelivery()
+                    exit(0)
+                } catch {
+                    fputs(error.localizedDescription + "\n", stderr)
+                    exit(1)
+                }
+            }
+            let report = URL(fileURLWithPath: remindersOnly ? "/tmp/orvlet-card-reminders-checks.json" : "/tmp/orvlet-state-machine-checks.json")
             do {
                 try require(
                     NSApplication.shared.windows.allSatisfy { !$0.isVisible },
                     "Background checks start before any app window is created", &checks)
+                if !remindersOnly { checks += try await BuiltinCardsCheck.background() }
+                checks += try await CardReminderCheck.run()
+                checks += try await RuntimeLifecycleCheck.deadlineReminderChecks()
+                if remindersOnly {
+                    try JSONSerialization.data(withJSONObject: ["ok": true, "checks": checks]).write(to: report)
+                    exit(0)
+                }
+                checks += try await playbackRecoveryChecks()
                 checks += try SavedMusicPlayerCheck.run()
                 checks += try await stateChecks()
+                checks += try journalRecoveryChecks()
                 checks += try await DecisionAPICheck.render()
                 checks += try await LocalCredentialsCheck.run()
                 checks += try await ModelProfileRecoveryCheck.run()
                 checks += try await DetailViewportCheck.run()
                 checks += try await WindowDragCheck.run()
+                try await TaskDismissalCheck.run()
+                checks += try await CapsuleMotionCheck.run()
                 checks += try await PlaybackActivityCheck.run()
                 checks += try await MusicRequestCheck.routingChecks()
                 if #available(macOS 15.4, *) { checks += try await extensionChecks() }
@@ -25,12 +66,12 @@
                     NSApplication.shared.windows.allSatisfy { !$0.isVisible },
                     "Offscreen render checks leave no visible windows", &checks)
                 try JSONSerialization.data(withJSONObject: ["ok": true, "checks": checks]).write(
-                    to: URL(fileURLWithPath: "/tmp/orvlet-state-machine-checks.json"))
+                    to: report)
                 exit(0)
             } catch {
                 try? JSONSerialization.data(withJSONObject: [
                     "ok": false, "checks": checks, "error": error.localizedDescription,
-                ]).write(to: URL(fileURLWithPath: "/tmp/orvlet-state-machine-checks.json"))
+                ]).write(to: report)
                 exit(1)
             }
         }
@@ -39,6 +80,171 @@
             checks.append(label)
             print("PASS " + label)
         }
+        static func journalRecoveryChecks() throws -> [String] {
+            var checks: [String] = []
+            let suite = "orvlet-journal-check-" + UUID().uuidString
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let repo = WorkRepository(defaults: defaults)
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "Asia/Hong_Kong")!
+            let evening = calendar.date(from: DateComponents(year: 2030, month: 7, day: 1, hour: 23, minute: 59))!
+            let midnight = evening.addingTimeInterval(60)
+            for scope in [ActionJournalSpec.Scope.day, .allTime] {
+                let id = repo.retain(title: "Print proofs", values: ["count": "10"],
+                    definition: WorkDefinition(journal: .init(valueKey: "count", scope: scope)),
+                    design: WorkDesign(), goalID: nil)
+                guard let initial = repo.artifact(id) else { throw AppError.message("Journal was not saved") }
+                try require(initial.values["count"] == "10" && initial.journalHistory?.entries.isEmpty == true,
+                    "A starting count never invents earlier events", &checks)
+                _ = repo.update(id, expecting: initial.revision) { item in
+                    item.journalHistory = JournalHistory(day: evening)
+                    item.values["count"] = "11"
+                    item.recordJournal(from: "10", at: evening)
+                    item.recordJournal(from: "11", at: evening)
+                }
+                guard var restored = WorkRepository(defaults: defaults).artifact(id) else {
+                    throw AppError.message("Journal could not reopen")
+                }
+                try require(restored.values["count"] == "11" && restored.journalHistory?.entries.count == 1 &&
+                    restored.journalHistory?.entries.first?.at == evening,
+                    "Reopening preserves the actual click time and ignores a no-op", &checks)
+                let changed = restored.rollJournal(to: midnight, calendar: calendar)
+                if scope == .day {
+                    let undoChanged = restored.undoJournal(at: midnight, calendar: calendar)
+                    try require(changed && !undoChanged && restored.values["count"] == "0" && restored.journalHistory?.entries.isEmpty == true,
+                        "A daily journal starts empty at local midnight and cannot undo yesterday", &checks)
+                } else {
+                    let undoChanged = restored.undoJournal(at: midnight, calendar: calendar)
+                    try require(!changed && undoChanged && restored.values["count"] == "10" && restored.journalHistory?.entries.isEmpty == true,
+                        "A running journal keeps its count overnight and undoes the exact last click", &checks)
+                }
+            }
+            return checks
+        }
+        static func playbackRecoveryChecks() async throws -> [String] {
+            let suite = "orvlet-playback-recovery-" + UUID().uuidString
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let memory = PlaybackSourceMemory(defaults)
+            let bad = MusicTrack(id: "original123", title: "Recording", searchQuery: "Recording studio", styleSelection: false)
+            let good = MusicTrack(id: "fallback123", title: "Recording")
+            var checks: [String] = []
+            let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 220))
+            view.loadHTMLString("<video></video><div id='movie_player'><div class='ytp-error-content'>fixture</div></div>",
+                baseURL: URL(string: bad.url))
+            for _ in 0..<100 {
+                if (try? await view.evaluateJavaScript("!!document.querySelector('.ytp-error-content')")) as? Bool == true { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            _ = try await view.evaluateJavaScript(BrowserController.script)
+            let failed = try await view.evaluateJavaScript("window.__orvlet.state().playbackFailed") as? Bool == true
+            try require(failed, "The visible player error is detected even without a native media error or translated text", &checks)
+            _ = try await view.evaluateJavaScript("document.querySelector('.ytp-error-content').remove();true")
+            try require(try await view.evaluateJavaScript("window.__orvlet.state().playbackFailed") as? Bool == false,
+                "A paused or buffering media element does not mark its source as broken", &checks)
+            var visits: [String] = []
+            try await memory.play(bad, replacement: { _ in good }, attempt: { track in
+                visits.append(track.id)
+                if track.id == bad.id && failed { throw PlaybackSourceUnavailable() }
+            })
+            try require(visits == [bad.id, good.id], "A confirmed failure switches to a matching alternative in the same operation", &checks)
+            var style = bad
+            style.searchQuery = "ambient instrumentals"
+            style.styleSelection = true
+            var nextStyle = good
+            nextStyle.searchQuery = style.searchQuery
+            nextStyle.styleSelection = true
+            let queue = MusicQueue(upcoming: [good, nextStyle])
+            try require(queue.matchingReplacement(for: style, available: { !memory.avoids($0.url) }) == nextStyle &&
+                queue.matchingReplacement(for: bad, available: { _ in true }) == nil,
+                "Only another track selected for the same style can replace a failed source directly from the queue", &checks)
+            let restarted = PlaybackSourceMemory(defaults)
+            visits = []
+            try await restarted.play(bad, replacement: { _ in throw MusicSelectionUnavailable() }, attempt: { visits.append($0.id) })
+            try require(visits == [good.id] && restarted.avoids("https://youtu.be/" + bad.id + "?t=3") && !restarted.avoids(good.url),
+                "A later session skips the failed video and its URL aliases before navigation", &checks)
+            try require(restarted.preferredSong("  RECORDING   studio ")?.id == good.id &&
+                restarted.preferredSong("Recording live") == nil, "Repeat song requests reuse verified playback and preserve version qualifiers", &checks)
+            let migrationSuite = suite + "-migration"
+            let migration = UserDefaults(suiteName: migrationSuite)!
+            defer { migration.removePersistentDomain(forName: migrationSuite) }
+            migration.set([PlaybackSourceMemory.identity(bad.url)!: 1.0], forKey: "mediaSourceCooldowns.v1")
+            let migrated = PlaybackSourceMemory(migration)
+            try require(migrated.avoids(bad.url) && PlaybackSourceMemory(migration).avoids(bad.url),
+                "An old expired cooldown migrates to a lasting failure and survives restart", &checks)
+            do {
+                try await restarted.play(good, replacement: { _ in bad }, attempt: { _ in throw CancellationError() })
+            } catch is CancellationError {}
+            try require(!restarted.avoids(good.url), "Cancellation does not blacklist a healthy source", &checks)
+            var attempts = 0
+            do {
+                try await restarted.play(good, replacement: { _ in
+                    MusicTrack(id: attempts == 1 ? "another0123" : "another0456", title: "Recording")
+                }, attempt: { _ in attempts += 1; throw PlaybackSourceUnavailable() })
+            } catch is PlaybackSourceUnavailable {}
+            try require(attempts == 3, "An exhausted set of sources stops after three attempts", &checks)
+            let third = MusicTrack(id: "working0123", title: "Recording")
+            visits = []
+            try await restarted.play(bad, replacement: { _ in third }, attempt: { visits.append($0.id) })
+            try require(visits == [third.id] && PlaybackSourceMemory(defaults).preferredSong("Recording studio")?.id == third.id,
+                "A failed replacement stays excluded and verified playback updates the next song request", &checks)
+            let generic = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 220))
+            generic.loadHTMLString("<video preload='none'></video>", baseURL: URL(string: "https://example.invalid/recording"))
+            for _ in 0..<100 {
+                if (try? await generic.evaluateJavaScript("!!document.querySelector('video')")) as? Bool == true { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            _ = try await generic.evaluateJavaScript(BrowserController.script)
+            let switched = try await generic.evaluateJavaScript("""
+                (() => {
+                  const video = document.querySelector('video');
+                  for (const name of ['first','second']) {
+                    const option = document.createElement('source');
+                    option.src = 'https://example.invalid/' + name;
+                    video.appendChild(option);
+                  }
+                  Object.defineProperty(video, 'currentSrc', {value:'https://example.invalid/first'});
+                  Object.defineProperty(video, 'error', {value:{code:2}, configurable:true});
+                  if (window.__orvlet.state().playbackFailed) return false;
+                  Object.defineProperty(video, 'error', {value:{code:3}});
+                  Object.defineProperty(video, 'play', {value:() => Promise.resolve()});
+                  const state = window.__orvlet.state();
+                  const next = state.alternativeMediaSources[1];
+                  return state.playbackFailed && window.__orvlet.replaceMediaSource(location.href, state.activeMediaSource, next) && video.src === next;
+                })()
+                """)
+            try require(switched as? Bool == true, "A standard HTML player can switch to another declared encoding after a decoder error", &checks)
+            let model = AppModel(defaults: defaults)
+            model.isLiveTest = true
+            model.persistHistory = false
+            let restored = try await model.savedPlaybackReplacement(bad.url, title: bad.title, task: nil)
+            try require(restored?.selected.id == third.id, "Restoring a failed saved video resolves directly to its verified replacement", &checks)
+            let browser = BrowserController(model: model)
+            defer { browser.dispose() }
+            var observed: [String: Any] = ["url": bad.url, "playing": true, "currentTime": 1.0]
+            browser.updateState(observed)
+            browser.updateState(observed)
+            try require(model.playbackSources.avoids(bad.url), "Opening a failed video without progress keeps its failure record", &checks)
+            observed["currentTime"] = 2.0
+            browser.updateState(observed)
+            try require(!PlaybackSourceMemory(defaults).avoids(bad.url), "Observed playback progress on a manually opened page clears its failure", &checks)
+            let a = "https://example.invalid/a", b = "https://example.invalid/b", c = "https://example.invalid/c"
+            let catalog = "https://example.invalid/library"
+            model.playbackSources.recordPlayerFailure(["url": catalog, "activeMediaSource": a, "playbackFailed": true])
+            try require(model.playbackSources.avoids(a) && !model.playbackSources.avoids(catalog),
+                "A failed media file leaves its shared library page eligible", &checks)
+            model.playbackSources.verifiedMedia(b, replacing: a)
+            try require(PlaybackSourceMemory(defaults).preferredMedia(for: a, among: [c, b]) == b,
+                "A previously verified media encoding takes priority over an untested alternative", &checks)
+            model.playbackSources.record(b)
+            try require(model.playbackSources.preferredMedia(for: a, among: [b, c]) == nil, "A broken alternate encoding loses priority", &checks)
+            model.playbackSources.verifiedMedia(c, replacing: b)
+            try require(PlaybackSourceMemory(defaults).preferredMedia(for: a, among: [a, b, c]) == c,
+                "The first failed encoding resolves to its latest verified successor after restart", &checks)
+            return checks
+        }
+
         static func stateChecks() async throws -> [String] {
             var checks: [String] = []
             let suite = "orvlet-state-audit-" + UUID().uuidString

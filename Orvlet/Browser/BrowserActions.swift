@@ -167,12 +167,14 @@ extension AppModel {
                 }
                 if browser.id == target.id { lastInteraction = binding.operation ?? binding.action }
             } catch is CancellationError {} catch {
-                deliverReply(
-                    "The page control changed. Reconnecting it; your action has not been completed.", kind: .failure,
-                    taskID: target.id)
                 if browser.id == target.id {
+                    reportTaskIssue(target.id, source: .interface,
+                                    detail: "The page control changed. Reconnecting it; your action has not been completed.")
                     lastActionError = "Page changed. Reconnecting controls…"
                     adaptive.bindingFailed()
+                } else {
+                    reportTaskIssue(target.id, source: .interface, detail: "The page control changed. Reopen the task and try the action again.",
+                                    requiresAttention: true)
                 }
             }
         }

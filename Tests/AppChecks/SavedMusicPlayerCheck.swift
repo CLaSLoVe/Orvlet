@@ -55,6 +55,11 @@ enum SavedMusicPlayerCheck {
             "A second launch keeps the same player identity and does not append the tracks twice", &checks)
 
         // Cancel synchronously, before restoration can issue a navigation.
+        next.settings.resumePlaybackOnLaunch = true
+        next.restoreSessionOnLaunch(SavedSession(url: old.sourceURL!, title: old.title,
+            listening: true, wasPlaying: true, taskID: old.id))
+        try StateMachineCheck.require(!next.restoringSession && next.dormantLaunchSession == nil,
+            "A saved playing session with a closed card cannot autoplay or arm a dormant player", &checks)
         next.restoreSessionOnLaunch(SavedSession(url: old.sourceURL!, title: old.title))
         try StateMachineCheck.require(!next.restoringSession, "Startup leaves retired page sessions closed", &checks)
         next.restoreSessionOnLaunch(SavedSession(url: owner.sourceURL! + "&t=3", title: owner.title))

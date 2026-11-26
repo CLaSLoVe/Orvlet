@@ -178,7 +178,7 @@ extension AgentController {
                 throw AppError.message("Resolve an existing task before controlling it.")
             }
             if operation == "inspect" {
-                return AgentContext.task(task, definition: input["detail"] as? String == "definition")
+                return AgentContext.task(model.modelTaskDescription(task), definition: input["detail"] as? String == "definition")
             }
             if let surface = task.taskSurface, surface.apiData != nil,
                 operation == "refresh" || operation == "invoke" {
@@ -353,7 +353,7 @@ extension AgentController {
                 throw AppError.message("Refresh an API-backed recipe with query_api and current source evidence.")
             }
             let handlers = surface.actions.filter { $0.kind == .code }
-            let initialize = input["initialize"] as? String ?? (!surface.fields.isEmpty && handlers.count == 1 ? handlers[0].id : nil)
+            let initialize = input["initialize"] as? String ?? (surface.journal == nil && !surface.fields.isEmpty && handlers.count == 1 ? handlers[0].id : nil)
             if initialize != nil {
                 guard Set(surface.fields).isSubset(of: Set(state.keys)) else {
                     throw AppError.message("Supply fresh values for every saved input field before recalculating.")
@@ -411,7 +411,7 @@ extension AgentController {
         guard let key = form?["compactKey"] as? String ?? glance?["valueKey"] as? String ?? (bound.count == 1 ? bound.first : nil),
             let value = verified[key], !value.isEmpty, value.count <= 120 else { return nil }
         let unit = form?["compactUnit"] as? String ?? glance?["unit"] as? String
-        let summary = title + " · " + value + (unit.flatMap { value.hasSuffix($0) ? nil : " " + $0 } ?? "")
+        let summary = title + ": " + value + (unit.flatMap { value.hasSuffix($0) ? nil : " " + $0 } ?? "")
         retainedReading = summary + "\n" + receipt.sourceNotes
         let subject = String(title.prefix(100))
         // A broken generated form may have invalid keys, duplicate rows or oversized labels.
@@ -470,6 +470,10 @@ extension AgentController {
         // every result produced after visiting it. Evidence checks still apply.
         attemptedTaskWork = true
         var specification = input
+        if let requiredScope = requestIntent.placement?.localPurpose?.journalScope,
+            (specification["journal"] as? [String: Any])?["scope"] as? String != requiredScope.rawValue {
+            throw ToolArgumentError(path: "$.journal", issue: "For this recording task attach journal:{valueKey,scope} to the numeric total with scope " + requiredScope.rawValue + ". Build a new form if the saved method lacks this behavior.")
+        }
         if (specification["actions"] as? [[String: Any]])?.contains(where: { $0["kind"] as? String == "openRecord" }) == true {
             throw ToolArgumentError(path: "$.actions", issue: "bind source destinations from observed records with read_value or show_readings")
         }
@@ -565,6 +569,9 @@ extension AgentController {
             surface.state.merge(try TaskValues.decode(receipt.result)) { _, verified in verified }
         }
         if let initialize = input["initialize"] as? String {
+            guard surface.journal == nil else {
+                throw ToolArgumentError(path: "$.initialize", issue: "Initialize the recording total in state. Recording actions run only when the person logs an occurrence.")
+            }
             guard let action = surface.actions.first(where: { $0.id == initialize && $0.kind == .code }),
                 let code = action.code
             else {
@@ -585,8 +592,8 @@ extension AgentController {
             let initial = surface.state.filter { surface.fields.contains($0.key) }
             let output: [String: String]
             do {
-                output = try TaskValues.decode(try await definitionChecks.run(
-                    code: code, input: initial, state: surface.state, declaredInputs: surface.fields))
+                let response = try await definitionChecks.run(code: code, input: initial, state: surface.state, declaredInputs: surface.fields)
+                output = try TaskVerification.checkedActionOutput(response, at: "$.initialize")
             } catch let error as TaskCodeError {
                 let index = surface.actions.firstIndex { $0.id == initialize }!
                 throw ToolArgumentError(path: "$.actions[\(index)].code", issue: "Initialization in " + initialize + " failed: " + error.localizedDescription + " Supply a function body with a top-level return {state:{...}}. Keep inputs, layout and checks.")
@@ -643,7 +650,11 @@ extension AgentController {
             let field = markup == nil && input["form"] != nil ? "$.form.compactKey"
                 : markup?["glance"] == nil ? "$.markup.compactHTML" : "$.markup.glance.valueKey"
             try surface.markup.validateExpandedPurpose(state: surface.state, subject: surface.title, hasActions: !surface.actions.isEmpty || !surface.fields.isEmpty)
-            try surface.markup.validateGlance(state: surface.state, fieldPath: field, runtimeKeys: Set(surface.runtime?.sources.map(\.key) ?? []))
+            let shortcut = surface.capsuleAction.flatMap { CapsuleAction(id: $0.id, label: $0.compactLabel) }
+            let unit = formProposal?["compactUnit"] as? String ?? (markup?["glance"] as? [String: Any])?["unit"] as? String
+            try surface.markup.validateGlance(state: surface.state, fieldPath: field, runtimeKeys: Set(surface.runtime?.sources.map(\.key) ?? []),
+                width: shortcut?.textWidth ?? 82, unit: unit)
+
             if let key = CardMarkup.bindingKeys(in: surface.markup.compactHTML).subtracting(["title", "status"]).first {
                 let form = input["form"] as? [String: Any]
                 let glance = (input["markup"] as? [String: Any])?["glance"] as? [String: Any]
@@ -664,6 +675,7 @@ extension AgentController {
                 try surface.markup.validateMeasuredResult(primary: key, subjects: [surface.title] + labels, state: surface.state, fieldPath: field)
             }
         }
+        if let rule = try CardReminderRule.decode(input["reminder"]) { surface.reminder = rule }
         surface = try surface.validated()
         if let interval = requestIntent.updateIntervalSeconds, surface.runtime?.refresh?.intervalSeconds != interval {
             throw AppError.message(

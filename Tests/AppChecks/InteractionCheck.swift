@@ -83,9 +83,13 @@
             try check(
                 moved.origin != detailBefore.origin && delegate.panel.frame == moved,
                 "Dragging the detail header keeps its new position across state updates")
-            if let timer = model.sideTasks.first(where: { $0.kind == .timer }) {
-                if timer.terminalLabel != nil { model.timerAction(timer.id, action: "restart") }
-                model.selectTask(timer.id, expanded: true)
+            do {
+                var result = SideTask(kind: .result, title: "Report")
+                result.generated = true
+                result.markup = CardMarkup(html: "<strong>Report</strong><button data-action='expand'>Open</button>", css: "")
+                model.sideTasks.append(result)
+                defer { model.closeTask(result.id) }
+                model.selectTask(result.id, expanded: true)
                 try await pause()
                 func webViews(_ view: NSView) -> [WKWebView] {
                     (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews)
@@ -97,7 +101,7 @@
                         break
                     }
                 }
-                guard let card else { throw AppError.message("Generated timer card missing") }
+                guard let card else { throw AppError.message("Generated result card missing") }
                 let before = delegate.panel.frame.origin
                 _ = try await card.evaluateJavaScript(
                     "document.querySelector('strong').dispatchEvent(new MouseEvent('mousedown',{bubbles:true,screenX:100,screenY:100,button:0})); document.dispatchEvent(new MouseEvent('mousemove',{screenX:130,screenY:112})); document.dispatchEvent(new MouseEvent('mouseup')); true"

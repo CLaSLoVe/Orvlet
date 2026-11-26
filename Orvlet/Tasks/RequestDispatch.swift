@@ -20,6 +20,14 @@ extension AppModel {
         }
         let draftID = revisionID ?? (reference == nil ? (editing ?? UUID()) : UUID())
         let messageID = appendMessage(text, isUser: true, taskID: draftID, editsInterface: revisionID != nil)
+        if let editing, revisionID == nil, handleForgetRequest(text, task: editing, messageID: messageID) {
+            if let index = messages.firstIndex(where: { $0.id == messageID }) { messages[index].taskID = editing }
+            return
+        }
+        if revisionID == nil, handleSiteReport(text, owner: editing ?? draftID, reference: editing) {
+            if let editing, let index = messages.firstIndex(where: { $0.id == messageID }) { messages[index].taskID = editing }
+            return
+        }
         if !forceNewTask, revisionID == nil, let editing, localTaskControl(text, taskID: editing) {
             if let index = messages.firstIndex(where: { $0.id == messageID }) { messages[index].taskID = editing }
             return
@@ -31,6 +39,11 @@ extension AppModel {
         if let revisionID {
             submitTaskRequest(text, taskID: revisionID, messageID: messageID)
             return
+        }
+        if commandPanelVisible, let editing,
+            let question = messages.last(where: { !$0.isUser && $0.taskID == editing }),
+            reminders.contains(where: { $0.id == question.id && $0.needsInput }) {
+            dismissReminder(question.id)
         }
         if let reference {
             startCommand(text, messageID: messageID, conversationReference: reference)
@@ -86,7 +99,7 @@ extension AppModel {
         }
         guard settings.main.isConfigured else {
             deliverReply(
-                "Connect a model in Settings to start.", kind: .needsInput,
+                "Connect a model in Settings to start.", kind: .authorization,
                 taskID: messageID.flatMap { mid in messages.first(where: { $0.id == mid })?.taskID })
             return
         }

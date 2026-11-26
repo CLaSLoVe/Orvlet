@@ -8,6 +8,17 @@ final class PlaybackCoordinator {
     private var sources: [UUID: Source] = [:]
     private var revision = 0
     private(set) var owner: UUID?
+    private(set) var reminderMusicGain = 1.0
+    private(set) var reminderRevision = 0
+
+    func setReminderMusicGain(_ gain: Double) {
+        guard reminderMusicGain != gain else { return }
+        reminderMusicGain = gain
+        reminderRevision += 1
+        for source in sources.values {
+            source.browser?.applyReminderMusicDucking()
+        }
+    }
 
     func register(_ browser: BrowserController) {
         sources[browser.id] = Source(browser: browser)

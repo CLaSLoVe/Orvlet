@@ -28,6 +28,22 @@ extension AppModel {
         let state = MusicPlayback(data)
         let old = musicPlayback[id]
         if state != old { musicPlayback[id] = state }
+        if let raw = data["url"] as? String, let controller = musicBrowser(id), !controller.disposed, !controller.loading,
+            controller.currentURL?.absoluteString == raw, !state.ad {
+            if controller.tryAlternateMedia(raw, state: data) { return }
+            if data["playbackFailed"] as? Bool == true {
+                playbackSources.recordPlayerFailure(data)
+                if musicLoading.contains(id) { controller.handledPlaybackFailure = raw }
+                if controller.handledPlaybackFailure != raw, !musicLoading.contains(id), !controller.playbackSuspended, !restoringSession,
+                    runOwning(id) == nil, !(busy && ownsRequest(id)), sideTasks[index].listening == true,
+                    let track = recoveryTrack(sideTasks[index], url: raw) {
+                    controller.handledPlaybackFailure = raw
+                    startQueuedMusic(track, id: id)
+                }
+                return
+            }
+
+        }
         if !musicLoading.contains(id), state.ready, !state.ad, state.videoID != nil {
             var queue = sideTasks[index].musicQueue ?? MusicQueue()
             if let videoID = state.videoID, queue.current?.id != videoID {
@@ -56,6 +72,12 @@ extension AppModel {
     }
 
     func musicBrowser(_ id: UUID) -> BrowserController? { id == browser.id ? browser : parkedBrowsers[id] }
+
+    func recoveryTrack(_ task: SideTask, url: String) -> MusicTrack? {
+        guard let id = MusicTrack.videoID(url) else { return nil }
+        if let current = task.musicQueue?.current, current.id == id { return current }
+        return MusicTrack(id: id, title: task.title)
+    }
 
     func enqueueMusic(_ tracks: [MusicTrack], id: UUID, next: Bool = false) throws {
         guard let i = sideTasks.firstIndex(where: { $0.id == id }), sideTasks[i].isMediaTask else {
@@ -88,7 +110,7 @@ extension AppModel {
 
     /// The same operation powers native controls and checks. It always addresses the owning page.
     func performMusicControl(_ id: UUID, operation: String, value: Double? = nil) async throws {
-        try await wakeDormantSource(id)
+        try await wakeDormantSource(id, replacingMedia: ["play", "toggle", "next", "previous"].contains(operation))
         guard let task = sideTasks.first(where: { $0.id == id }), task.isMediaTask,
             let controller = musicBrowser(id), !controller.disposed
         else { throw CancellationError() }
@@ -111,6 +133,11 @@ extension AppModel {
         guard ["play", "pause", "seek", "volume", "toggleMute", "loop", "unloop"].contains(op) else {
             throw AppError.message("Unsupported music control.")
         }
+        if op == "play", let url = task.sourceURL, playbackSources.avoids(url) {
+            guard let track = recoveryTrack(task, url: url) else { throw PlaybackSourceUnavailable() }
+            try await playMusicTrack(track, id: id)
+            return
+        }
         if op == "pause" || op == "play" {
             if op == "pause", busy, requestPageID == id { cancel() }
             controller.setUserPlaybackPaused(op == "pause")
@@ -118,7 +145,16 @@ extension AppModel {
         }
         var input: [String: Any] = ["action": "media", "operation": op]
         if let value { input["value"] = value }
-        _ = try await controller.action(input)
+        do { _ = try await controller.action(input) }
+        catch {
+            try Task.checkCancellation()
+            if op == "play", let raw = controller.currentURL?.absoluteString, playbackSources.avoids(raw),
+                let track = recoveryTrack(task, url: raw), !musicLoading.contains(id) {
+                try await playMusicTrack(track, id: id)
+                return
+            }
+            throw error
+        }
         let page = try await controller.observe()
         let actual = MusicPlayback(page)
         if op == "volume", let value, abs(actual.volume - value) > 0.02 {
@@ -171,7 +207,7 @@ extension AppModel {
 
     func playMusicTrack(_ track: MusicTrack, id: UUID) async throws {
         try Task.checkCancellation()
-        try await wakeDormantSource(id)
+        try await wakeDormantSource(id, replacingMedia: true)
         guard let controller = musicBrowser(id), !controller.disposed,
             let index = sideTasks.firstIndex(where: { $0.id == id })
         else { throw CancellationError() }
@@ -179,13 +215,9 @@ extension AppModel {
         musicRevisions[id] = ticket
         musicLoading.insert(id)
         musicErrors[id] = nil
-        let start = Date()
-        var queue = sideTasks[index].musicQueue ?? MusicQueue()
-        queue.select(track)
-        sideTasks[index].musicQueue = queue
+        let queue = sideTasks[index].musicQueue ?? MusicQueue()
         sideTasks[index].listening = true
         sideTasks[index].prefersSource = false
-        sideTasks[index].sourceURL = track.url
         defer {
             if musicRevisions[id] == ticket { musicLoading.remove(id) }
             persistSideTasks()
@@ -194,6 +226,39 @@ extension AppModel {
         controller.setUserPlaybackPaused(false, origin: "music_selection")
         if (activeRequest?.startPolicy ?? settings.taskStartPolicy) == .interfaceFirst { controller.waitForInterface() }
         await controller.applyPlaybackPolicy()
+        func checkOwner() throws {
+            try Task.checkCancellation()
+            guard musicRevisions[id] == ticket, musicBrowser(id) === controller, !controller.disposed,
+                !controller.userPausedPlayback, sideTasks.contains(where: { $0.id == id }) else { throw CancellationError() }
+        }
+        try await playbackSources.play(track, replacement: { original in
+            try checkOwner()
+            if let queue = sideTasks.first(where: { $0.id == id })?.musicQueue,
+                let next = queue.matchingReplacement(for: original, available: { !playbackSources.avoids($0.url) }) {
+                return next
+            }
+            let generation = controller.navigationGeneration
+            let focus = controller.audioFocusHeld
+            let replacement = try await YouTubeDiscovery.replacement(for: original, model: self)
+            try checkOwner()
+            guard generation == controller.navigationGeneration, focus == controller.audioFocusHeld else { throw CancellationError() }
+            return replacement
+        }, attempt: { candidate in
+            try checkOwner()
+            guard let i = sideTasks.firstIndex(where: { $0.id == id }) else { throw CancellationError() }
+            let current = sideTasks[i].musicQueue?.current
+            var updated = sideTasks[i].musicQueue ?? queue
+            if let current, playbackSources.avoids(current.url) { updated.current = nil }
+            updated.upcoming.removeAll { $0.id == track.id }
+            updated.select(candidate)
+            sideTasks[i].musicQueue = updated
+            sideTasks[i].sourceURL = candidate.url
+            try await startMusicSource(candidate, controller: controller, id: id, queue: updated, ticket: ticket)
+        })
+    }
+
+    private func startMusicSource(_ track: MusicTrack, controller: BrowserController, id: UUID, queue: MusicQueue, ticket: UUID) async throws {
+        let start = Date()
         var acquiredFocus = !controller.audioFocusHeld
         try Task.checkCancellation()
         _ = try await controller.action(["action": "navigate", "url": track.url])
@@ -208,6 +273,7 @@ extension AppModel {
             else { throw CancellationError() }
             let page = try await controller.observe()
             let state = MusicPlayback(page)
+            if state.videoID == track.id, !state.ad, page["playbackFailed"] as? Bool == true { throw PlaybackSourceUnavailable() }
             if state.videoID == track.id, state.ready, !state.ad {
                 if !configured {
                     _ = try await controller.action(["action": "media", "operation": "volume", "value": queue.volume])
@@ -237,7 +303,15 @@ extension AppModel {
                 if !state.playing, !startedPlayback {
                     // A single attempt; never repeatedly restart a buffering player or an ad.
                     startedPlayback = true
-                    _ = try await controller.action(["action": "media", "operation": "play"])
+                    do { _ = try await controller.action(["action": "media", "operation": "play"]) }
+                    catch {
+                        try Task.checkCancellation()
+                        let latest = try await controller.observe()
+                        if MusicTrack.videoID(latest["url"] as? String ?? "") == track.id, latest["playbackFailed"] as? Bool == true {
+                            throw PlaybackSourceUnavailable()
+                        }
+                        throw error
+                    }
                     if queue.muted { _ = try await controller.action(["action": "media", "operation": "mute"]) }
                 }
                 if state.playing, let first = baseline, state.position > first + 0.2,

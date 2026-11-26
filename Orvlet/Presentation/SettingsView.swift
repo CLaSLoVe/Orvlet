@@ -74,6 +74,7 @@ struct SettingsView: View {
             .onDisappear {
                 if let modifierMonitor { NSEvent.removeMonitor(modifierMonitor) }
                 modifierMonitor = nil
+                model.stopReminderPreview()
                 optionHeld = false
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
@@ -189,6 +190,8 @@ struct SettingsView: View {
                         ForEach(TaskStartPolicy.allCases, id: \.self) { Text($0.title).tag($0) }
                     }.labelsHidden().frame(width: 150)
                 }.help("Task first starts work immediately. Interface first prepares controls before playback.")
+                reminderSoundRow("Alarm sound", .persistent, $draft.alarmSound)
+                reminderSoundRow("Message sound", .brief, $draft.messageSound)
                 HStack {
                     Text("Generated interface language")
                     Spacer()
@@ -196,7 +199,9 @@ struct SettingsView: View {
                         .accessibilityLabel("Generated interface language").frame(width: 150)
                 }
                 preferenceToggle("Adapt controls automatically", value: $draft.autoAdapt)
-                if !NativeChromium.available {
+                if NativeChromium.available && draft.browserEngine == .builtIn {
+                    preferenceToggle("Skip available YouTube ads", value: $draft.blockAds)
+                } else if !NativeChromium.available {
                     preferenceToggle("Block ads in built-in browser", value: $draft.blockAds)
                         .help("Reload a page after changing this setting. Some video ads may remain.")
                 }
@@ -215,6 +220,33 @@ struct SettingsView: View {
             Text("Changes are saved automatically.").font(.system(size: 11)).foregroundStyle(.secondary)
         }.toggleStyle(.switch).controlSize(.small)
     }
+    private func reminderSoundRow(_ label: String, _ persistence: ReminderPersistence, _ selection: Binding<ReminderSound>) -> some View {
+        let previewing = model.activeReminderSounds[.preview]?.persistence == persistence
+        let previewLabel = (previewing ? "Stop preview of " : "Preview ") + label.lowercased()
+        return HStack(spacing: 8) {
+            Text(label)
+            Spacer()
+            ReminderTonePicker(label: label, persistence: persistence, selection: Binding(get: {
+                selection.wrappedValue
+            }, set: { tone in
+                selection.wrappedValue = tone
+                persistPreferences()
+                model.changeReminderTone(for: persistence)
+            }))
+            .frame(width: 138, height: 20)
+            Button {
+                if previewing { model.stopReminderPreview() }
+                else { model.playReminderSound(persistence: persistence) }
+            } label: {
+                Image(systemName: previewing ? "stop.fill" : "play.fill").frame(width: 16)
+            }
+            .disabled(selection.wrappedValue == .silent)
+            .accessibilityLabel(previewLabel)
+            .accessibilityIdentifier("preview-\(persistence.rawValue)")
+            .help(previewLabel)
+        }
+    }
+
     var compactAppearance: some View {
         card {
             Text("Task cards").font(.system(size: 13, weight: .medium))
@@ -629,13 +661,13 @@ struct SettingsView: View {
                                 state: ["category": "audio", "playing": true],
                                 questions: ["audio": "Is audio currently playing?"])
                             guard result["audio"] != nil else { throw AppError.message("Unexpected Decisions response") }
-                            if draft.main == connection.endpoint { mainResult = "Connected · model and Decisions" }
+                            if draft.main == connection.endpoint { mainResult = "Model and Decisions connected" }
                         } catch {
                             if draft.main == connection.endpoint {
                                 mainResult = "Model connected. Decisions: " + error.localizedDescription
                             }
                         }
-                    } else if draft.main == connection.endpoint { mainResult = "Connected · tools supported" }
+                    } else if draft.main == connection.endpoint { mainResult = "Connected with tool support" }
                 } else {
                     let result = try await DecisionClient.judge(
                         endpoint: connection.endpoint, api: decisionAPI, key: key, state: ["category": "audio", "playing": true],
@@ -652,5 +684,49 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+}
+
+private struct ReminderTonePicker: NSViewRepresentable {
+    let label: String
+    let persistence: ReminderPersistence
+    @Binding var selection: ReminderSound
+
+    final class Coordinator: NSObject {
+        var selection: Binding<ReminderSound>
+        init(_ selection: Binding<ReminderSound>) { self.selection = selection }
+
+        @objc func choose(_ sender: NSMenuItem) {
+            guard let raw = sender.representedObject as? String, let tone = ReminderSound(rawValue: raw) else { return }
+            selection.wrappedValue = tone
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator($selection) }
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let picker = NSPopUpButton(frame: .zero, pullsDown: false)
+        picker.controlSize = .small
+        picker.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        picker.identifier = NSUserInterfaceItemIdentifier("sound-" + persistence.rawValue)
+        picker.setAccessibilityLabel(label)
+        picker.autoenablesItems = false
+        for tone in ReminderSound.choices(for: persistence, selected: selection) {
+            picker.addItem(withTitle: tone.title)
+            let item = picker.lastItem
+            item?.representedObject = tone.rawValue
+            item?.target = context.coordinator
+            item?.action = #selector(Coordinator.choose(_:))
+        }
+        return picker
+    }
+
+    func updateNSView(_ picker: NSPopUpButton, context: Context) {
+        context.coordinator.selection = $selection
+        picker.selectItem(withTitle: selection.title)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSPopUpButton, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions(by: nsView.intrinsicContentSize)
     }
 }

@@ -8,6 +8,10 @@
 
 **按习惯排序会发送什么？** 打开、操作、隐藏及拖动的衰减统计保存在本机；手动排序优先。已配置 Jev 时，后台排序可向 api.typesafe.ai 发送匿名任务类别、播放／计时／完成状态和汇总习惯分数。排序不发送任务标题、网页内容、网址或聊天记录。没有可用密钥或网络时使用本地排序，直接控制无需等待模型。
 
+**长对话与网站经验怎么保存？** Orvlet 可将同一任务的较早非敏感片段发送给配置的主模型，提取仍然有效的要求和决定。任务记忆及其来源保存在本机 SQLite 中，后续处理该任务时会选取相关条目。网站经验记录指定入口的访问结果、访问方式和时间，可供今后访问同一入口时参考。访客会话的登录状态只存在内存中。网站经验不保存密码、验证码、Cookie 或页面原文。Jev 分流和智能排序不会收到任务摘要或网站经验。
+
+在设置的本地数据页选择「Review memory」可以查看和忘记单条记忆。清除任务对话也会清除它的任务记忆及它贡献的网站经验。清除最近页面会清除网站经验，清除所有对话会清除所有对话衍生的记忆。
+
 **网页和日历呢？** 原网页会正常联网并使用 Cookie。内置 Chromium 默认使用临时会话，退出后清除该会话的网站登录。主动开启“记住网站登录”后，Chromium 才使用受 macOS 钥匙串保护的持久配置。广告过滤不能阻止所有追踪。日程只在获得系统授权后写入 Apple 日历，关闭结果卡片不会删除事件。
 
 **故障诊断保存什么？** 本机保留最近 150 条请求阶段、耗时、错误类别与任务标识，可在设置中复制。它们不包含对话内容、网页地址、生成代码、输入值或密钥。
@@ -23,6 +27,10 @@
 **What stays on this Mac?** API keys are stored in the app container’s Application Support/Orvlet/Private/credentials-v1.json with owner-only permissions (directory 0700, file 0600). Normal operation does not access Keychain. This is local plaintext storage, not an encrypted vault; keys are never written to source files or the app bundle. Settings, the latest 500 conversation messages per task and their attribution, task history, recent pages, generated interfaces, their code, and input state are stored locally. Calculation buttons run in a separate JavaScript process without access to model keys, files, a shell, or networking. Actions that ask the agent to continue send the relevant state and inputs to the model. Continuing clocks, elapsed time, scheduled local calculations, timer updates, direct playback controls, window movement, and opacity changes do not themselves call the model.
 
 **What does habit-based ordering send?** Decaying aggregates of opens, controls, hides, and reorders stay on this Mac; manual ordering takes precedence. With Jev configured, background ordering may send anonymous task categories, playback/timer/completion state, and aggregate habit scores to api.typesafe.ai. Ranking sends no task titles, page content, URLs, or conversations. Without an available key or network it uses local ordering; direct controls never wait for a model.
+
+**How does memory work?** Orvlet can send older, non-sensitive excerpts from a task to the configured main model to extract requirements and decisions. Task memory and its source references are saved in local SQLite storage. Orvlet selects relevant entries when continuing the task. Website experience records the observed outcome, access method and time for an operation on a site. Future tasks can use that experience when accessing the same operation. Guest session sign-in observations stay in memory. Website experience excludes passwords, verification codes, cookies and page text. Jev triage and smart ordering do not receive either kind of memory.
+
+Choose **Review memory** under Local data in Settings to inspect or forget individual entries. Clearing a task conversation also clears its task memory and its contributions to website experience. Clearing recent pages clears website experience. Clearing all conversations clears all conversation-derived memory.
 
 **What about websites and Calendar?** Original webpages make their own network requests and use cookies. Built-in Chromium uses a guest session by default and discards its website logins on quit. Enabling **Remember website logins** selects a persistent Chromium profile protected by macOS Keychain. Ad filtering does not block all tracking. Calendar writes require macOS permission; closing a result card does not delete the event.
 

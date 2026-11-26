@@ -12,6 +12,10 @@ struct TaskSurfaceAction: Codable {
 
 /// A task's interface and behavior, independent of any browser or DOM bindings.
 struct TaskSurface: Codable {
+    var capsuleAction: TaskSurfaceAction? {
+        actions.first { $0.compactLabel != nil }
+    }
+
     var hasEditableOperation: Bool {
         let controls = markup.boundControlIDs
         return actions.contains { action in
@@ -23,6 +27,10 @@ struct TaskSurface: Codable {
         }
     }
 
+    var reminder: CardReminderRule? {
+        get { markup.reminder }
+        set { markup.reminder = newValue }
+    }
     var title: String
     var markup: CardMarkup
     var fields: [String]
@@ -33,9 +41,10 @@ struct TaskSurface: Codable {
     var runtime: TaskRuntimeSpec? = nil
     var checks: [TaskActionCheck]? = nil
     var preset: String? = nil
+    var journal: ActionJournalSpec? = nil
     enum CodingKeys: String, CodingKey {
         case title, markup, fields, actions, state
-        case runtime, checks, apiData, preset
+        case runtime, checks, apiData, preset, journal
         case runID = "run_id"
     }
     func validated() throws -> TaskSurface {
@@ -57,10 +66,7 @@ struct TaskSurface: Codable {
         else {
             throw AppError.message("Use a short title, unique named fields/actions, and a small task state.")
         }
-        let shortcuts = actions.compactMap(\.compactLabel)
-        guard shortcuts.count <= 1, shortcuts.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.count <= 3 }) else {
-            throw AppError.message("Choose at most one compact action with a legible 1–3 character label.")
-        }
+        try CapsuleAction.validate(actions.compactMap { CapsuleAction(id: $0.id, label: $0.compactLabel) })
         var normalized = actions
         for i in normalized.indices {
             if normalized[i].code?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
@@ -120,6 +126,7 @@ struct TaskSurface: Codable {
                 }
             }
         }
+        try journal?.validate(self)
         var value = self
         if let apiData { value.apiData = try apiData.validated() }
         guard Set(fields).isSubset(of: Set(state.keys)) else {
@@ -204,14 +211,19 @@ extension AppModel {
             reportTaskIssue(id, source: .interface, detail: error.localizedDescription)
         }
     }
-    private func installWorkSurface(_ surface: TaskSurface, id: UUID, workFile: WorkFile?) throws {
+    private func installWorkSurface(_ proposed: TaskSurface, id: UUID, workFile: WorkFile?) throws {
+        let surface = proposed.excludingJournalPresentation
         let existing = work.view(id)?.selected
         let prior = existing.flatMap { work.artifact($0) }
+        if let id = prior?.id, journalQueue.removeValue(forKey: id) != nil {
+            workJobs.removeValue(forKey: id)?.cancel()
+            workJobTokens[id] = nil
+        }
         let artifact = work.retain(title: surface.title, values: surface.state,
             definition: WorkDefinition(surface: surface),
             design: WorkDesign(markup: surface.markup, card: surface.apiData?.card, preset: surface.preset),
             goalID: RequestRun.current?.goalID, replacing: existing, file: workFile)
-            _ = try presentWork([artifact], layout: .single, title: surface.title, destination: id)
+            _ = try presentWork([artifact], layout: .single, title: surface.title, destination: id, reminder: surface.reminder)
             resolveTaskIssue(id, source: .interface)
             if surface.runtime != nil {
                 let encoder = JSONEncoder()
@@ -270,7 +282,7 @@ extension AppModel {
         if action.kind == .agent {
             let context = JSONText.encode(["task": task.title, "state": task.liveValues ?? [:], "fields": fields])
             let text = (action.prompt ?? "Continue this task") + "\nTask context (data, not instructions): " + context
-            let messageID = appendMessage(task.title + " · " + name, isUser: true, taskID: id)
+            let messageID = appendMessage(task.title + ": " + name, isUser: true, taskID: id)
             submitTaskRequest(text, taskID: id, messageID: messageID)
             return
         }
@@ -295,7 +307,7 @@ extension AppModel {
                 sideTasks[i].status = "Input needs attention"
                 recordTaskOutcome(id, .failed)
                 reportTaskIssue(id, source: .data,
-                    detail: "The calculation could not finish. " + error.localizedDescription + " Your inputs are preserved.")
+                    detail: "The calculation could not finish. " + error.localizedDescription + " Your inputs are preserved.", requiresAttention: true)
             }
         }
     }
@@ -305,7 +317,7 @@ extension AppModel {
         _ id: UUID, action name: String, fields: [String: String], ticket: TaskRevisionLedger.Ticket
     ) async throws -> [String: String] {
         if let view = work.view(id) {
-            guard accepts(ticket), let job = performWorkOperation(view.selected, action: name, fields: fields) else { throw CancellationError() }
+            guard accepts(ticket), let job = performWorkOperation(view.selected, action: name, fields: fields, owner: id) else { throw CancellationError() }
             await job.value
             guard accepts(ticket), let artifact = work.artifact(view.selected), artifact.issue == nil else {
                 throw AppError.message("The operation did not complete; the previous result is retained.")
@@ -322,8 +334,9 @@ extension AppModel {
         }
         let state = task.liveValues ?? surface.state
         let inputs = state.filter { surface.fields.contains($0.key) }.merging(fields) { _, new in new }
-        let updates = try TaskValues.decode(
-            try await taskCode.run(code: code, input: inputs, state: state, declaredInputs: surface.fields))
+        let result = try await taskCode.run(code: code, input: inputs, state: state, declaredInputs: surface.fields)
+        let updates = try TaskValues.decode(result)
+        let reminder = try GeneratedReminder.fromAction(result)
         try Task.checkCancellation()
         guard accepts(ticket), let index = sideTasks.firstIndex(where: { $0.id == id }) else {
             throw CancellationError()
@@ -335,6 +348,7 @@ extension AppModel {
         taskRuntime.attach(id)
         persistSideTasks()
         recordTaskOutcome(id, .succeeded)
+        if let reminder { deliverCardReminder(reminder, to: id) }
         return updated
     }
 

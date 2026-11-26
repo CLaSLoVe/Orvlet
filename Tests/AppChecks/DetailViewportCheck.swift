@@ -398,10 +398,15 @@ enum DetailViewportCheck {
             })()
             """)
         try openExternally()
-        for _ in 0..<60 where !background.userPausedPlayback { try await Task.sleep(for: .milliseconds(50)) }
-        let musicPaused = try await background.webView.evaluateJavaScript("music.paused")
-        try check(model.collapsed && background.userPausedPlayback && musicPaused as? Bool == true,
-                  "Opening a playback page externally pauses the currently playing Orvlet task")
+        // Applying the pause to WebKit finishes asynchronously after recording the native intent.
+        var musicPaused = false
+        for _ in 0..<60 {
+            musicPaused = try await background.webView.evaluateJavaScript("music.paused") as? Bool == true
+            if model.collapsed && background.userPausedPlayback && musicPaused { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try check(model.collapsed && background.userPausedPlayback && musicPaused,
+                  "Opening a playback page externally pauses the currently playing Orvlet task (collapsed: \(model.collapsed), owner: \(model.playbackCoordinator.owner == background.id), intent: \(background.userPausedPlayback), paused: \(musicPaused))")
         let first = UUID(), second = UUID()
         model.deliverReply("   ", taskID: first)
         try check(!model.hasUnreadReply, "An empty reply never lights the composer badge")

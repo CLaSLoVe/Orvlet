@@ -26,7 +26,7 @@ struct BrowserExtensionSettings: View {
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(entry.name).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                        Text("\(entry.version) · \(entry.digest.prefix(8))")
+                        Text("\(entry.version) (\(entry.digest.prefix(8)))")
                             .font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 4)
@@ -117,7 +117,7 @@ struct BrowserExtensionMenu: View {
         if !host.entries.isEmpty {
             Menu {
                 ForEach(host.entries) { entry in
-                    Button("\(entry.name) · \(entry.version) · \(entry.digest.prefix(8))") {
+                    Button("\(entry.name) \(entry.version) (\(entry.digest.prefix(8)))") {
                         host.perform(entry.id, on: web)
                     }
                     .disabled(host.contexts[entry.id] == nil || host.busy)

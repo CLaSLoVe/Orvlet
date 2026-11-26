@@ -423,8 +423,8 @@
                 try await pause()
                 try check(
                     delegate.panel.frame == restingFrame && model.ambientTasks.map(\.id) == restingIDs
-                        && model.overflowTaskCount == 41,
-                    "Forty extra tasks are tucked away without growing or reordering the ambient area")
+                        && model.overflowTaskCount == 1 && model.timerEntries.count == 41,
+                    "Forty more countdowns share the same Timer without consuming compact or overflow slots")
                 let storeName = "orvlet.stack-check." + UUID().uuidString
                 let store = UserDefaults(suiteName: storeName)!
                 defer { store.removePersistentDomain(forName: storeName) }
@@ -473,15 +473,19 @@
                 model.sideTasks[model.sideTasks.count - 1].deadline = Date().addingTimeInterval(-1)
                 model.tickTasks()
                 try check(
-                    model.ambientTasks.contains(where: { $0.id == overflowTimer })
+                    model.microTimerTasks.map(\.id) == [timer] && model.primaryTimerEntry?.id == overflowTimer
                         && model.microMediaTasks.first?.id == first.id,
-                    "An overflow timer surfaces at completion while music stays available")
+                    "A countdown rings through the shared Timer while music stays available")
                 let nextDue = model.sideTasks[model.sideTasks.count - 2].id
                 model.sideTasks[model.sideTasks.count - 2].deadline = Date().addingTimeInterval(-1)
                 model.tickTasks()
                 try check(
-                    model.ambientTasks.contains(where: { $0.id == nextDue }),
-                    "A newer timer completion is not buried behind an earlier completed timer")
+                    model.microTimerTasks.map(\.id) == [timer] && model.primaryTimerEntry?.id == nextDue
+                        && Set(model.reminders.map(\.owner)).isSuperset(of: [nextDue, overflowTimer]),
+                    "Both alarms retain their receipts while Timer shows the newest completion")
+                for reminder in model.reminders where [nextDue, overflowTimer].contains(reminder.owner) {
+                    model.dismissReminder(reminder.id)
+                }
                 model.sideTasks = originals
                 model.reconcileTasks()
                 model.refreshTaskClock()
@@ -516,15 +520,16 @@
                 try await pause()
                 try await snapshot(delegate.commandPanel!, path: "/tmp/orvlet-command.png")
                 model.selectChat(false)
+                model.dismissTask(timer)
                 if let i = model.sideTasks.firstIndex(where: { $0.id == timer }) {
                     model.sideTasks[i].deadline = Date().addingTimeInterval(-1)
-                    model.sideTasks[i].hidden = true
                 }
                 model.tickTasks()
                 try check(
                     model.sideTasks.first(where: { $0.id == timer })?.finished == true
-                        && model.visibleTasks.contains(where: { $0.id == timer }),
-                    "A hidden timer returns a completion card exactly when due")
+                        && !model.visibleTasks.contains(where: { $0.id == timer })
+                        && model.displayedReminders.contains(where: { $0.owner == timer && $0.persistence == .persistent }),
+                    "A hidden timer posts a persistent foreground reminder while its source card stays hidden")
                 model.timerAction(timer, action: "stop")
                 try check(
                     model.sideTasks.first(where: { $0.id == timer })?.status == "Stopped"
@@ -544,22 +549,28 @@
                     "No event has been added. What is the event called? Reply with Title: followed by its name.",
                     kind: .needsInput)
                 try await pause()
+                guard let reminderPanel = delegate.reminderPanel,
+                      let question = model.displayedReminders.first(where: \.needsInput)
+                else { throw AppError.message("Missing foreground clarification") }
                 try check(
-                    model.shellLayout.compact == anchorBeforeReceipt && delegate.panel.isVisible
+                    model.shellLayout.compact == anchorBeforeReceipt && reminderPanel.isVisible
                         && !model.commandPanelVisible && model.collapsed,
                     "Visible receipt keeps the vertical stack anchored and input window closed")
-                try await snapshot(delegate.panel, path: "/tmp/orvlet-feedback-vertical.png")
-                model.dismissFeedback()
+                try await snapshot(reminderPanel, path: "/tmp/orvlet-feedback-vertical.png")
+                model.dismissReminder(question.id)
                 try check(model.shellLayout.content == .zero, "Dismiss returns the shell to compact-only geometry")
                 model.setCompactLayout(.horizontal)
                 let horizontalAnchor = model.shellLayout.compact
                 model.deliverReply("Calendar permission was denied. No event has been added.", kind: .failure)
                 try await pause()
                 try check(
-                    model.shellLayout.compact == horizontalAnchor && model.shellLayout.content.width > 0,
+                    model.shellLayout.compact == horizontalAnchor && reminderPanel.isVisible
+                        && model.displayedReminders.contains { $0.message.contains("Calendar permission was denied") },
                     "Horizontal stack also shows the receipt without moving existing controls")
-                try await snapshot(delegate.panel, path: "/tmp/orvlet-feedback-horizontal.png")
-                model.dismissFeedback()
+                try await snapshot(reminderPanel, path: "/tmp/orvlet-feedback-horizontal.png")
+                if let failure = model.displayedReminders.first(where: { $0.message.contains("Calendar permission was denied") }) {
+                    model.dismissReminder(failure.id)
+                }
                 checks += try await TaskSurfaceUICheck.run(model, delegate: delegate)
                 checks += try await TaskRankingCheck.run()
                 checks += try InterfaceRevisionCheck.run()

@@ -74,6 +74,7 @@ struct SourceReadFailure: LocalizedError {
     let reason: String
     var allowsCorrection = false
     var hostUnavailable = false
+    var accessStatus: Int? = nil
     var errorDescription: String? { reason }
     static func route(_ raw: String) -> String {
         guard let url = URLComponents(string: raw) else { return raw }
@@ -84,6 +85,7 @@ struct SourceReadFailure: LocalizedError {
 /// Acquisition, definition repair and execution keep separate bounded failure counts.
 /// A valid source remains usable while independent definition errors are corrected.
 struct RequestRecovery {
+    var siteDestination: String?
     private var failures: [String: Int] = [:]
     private var unavailableSources = Set<String>()
     private var unavailableHosts = Set<String>()
@@ -214,7 +216,15 @@ struct RequestRecovery {
 extension AgentController {
     func recover(_ error: Error, tool: String, arguments: [String: Any]) throws -> String {
         let acquisition = (error as? SourceReadFailure).flatMap { $0.allowsCorrection ? nil : $0 }
-        if let acquisition { recovery.sourceFailed(acquisition) }
+        var earlierDenial = false
+        if let acquisition {
+            if let status = acquisition.accessStatus {
+                earlierDenial = model.siteMemory.hint(url: acquisition.url, profile: nil) != nil
+                let owner = model.activeRequest?.owner?.id ?? model.requestCardID ?? activeTaskID
+                model.siteMemory.recordAPI(url: acquisition.url, status: status, taskID: owner)
+            }
+            recovery.sourceFailed(acquisition)
+        }
         let definitionIssue = error is ToolArgumentError || error is DecodingError
         let attempt = recovery.record(tool, arguments, definitionIssue: definitionIssue)
         if definitionIssue { recovery.definitionFailed(error.localizedDescription, field: (error as? ToolArgumentError)?.path) }
@@ -235,7 +245,7 @@ extension AgentController {
             // Keep them available so a new response can go straight onto the card.
             loadedToolFamilies.formUnion(["data", "reading", "source_lookup"])
             Diagnostics.record("recovery_switch", ["name": tool, "attempt": attempt, "category": "source", "requestID": model.activeRequest?.id.uuidString ?? ""])
-            return "No usable response was acquired. This endpoint is unavailable for the request. Choose another public endpoint/provider or inspect an accessible page in the owned browser. After inspecting an alternative JSON source, use build_data_tool with its observation handle, parameters and result expressions. The host assembles the executable recipe and card. For a direct page reading, use finish(page_ready,source_only:true) with a short title, primaryKey, observed readings and exact readingValues instead of generating markup. Keep the goal, units and requested interactions. Do not ask the human to retry an internal source failure."
+            return (earlierDenial ? "This exact public API operation also denied an earlier task. " : "") + "No usable response was acquired. This endpoint is unavailable for the request. Choose another public endpoint/provider or inspect an accessible page in the owned browser. After inspecting an alternative JSON source, use build_data_tool with its observation handle, parameters and result expressions. The host assembles the executable recipe and card. For a direct page reading, use finish(page_ready,source_only:true) with a short title, primaryKey, observed readings and exact readingValues instead of generating markup. Keep the goal, units and requested interactions. Do not ask the human to retry an internal source failure."
         }
         let next: String
         switch tool {

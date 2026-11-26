@@ -7,6 +7,11 @@ nonisolated struct PublicDataRequestIssue: LocalizedError {
     var errorDescription: String? { reason }
 }
 
+nonisolated struct PublicAccessFailure: LocalizedError {
+    let status: Int
+    var errorDescription: String? { "HTTP \(status): this public API request was denied. Check another public source." }
+}
+
 /// Public GETs are independent of model authentication and browsing sessions.
 nonisolated final class PublicDataClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     static func url(_ raw: String) throws -> URL {
@@ -78,6 +83,25 @@ nonisolated final class PublicDataClient: NSObject, URLSessionTaskDelegate, @unc
         }
     }
 
+    static func validateResponse(_ response: URLResponse) throws {
+        if let http = response as? HTTPURLResponse, [502, 503, 504].contains(http.statusCode),
+            http.value(forHTTPHeaderField: "Retry-After") == nil { throw TemporaryHTTPFailure(status: http.statusCode) }
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        switch http.statusCode {
+        case 200...299: break
+        case 404, 410:
+            throw PublicDataRequestIssue(reason: "HTTP \(http.statusCode): this endpoint or record was not found. Resolve the requested name in a public directory or search endpoint, then fetch the returned identifier.")
+        case 400, 422:
+            throw PublicDataRequestIssue(reason: "HTTP \(http.statusCode): correct the public request parameters or use another source.")
+        case 401, 403:
+            throw PublicAccessFailure(status: http.statusCode)
+        case 429:
+            throw AppError.message("HTTP \(http.statusCode): this source denied or limited the public request. Use another public endpoint or an accessible page.")
+        default:
+            throw AppError.message("The source returned HTTP \(http.statusCode). Verify the endpoint or try another public source.")
+        }
+    }
+
     func fetch(_ raw: String) async throws -> Any {
         let url = try Self.url(raw)
         return try await Self.readWithRetry { try await self.fetchOnce(url) }
@@ -98,20 +122,7 @@ nonisolated final class PublicDataClient: NSObject, URLSessionTaskDelegate, @unc
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let (stream, response) = try await session.bytes(for: request)
-        if let http = response as? HTTPURLResponse, [502, 503, 504].contains(http.statusCode),
-            http.value(forHTTPHeaderField: "Retry-After") == nil { throw TemporaryHTTPFailure(status: http.statusCode) }
-        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        switch http.statusCode {
-        case 200...299: break
-        case 404, 410:
-            throw PublicDataRequestIssue(reason: "HTTP \(http.statusCode): this endpoint or record was not found. Resolve the requested name in a public directory or search endpoint, then fetch the returned identifier.")
-        case 400, 422:
-            throw PublicDataRequestIssue(reason: "HTTP \(http.statusCode): correct the public request parameters or use another source.")
-        case 401, 403, 429:
-            throw AppError.message("HTTP \(http.statusCode): this source denied or limited the public request. Use another public endpoint or an accessible page.")
-        default:
-            throw AppError.message("The source returned HTTP \(http.statusCode). Verify the endpoint or try another public source.")
-        }
+        try Self.validateResponse(response)
         guard response.expectedContentLength <= 524288 else { throw PublicDataRequestIssue(reason: "The data response is too large. Narrow the query.") }
         var data = Data()
         for try await byte in stream {

@@ -104,12 +104,14 @@ enum NativeChromiumCheck {
                 try require(!FileManager.default.fileExists(atPath: store.root.appendingPathComponent("Default").path),
                     "Guest browsing leaves the saved Chromium profile untouched")
             }
+            checks += try await SiteMemoryCheck.run(browserOnly: true)
             let shouldFilter = restarted && !disabled
             try require(try await page.evaluate("document.documentElement.dataset.nativeExtension==='installed'") as? Bool == shouldFilter,
                 "Only installed and enabled extensions run content scripts")
             try require(try await page.evaluate("(async()=>{try{await fetch('/pl/_ajax/ablck.php');return false}catch{return true}})()") as? Bool == shouldFilter,
                 "User-installed network rules apply only while enabled")
             if !restarted {
+                checks += try await checkYouTubeAdSkipping(model)
                 try require(store.entries.isEmpty, "Fresh profiles contain no preinstalled extensions")
                 let oldProfile = store.root.appendingPathComponent("MigrationFixture")
                 try FileManager.default.createDirectory(at: oldProfile, withIntermediateDirectories: false)
@@ -163,6 +165,9 @@ enum NativeChromiumCheck {
             await browser.applyPlaybackPolicy()
             let playing = try await browser.action(["action": "media", "operation": "play"])
             try require(playing["playing"] as? Bool == true, "Muted local playback works while the native view is parked in the background")
+            if !restarted {
+                checks += try await checkReminderAudio(model, page: page, owner: id)
+            }
             browser.setUserPlaybackPaused(true, origin: "native_check")
             await browser.applyPlaybackPolicy()
             try require(try await page.evaluate("document.querySelector('audio').paused") as? Bool == true, "Native playback respects the shared pause state")
@@ -170,6 +175,25 @@ enum NativeChromiumCheck {
                 document.body.innerHTML='<main style="padding:32px;font:18px system-ui;background:#faf9fe;color:#282631;height:1400px"><h1>Native Chromium</h1><input id="checkInput" aria-label="Message" style="width:240px;height:32px"><button id="checkButton" style="margin:16px;height:36px">Run</button><p id="result">Ready</p></main>';
                 document.getElementById('checkButton').onclick=e=>{document.getElementById('result').textContent='Clicked';window.realClick=e.isTrusted};true
                 """)
+            if !restarted {
+                let observed = try await browser.observe()
+                let action = BoundCardAction(id: "runCard", binding: PageBinding(action: "click", role: "button", name: "Run"), compactLabel: "Run")
+                let plan = try SurfacePlan(components: [], width: 300, height: 130,
+                    markup: CardMarkup(html: "<button data-action='runCard'>Run</button>", css: ""), actions: [action]).validated(observation: observed)
+                guard let selected = plan.actions?.first, let boundPage = selected.compactPageURL else {
+                    throw AppError.message("Missing the observed page identity on a generated capsule action")
+                }
+                var arguments = selected.binding.dictionary
+                arguments["expectedPage"] = boundPage + "#other"
+                var rejected = false
+                do { _ = try await browser.action(arguments) } catch { rejected = true }
+                let untouched = try await page.evaluate("document.getElementById('result').textContent==='Ready'") as? Bool
+                try require(rejected && untouched == true, "A generated capsule cannot apply its click to a different page")
+                arguments["expectedPage"] = boundPage
+                _ = try await browser.action(arguments)
+                try require(try await page.evaluate("document.getElementById('result').textContent==='Clicked'") as? Bool == true,
+                            "The generated web capsule runs its registered click on the observed page")
+            }
             let window = NativeInputCheckPanel(contentRect: NSRect(x: -16000, y: -16000, width: 640, height: 420),
                 styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
             panel = window
@@ -327,8 +351,36 @@ enum NativeChromiumCheck {
             try await SideScreenCheck.snapshot(settingsPanel, path: "/tmp/orvlet-native-settings.png")
             settingsPanel.orderOut(nil)
             model.onResize = nil
-            browser.dispose()
+            _ = try await page.evaluate("""
+                document.body.insertAdjacentHTML('beforeend','<audio muted loop preload="auto" src="/tone.wav"></audio>'); true
+                """)
+            browser.setUserPlaybackPaused(false, origin: "native_check")
+            await browser.applyPlaybackPolicy()
+            let resumed = try await browser.action(["action": "media", "operation": "play"])
+            try require(resumed["playing"] as? Bool == true, "The deletion fixture plays muted audio in its own Chromium page")
+            model.persistSideTasks()
+            guard let recording = model.work.view(browser.id)?.selected else { throw AppError.message("Missing recording view") }
+            let alias = try model.presentWork([recording], layout: .single, title: "Recording", destination: UUID())[0]
+            if restarted {
+                try model.prepareBrowserForNewTask()
+                try require(model.parkedBrowsers[browser.id] === browser, "The restart pass exercises deletion of a parked player")
+            }
+            model.dismissTask(alias)
+            model.closeTask(browser.id)
             try await settle()
+            let stillPlaying = try await page.evaluate("!document.querySelector('audio').paused") as? Bool
+            try require(!native.closed && model.work.view(alias)?.hidden == true && stillPlaying == true,
+                "Deleting one playback card keeps the hidden second card's music playing")
+            model.closeTask(alias)
+            try await settle()
+            try require(native.closed && browser.disposed && model.playbackCoordinator.owner != browser.id &&
+                model.musicBrowser(browser.id) == nil && !model.listedTasks.contains { $0.id == alias || $0.id == browser.id },
+                "Deleting the last playback card stops its renderer and releases audio ownership")
+            guard let source = model.work.artifact(recording)?.source else { throw AppError.message("Missing archived recording source") }
+            model.settings.resumePlaybackOnLaunch = true
+            model.restoreSessionOnLaunch(SavedSession(url: source, title: "Recording", listening: true, wasPlaying: true))
+            try require(!model.restoringSession && model.dormantLaunchSession == nil && model.musicBrowser(browser.id) == nil,
+                "A legacy playing session cannot reopen a deleted recording")
             try require(native.closed && window.isVisible, "Closing an embedded page does not close its Orvlet host window")
             try require(try await other.evaluate("document.readyState==='complete'") as? Bool == true, "Closing one native task leaves another responsive")
             let staleConnection = otherPage.client
@@ -365,6 +417,172 @@ enum NativeChromiumCheck {
             fputs("Native check failed: \(error.localizedDescription)\n", stderr)
             NativeChromium.stopApplication { exit(1) }
         }
+    }
+
+    // Fulfill this task's navigation locally so the regression needs neither an ad impression nor a live account.
+    private static func checkYouTubeAdSkipping(_ model: AppModel) async throws -> [String] {
+        let browser = BrowserController(model: model)
+        defer { browser.dispose() }
+        guard let page = browser.systemPage else { throw AppError.message("Missing native player") }
+        try await page.ready()
+        guard let client = page.client else { throw AppError.message("Missing fixture connection") }
+        let markup = """
+            <title>Chillhop Café</title><div id="movie_player" class="html5-video-player ad-showing">
+            <video></video><button class="ytp-skip-ad-button" disabled onclick="wrong++">Wait</button>
+            <a class="ytp-skip-ad-button" onclick="wrong++">Shop now</a>
+            <button class="ytp-skip-ad-button-modern" onclick="skips++">Skip</button></div>
+            <script>window.skips=0;window.wrong=0;window.playingAd=false;
+            navigator.mediaSession.metadata=new MediaMetadata({title:'Sponsor slogan'});
+            Object.defineProperty(document.querySelector('video'),'paused',{get:()=>!playingAd});
+            </script>
+            """
+        let previous = client.event
+        defer { client.event = previous }
+        client.event = { method, params in
+            guard method == "Fetch.requestPaused", let id = params["requestId"] as? String else {
+                previous?(method, params)
+                return
+            }
+            let body = params["resourceType"] as? String == "Document" ? markup : ""
+            Task {
+                _ = try? await client.call("Fetch.fulfillRequest", ["requestId": id, "responseCode": 200,
+                    "responseHeaders": [["name":"Content-Type","value":"text/html; charset=utf-8"]],
+                    "body": Data(body.utf8).base64EncodedString()])
+            }
+        }
+        _ = try await client.call("Fetch.enable", ["patterns": [["urlPattern": "*"]]])
+        try await page.navigate("https://www.youtube.com/watch?v=orvlet-fixture")
+        var checks: [String] = []
+        func expect(_ expression: String, _ label: String) async throws {
+            for _ in 0..<50 {
+                if (try? await page.evaluate(expression)) as? Bool == true {
+                    try StateMachineCheck.require(true, label, &checks)
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            throw AppError.message(label)
+        }
+        try await expect("window.__orvlet?.state().adPlaying && window.__orvlet.state().title==='Chillhop Café' && skips===0",
+            "Native Chromium recognizes a paused YouTube ad and displays the video's title instead of sponsor metadata")
+        model.settings.blockAds = false
+        defer { model.settings.blockAds = true }
+        try await Task.sleep(for: .milliseconds(1400))
+        _ = try await page.evaluate("playingAd=true")
+        try await Task.sleep(for: .milliseconds(1400))
+        try await expect("skips===0 && wrong===0", "Turning skipping off leaves the playing ad and its links untouched")
+        model.settings.blockAds = true
+        try await expect("skips>0 && wrong===0", "The native renderer clicks the available Skip button after it is enabled")
+        return checks
+    }
+
+    private static func checkReminderAudio(_ model: AppModel, page: SystemBrowserPage, owner: UUID) async throws -> [String] {
+        var checks: [String] = []
+        func waitFor(_ expression: String, _ label: String) async throws {
+            let deadline = Date().addingTimeInterval(6)
+            repeat {
+                if try await page.evaluate(expression) as? Bool == true {
+                    try StateMachineCheck.require(true, label, &checks)
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(30))
+            } while Date() < deadline
+            let state = try? await page.evaluate("JSON.stringify({paused:clip.paused,muted:clip.muted,volume:clip.volume,output:outputVolume(),lowest:lowestOutput})")
+            throw AppError.message("\(label) (\(state as? String ?? "unavailable"))")
+        }
+        func post(_ event: UUID) {
+            model.presentCardReminder(owner, eventID: event, message: "Fixture finished",
+                                      intensity: .gentle, persistence: .persistent)
+        }
+        let originalSound = model.settings.alarmSound
+        model.settings.alarmSound = .ripples
+        // Chromium's native-check process also has --mute-audio. Both output devices stay silent.
+        model.playsMutedReminderForCheck = true
+        defer {
+            model.removeReminders { $0.owner == owner }
+            model.stopReminderSound()
+            model.playsMutedReminderForCheck = false
+            model.settings.alarmSound = originalSound
+        }
+        _ = try await page.evaluate("""
+            window.clip = document.querySelector('audio');
+            window.outputVolume = () => Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume').get.call(clip);
+            window.lowestOutput = outputVolume();
+            clip.addEventListener('volumechange', () => { window.lowestOutput = Math.min(lowestOutput, outputVolume()) });
+            clip.loop = true;
+            clip.muted = true;
+            true
+            """)
+        let muted = UUID()
+        post(muted)
+        try await Task.sleep(for: .milliseconds(400))
+        try await waitFor("!clip.paused && clip.muted && Math.abs(lowestOutput - 0.37) < 0.01",
+                          "A reminder leaves muted playing music and its volume alone")
+        model.dismissReminder(muted)
+        _ = try await page.evaluate("clip.muted = false; window.startedAt = clip.currentTime; true")
+        let first = UUID()
+        post(first)
+        try await waitFor("!clip.paused && clip.currentTime > startedAt && outputVolume() > 0 && outputVolume() < 0.18 && Math.abs(clip.volume - 0.37) < 0.01",
+                          "A persistent cue lowers Chromium's actual output while music advances at the selected volume setting")
+        try await model.performMusicControl(owner, operation: "volume", value: 0.63)
+        try await waitFor("Math.abs(clip.volume - 0.63) < 0.01 && Math.abs(outputVolume() - 0.063) < 0.005",
+                          "Changing the card's volume during cue immediately adjusts the quieter output")
+        let replacement = UUID()
+        post(replacement)
+        guard let ringing = model.activeReminderSounds[.event(.persistent)]?.player else {
+            throw AppError.message("The alarm failed to start")
+        }
+        model.dismissReminder(replacement)
+        try StateMachineCheck.require(model.activeReminderSounds[.event(.persistent)]?.eventID == first && ringing.loops,
+                                      "Confirming the newest alarm hands the ringing player to the remaining reminder", &checks)
+        ringing.currentTime = ringing.duration - 0.25
+        try await Task.sleep(for: .milliseconds(900))
+        try StateMachineCheck.require(ringing.isPlaying && ringing.currentTime < 2,
+                                      "The native alarm loops across the end of the ringtone", &checks)
+        try await waitFor("!clip.paused && Math.abs(outputVolume() - 0.063) < 0.005",
+                          "Music stays at ten percent between rings until the last alarm is acknowledged")
+        model.dismissReminder(first)
+        try await waitFor("!clip.paused && !clip.muted && Math.abs(outputVolume() - 0.63) < 0.005",
+                          "Confirming the last alarm restores the latest volume without restarting playback")
+        let acknowledged = UUID()
+        post(acknowledged)
+        try await waitFor("outputVolume() < 0.25", "An audible reminder ducks music before acknowledgement")
+        model.dismissReminder(acknowledged)
+        try await Task.sleep(for: .milliseconds(700))
+        try StateMachineCheck.require(try await page.evaluate("!clip.paused && Math.abs(outputVolume() - 0.63) < 0.005") as? Bool == true,
+                                      "Acknowledging mid-phrase releases music before the chime would have finished", &checks)
+        model.settings.alarmSound = .slowRise
+        let longAlarm = UUID()
+        model.presentCardReminder(owner, eventID: longAlarm, message: "Timer finished", intensity: .strong, persistence: .persistent)
+        guard let phrase = model.activeReminderSounds[.event(.persistent)]?.player else {
+            throw AppError.message("The long alarm failed to start")
+        }
+        let message = UUID()
+        model.presentCardReminder(owner, eventID: message, message: "Saved", persistence: .brief)
+        try await Task.sleep(for: .milliseconds(3300))
+        try StateMachineCheck.require(phrase.isPlaying && phrase.currentTime > 3 && model.activeReminderSounds[.event(.brief)] == nil,
+                                      "A short message finishes independently and the strongest repeat lets Slow Rise play past three seconds", &checks)
+        try await waitFor("outputVolume() < 0.25", "Music stays ducked until the remaining alarm is acknowledged")
+        model.dismissReminder(message)
+        model.dismissReminder(longAlarm)
+        try await waitFor("Math.abs(outputVolume() - 0.63) < 0.005", "Acknowledging the long alarm restores the selected music volume")
+        model.settings.alarmSound = .silent
+        _ = try await page.evaluate("window.lowestOutput = outputVolume(); true")
+        let silent = UUID()
+        post(silent)
+        try await Task.sleep(for: .milliseconds(500))
+        try await waitFor("!clip.paused && Math.abs(lowestOutput - 0.63) < 0.005",
+                          "A silent reminder leaves playing music at full selected volume")
+        model.dismissReminder(silent)
+        try await model.performMusicControl(owner, operation: "pause")
+        model.settings.alarmSound = .ripples
+        let paused = UUID()
+        post(paused)
+        try await Task.sleep(for: .milliseconds(400))
+        try await waitFor("clip.paused && !clip.muted && Math.abs(lowestOutput - 0.63) < 0.005",
+                          "A cue leaves paused music paused at its last volume")
+        model.dismissReminder(paused)
+        return checks
     }
 
     /// AppKit's cache excludes accelerated Chromium layers. Compose the actual

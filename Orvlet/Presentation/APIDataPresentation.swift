@@ -7,7 +7,7 @@ extension APIDataSpec {
         let unit = (card?.unitKey ?? primary.unitKey).flatMap { state[$0] } ?? primary.unit ?? ""
         let suffix = unit.isEmpty || value.hasSuffix(unit) ? "" : " " + unit
         let date = state["sourceDateDisplay"] ?? state["sourceDate"] ?? ""
-        return title + " · " + value + suffix + (date.isEmpty ? "" : " · " + date)
+        return title + ": " + value + suffix + (date.isEmpty ? "" : ", " + date)
     }
 
     static let genericDataCSS =
@@ -79,6 +79,7 @@ extension APIDataSpec {
             visuals: try CardVisual.markup(source.visuals ?? [], path: "$.source.visuals"), englishPresetCopy: source.usesEnglishPresetCopy, dateKey: source.weatherDateKey, conditionKey: source.weatherConditionKey, lowKey: source.weatherLowKey)
         var standardMarkup = fallback
         standardMarkup.interfaceLanguage = source.interfaceLanguage
+        standardMarkup.reminder = source.reminder ?? proposed?.reminder
         var surface = TaskSurface(
             title: source.usesEnglishPresetCopy && usesPreset && source.card?.kind == .weather ? "Weather"
                 : source.usesEnglishPresetCopy && usesPreset && source.card?.kind == .currency ? "Currency converter" : String(title.prefix(120)),
@@ -90,6 +91,7 @@ extension APIDataSpec {
             return try surface.validated()
         }
         if var markup = proposed {
+            markup.reminder = source.reminder ?? markup.reminder
             if markup.compactHTML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { markup.compactHTML = fallback.compactHTML }
             // Input behavior belongs to the host even when layout is generated.
             for control in source.inputControls {

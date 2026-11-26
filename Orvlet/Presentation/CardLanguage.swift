@@ -5,7 +5,12 @@ extension CardMarkup {
     nonisolated static func localeIdentifier(for preference: String) -> String? {
         let name = preference.trimmingCharacters(in: .whitespacesAndNewlines)
         let english = Locale(identifier: "en")
-        if name.caseInsensitiveCompare("English") == .orderedSame { return "en" }
+        switch name.lowercased() {
+        case "english": return "en"
+        case "简体中文", "简体", "中文（简体）", "simplified chinese", "chinese (simplified)": return "zh-Hans"
+        case "繁體中文", "繁體", "中文（繁體）", "traditional chinese", "chinese (traditional)": return "zh-Hant"
+        default: break
+        }
         if name.range(of: #"^[a-zA-Z]{2,3}([-_][a-zA-Z0-9]{2,8})+$"#, options: .regularExpression) != nil {
             return name.replacingOccurrences(of: "_", with: "-")
         }

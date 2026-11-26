@@ -5,12 +5,18 @@ import WebKit
 /// Observable composition root. Feature behavior lives in the owning folder extensions.
 @MainActor
 final class AppModel: ObservableObject {
+    lazy var reminderSoundCompletion = ReminderSoundCompletion(model: self)
+    @Published var activeReminderSounds: [ReminderSoundChannel: ActiveReminderSound] = [:]
+    var reminderRepeatTimer: Timer?
     #if DEBUG
+        var playsMutedReminderForCheck = false
+        var reminderSoundPlaybackCheck: ((ReminderSound, ReminderIntensity) -> Void)?
         var calendarOpenCheck: ((Bool) -> Void)?
     #endif
     @Published var shellLayout = ShellLayout(
         frame: NSRect(x: 0, y: 0, width: 110, height: 32), compact: NSRect(x: 0, y: 0, width: 110, height: 32),
         content: .zero, edge: nil)
+    var compactSourceFrames: [UUID?: CGRect] = [:]
     @Published var taskListEditing = false
     @Published var draggingTaskID: UUID?
     @Published var requestProgress: [UUID: [String]] = [:]
@@ -62,13 +68,17 @@ final class AppModel: ObservableObject {
     var motionReduced: Bool { settings.reduceMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     var shellExpanded: Bool { taskShelfVisible || !collapsed }
     var shellContentSize: NSSize? {
-        if taskShelfVisible { return NSSize(width: 320, height: min(360, 60 + Double(max(1, listedTasks.count)) * 46)) }
+        if taskShelfVisible {
+            return NSSize(width: 320, height: min(360, 60 + Double(max(1, listedToolCount)) * 46))
+        }
         if collapsed { return feedback == nil ? nil : feedbackSize }
         let detail = windowSize
         return NSSize(width: detail.width, height: detail.height + (feedback == nil ? 0 : feedbackSize.height))
     }
+    var cardReminderValues: [UUID: CardReminderObservation] = [:]
     @Published var sideTasks: [SideTask] = [] {
         didSet {
+            observeCardReminders()
             let signature: (SideTask) -> String = {
                 "\($0.id):\($0.kind):\($0.hidden):\($0.playing):\($0.finished):\($0.isMediaTask):\($0.deadline != nil)"
             }
@@ -84,6 +94,10 @@ final class AppModel: ObservableObject {
     @Published var editingInterfaceID: UUID?
     @Published var interfaceJobs: [UUID: Task<Void, Never>] = [:]
     @Published var taskActivityReceipts: [UUID: TaskActivityReceipt] = [:] { didSet { refreshStackAttention() } }
+    @Published var capsuleAttention: [UUID: CapsuleAttention] = [:]
+    @Published var reminders: [PresentedCardReminder] = []
+    var latestPresentedReminderID: UUID?
+    var onRemindersChanged: (() -> Void)?
     var taskRevisions = TaskRevisionLedger()
     @Published var commandPanelVisible = false { didSet { refreshStackAttention() } }
     @Published var browserRevision = 0
@@ -91,6 +105,7 @@ final class AppModel: ObservableObject {
     @Published var musicPlayback: [UUID: MusicPlayback] = [:]
     @Published var musicLoading: Set<UUID> = []
     @Published var musicQueueExpanded: Set<UUID> = []
+    @Published var timerHistoryExpanded = false
     @Published var musicErrors: [UUID: String] = [:]
     var musicJobs: [UUID: Task<Void, Never>] = [:]
     var musicRevisions: [UUID: UUID] = [:]
@@ -118,7 +133,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var preferredWebSize = NSSize(width: 320, height: 220)
     var shelfArchive = SavedTaskList()
     var historyArchive = SavedTaskList()
+    lazy var playbackSources = PlaybackSourceMemory(preferences)
     let preferences: UserDefaults
+    private let memoryURL: URL?
+    lazy var memoryDB = MemoryDatabase(url: memoryURL)
+    lazy var siteMemory = SiteMemory(model: self)
     lazy var work = WorkRepository(defaults: isLiveTest && preferences === UserDefaults.standard
         ? UserDefaults(suiteName:"orvlet.work.check." + UUID().uuidString)! : preferences, recoverInterrupted: true)
     var extensionStorage: AnyObject?
@@ -134,6 +153,7 @@ final class AppModel: ObservableObject {
     var usesNativeBrowser: Bool { NativeChromium.enabled && settings.browserEngine == .builtIn }
     var workJobTokens: [UUID: UUID] = [:]
     var workJobs: [UUID: Task<Void, Never>] = [:]
+    var journalQueue: [UUID: (generation: UUID, tail: UUID, job: Task<Void, Never>)] = [:]
     lazy var sessions = SessionStore(defaults: preferences)
     @Published var recentSessions: [SavedSession] = []
     @Published var restoringSession = false
@@ -142,8 +162,10 @@ final class AppModel: ObservableObject {
     var restoreRevision = 0
     var lastSessionSave = Date.distantPast
     var queuedRestoreAction: (() -> Void)?
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, memoryURL: URL? = nil) {
         preferences = defaults
+        let desktopProfile = defaults === UserDefaults.standard && !MemoryDatabase.runsChecks
+        self.memoryURL = memoryURL ?? (desktopProfile ? MemoryDatabase.localURL : nil)
         if NativeChromium.enabled, !CommandLine.arguments.contains("--background-checks"),
             !CommandLine.arguments.contains("--native-browser-check"), defaults === UserDefaults.standard,
             !defaults.bool(forKey: "nativeChromiumDefaultApplied") {
@@ -159,6 +181,7 @@ final class AppModel: ObservableObject {
         }
         if let data = defaults.data(forKey: "taskHistory.v1") { archivedTaskHistory = historyArchive.read(data) }
         migrateConversationOwnership()
+        resumePendingConversationClear()
         if let saved = defaults.dictionary(forKey: "webWindowSize"),
             let w = saved["width"] as? Double, let h = saved["height"] as? Double, w.isFinite, h.isFinite
         {
@@ -206,6 +229,10 @@ final class AppModel: ObservableObject {
     @Published var conversationHistoryVisible = false
     @Published var conversationTaskID: UUID?
     @Published var archivedTaskHistory: [SideTask] = []
+    var taskMemoryJobs: [UUID: (id: UUID, job: Task<Void, Never>)] = [:]
+    #if DEBUG
+        var taskMemoryCompressor: (([ChatMessage], [TaskMemoryFact]) async throws -> [TaskMemoryChange])?
+    #endif
     var conversationDrafts: [UUID: String] = [:]
     var newTaskDraft = ""
     @Published var commandRuns: [RequestRun] = []
@@ -290,7 +317,7 @@ final class AppModel: ObservableObject {
     var stackNeedsAttention: Bool {
         taskActivityReceipts.values.contains { Date().timeIntervalSince($0.created) < 8 } || feedbackWakesStack
             || pointerInside || shellExpanded || commandPanelVisible || menuTracking || activeInteractions > 0
-            || stackHasKeyboardFocus
+            || stackHasKeyboardFocus || !capsuleAttention.isEmpty
     }
     func refreshStackAttention() {
         stackAttentionTask?.cancel()
@@ -343,6 +370,9 @@ final class AppModel: ObservableObject {
         return cardWindowSize(selectedSideTask)
     }
     func cardWindowSize(_ card: SideTask?) -> NSSize {
+        if card?.kind == .timer {
+            return NSSize(width: 328, height: TimerCard.contentHeight(timerEntries, historyExpanded: timerHistoryExpanded) + 30)
+        }
         if let card, usesMusicCard(card) {
             return NSSize(width: 328, height: musicCardHeight(card) + 30)
         }

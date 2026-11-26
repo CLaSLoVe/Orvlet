@@ -63,10 +63,13 @@ extension AppModel {
         } else {
             // Older session records only identified a page by its address.
             matches = sideTasks.filter { $0.kind == .web && matchesPage($0) }
+            if matches.isEmpty && work.snapshot.artifacts.values.contains(where: {
+                $0.native.map(matchesPage) == true && !work.hasOpenView(for: $0.id)
+            }) { return }
         }
         let open = matches.filter { task in
             guard let view = work.view(task.id) else { return true }
-            return view.closed != true && work.artifact(view.selected)?.native?.id == task.id
+            return work.artifact(view.selected)?.native?.id == task.id && work.hasOpenView(for: view.selected)
         }
         if let owner = open.first {
             guard open.count == 1, matchesPage(owner) else { return }
@@ -74,7 +77,7 @@ extension AppModel {
             return
         }
         let play = settings.resumePlaybackOnLaunch && entry.wasPlaying && entry.isMedia
-        if usesNativeBrowser && !play {
+        if !play && (usesNativeBrowser || (entry.isMedia && playbackSources.avoids(entry.url))) {
             // The saved card is enough until the user opens or operates its source.
             var task = open.first ?? SideTask(id: entry.taskID ?? UUID(), kind: .web, title: entry.title)
             task.sourceURL = entry.url
@@ -102,6 +105,15 @@ extension AppModel {
             browserRevision += 1
         }
         restoreSession(entry, play: play)
+    }
+
+    func savedPlaybackReplacement(_ url: String, title: String, task: SideTask?) async throws -> (original: MusicTrack, selected: MusicTrack)? {
+        guard playbackSources.avoids(url) else { return nil }
+        guard let videoID = MusicTrack.videoID(url) else { throw PlaybackSourceUnavailable() }
+        let original = task.flatMap { recoveryTrack($0, url: url) } ?? MusicTrack(id: videoID, title: title)
+        if let known = playbackSources.preferredReplacement(for: original) { return (original, known) }
+        let selected = try await YouTubeDiscovery.replacement(for: original, model: self)
+        return (original, selected)
     }
 
     func restoredObservation(_ page: [String: Any], entry: SavedSession, browser: BrowserController) async throws -> [String: Any] {
@@ -157,12 +169,22 @@ extension AppModel {
                 try Task.checkCancellation()
                 await browser.applyPlaybackPolicy()
                 try Task.checkCancellation()
+                var entry = entry
+                let replacement = entry.isMedia ? try await savedPlaybackReplacement(entry.url, title: entry.title, task: sideTasks.first { $0.id == browser.id }) : nil
+                if let replacement {
+                    entry.url = replacement.selected.url
+                    entry.position = 0
+                    try Task.checkCancellation()
+                    guard revision == restoreRevision, !browser.disposed else { return }
+                }
                 let page: [String: Any]
                 if browser.currentURL?.absoluteString == entry.url && !webLoading {
                     page = try await browser.observe()
                 } else {
                     page = try await browser.action(["action": "navigate", "url": entry.url])
                 }
+                try Task.checkCancellation()
+                browser.restoredPlaybackReplacement = replacement
                 let latest = try await restoredObservation(page, entry: entry, browser: browser)
                 guard revision == restoreRevision else { return }
                 if let plan = entry.plan, let checked = try? plan.validated(observation: latest) {

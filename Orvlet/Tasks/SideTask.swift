@@ -4,6 +4,37 @@ import SwiftUI
 import WebKit
 
 enum SideTaskKind: String, Codable { case web, timer, calendar, result, workspace }
+struct CapsuleAction {
+    let id: String
+    let label: String
+
+    init?(id: String, label: String?) {
+        guard let label else { return nil }
+        self.id = id
+        self.label = label
+    }
+
+    static func validate(_ actions: [Self]) throws {
+        guard actions.count <= 1 else { throw AppError.message("Choose one frequent action for the capsule.") }
+        if let action = actions.first {
+            guard (1...3).contains(action.label.count), !action.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw AppError.message("Use a short, legible compactLabel of 1–3 characters.")
+            }
+        }
+    }
+}
+
+extension CapsuleAction {
+    /// The shortcut and its six-point gap share a 108-point capsule with the text.
+    var textWidth: CGFloat { 102 - buttonWidth }
+
+    var buttonWidth: CGFloat {
+        let font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        let textWidth = (label as NSString).size(withAttributes: [.font: font]).width
+        return min(42, max(24, ceil(textWidth) + 8))
+    }
+}
+
 struct SideTask: Identifiable, Codable {
     var id = UUID()
     var kind: SideTaskKind
@@ -27,7 +58,9 @@ struct SideTask: Identifiable, Codable {
     var deadline: Date? = nil
     var pausedSeconds: Double? = nil
     var duration: Double? = nil
+    var timerToolLauncher: Bool? = nil
     var completedAt: Date? = nil
+    var pendingTimerReminderID: UUID? = nil
     var finished = false
     var muted: Bool? = nil
     var musicQueue: MusicQueue? = nil
@@ -73,11 +106,19 @@ struct SideTask: Identifiable, Codable {
             return ["Task failed", "Needs attention"].contains(status) ? "exclamationmark.circle" : "checkmark.circle"
         }
     }
+
+    var timerNeedsAttention: Bool {
+        kind == .timer && (pendingTimerReminderID != nil || (deadline != nil && remaining <= 60))
+    }
     var timerSubject: String {
         let label = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let duration, label.isEmpty || label.caseInsensitiveCompare("Timer") == .orderedSame else { return title }
         let seconds = Int(duration)
         return seconds % 60 == 0 ? "\(seconds / 60) min" : "\(seconds) s"
+    }
+    var timerAlarmText: String {
+        if let rule = nativeTimerAlarmRule { return rule.message }
+        return timerSubject == title ? "Time is up." : timerSubject + ", time is up."
     }
     var expandedDisplayState: [String: String] {
         guard let workFile else { return state }
@@ -94,10 +135,22 @@ struct SideTask: Identifiable, Codable {
             "toggleLabel": kind == .timer
                 ? (finished ? "Restart" : deadline == nil ? "Resume" : "Pause") : (playing ? "Pause" : "Play"),
         ].merging(liveValues ?? [:]) { _, reading in reading }
+        if kind == .calendar {
+            values["eventDuration"] = values["eventDuration"] ?? ""
+            values["eventLocal"] = values["eventLocal"] ?? ""
+            if values["eventGlance"] == nil {
+                values["eventGlance"] = values["eventTime"]?.hasPrefix("All day") == true
+                    ? values["eventDate"] : values["eventTime"]
+            }
+        }
         if kind == .timer, let duration {
             let total = Int(duration)
+            values["remainingSeconds"] = String(seconds)
             values["timerSubject"] = timerSubject
             values["timerDuration"] = total % 60 == 0 ? "\(total / 60) minute timer" : "\(total) second timer"
+        }
+        if let surface = taskSurface, surface.preset == "clock" {
+            values.merge(surface.clockOffsets(at: Date())) { _, current in current }
         }
         if let spec = taskSurface?.apiData { values = spec.presentationState(values) }
         return values
@@ -110,6 +163,14 @@ struct SideTask: Identifiable, Codable {
         }
         return result
     }
+    var capsuleAction: CapsuleAction? {
+        if let action = taskSurface?.capsuleAction { return CapsuleAction(id: action.id, label: action.compactLabel) }
+        if let action = plan?.actions?.first(where: { $0.compactLabel != nil }) {
+            return CapsuleAction(id: action.id, label: action.compactLabel)
+        }
+        return nil
+    }
+
     var allowedActions: Set<String> {
         var result: Set<String> = ["expand", "dismiss"]
         if kind == .web {
@@ -117,7 +178,7 @@ struct SideTask: Identifiable, Codable {
             result.formUnion((plan?.actions ?? []).map(\.id))
             if isMediaTask { result.insert("toggle") }
         }
-        if kind == .timer { result.formUnion(["toggle", "restart", "stop", "addMinute"]) }
+        if kind == .timer && timerToolLauncher != true { result.formUnion(["toggle", "restart", "stop", "addMinute"]) }
         if kind == .calendar { result.insert("calendar") }
         if kind == .workspace { result.formUnion(taskSurface?.actions.map(\.id) ?? []) }
         return result

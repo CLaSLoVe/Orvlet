@@ -177,13 +177,15 @@ enum JevRequestTriage {
     // Conservative privacy gate: do not send documents, URLs, addresses, account
     // details or obvious sensitive requests to the optional second service.
     static func eligible(_ text: String) -> Bool {
-        guard !text.isEmpty, text.count <= 800 else { return false }
+        !text.isEmpty && text.count <= 800 && !containsSensitiveText(text)
+    }
+    static func containsSensitiveText(_ text: String) -> Bool {
         let patterns = [
             #"(?i)https?://|www\.|[\w.+-]+@[\w.-]+|/Users/|/home/|-----BEGIN|\b(?:sk-|Bearer\s|api[_ -]?key|password|secret|token|medical|diagnosis|bank|passport|ssn|salary|private)\b"#,
             #"密码|密钥|令牌|病历|诊断|银行卡|身份证|护照|薪资|私密|住址"#,
             #"\d{7,}|[A-Za-z0-9_+/=-]{40,}"#,
         ]
-        return !patterns.contains { text.range(of: $0, options: .regularExpression) != nil }
+        return patterns.contains { text.range(of: $0, options: .regularExpression) != nil }
     }
     static func candidates(_ model: AppModel, explicit: UUID?, excluding: UUID? = nil) -> [SideTask] {
         let items = model.sideTasks.filter {
@@ -391,7 +393,7 @@ extension AppModel {
         let triage: RequestTriage?
         do {
             triage = try await JevRequestTriage.judge(
-                text: text, candidates: candidates, explicit: explicit, endpoint: settings.fast, key: key,
+                text: text, candidates: candidates.map(modelTaskDescription), explicit: explicit, endpoint: settings.fast, key: key,
                 api: settings.decisionAPI, preferred: continuationPreference(in: candidates), archived: Set(archivedTaskHistory.map(\.id)))
         } catch {
             Diagnostics.record(

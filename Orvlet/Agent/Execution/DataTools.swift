@@ -176,7 +176,7 @@ extension AgentController {
                 expectations[key] = expected
             }
             var source: [String: Any] = ["url": url, "fields": fields, "card": card, "expectations": expectations]
-            for key in ["recordPagePointer", "updatedAtPointer", "updatedAtFormat", "refreshSeconds"] { source[key] = input[key] }
+            for key in ["recordPagePointer", "updatedAtPointer", "updatedAtFormat", "refreshSeconds", "reminder"] { source[key] = input[key] }
             // read_value declares the identity roles explicitly. Bind a verified
             // identity/qualifier even when another name is an equally valid alias.
             let proofs = requestIntent.requirements.enumerated().compactMap { index, requirement -> [String: Any]? in
@@ -219,6 +219,9 @@ extension AgentController {
             try requireAvailableSource(try spec.requestURL().absoluteString)
             let reading = try await model.apiData.acquire(spec, previous: sourceEvidence) { self.sourceEvidence = $0 }
             recovery.sourceSucceeded()
+            try Task.checkCancellation()
+            guard revision == steeringRevision else { return ["superseded": true] }
+            if let url = reading.state["sourceRequest"], let checked = sourceEvidence?.checked { model.siteMemory.successfulAPI(url, checked: checked) }
             let state = reading.state
             let proofs = input["outcomeEvidence"] as? [[String: Any]] ?? []
             for (index, requirement) in requestIntent.requirements.enumerated() {
@@ -351,7 +354,7 @@ extension AgentController {
                     // The conversation keeps its history; shelf matching describes
                     // the result that now occupies this card after replacement.
                     let metric = spec.displayRows.first { $0.key == spec.card?.primaryKey }?.label
-                    model.sideTasks[i].intent = [title, metric].compactMap { $0 }.joined(separator: " · ")
+                    model.sideTasks[i].intent = [title, metric].compactMap { $0 }.joined(separator: " ")
                 }
                 model.sideTasks[i].dataUpdatedAt = sourceEvidence?.checked ?? Date()
                 model.sideTasks[i].dataIssue = nil
