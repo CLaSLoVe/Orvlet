@@ -16,16 +16,18 @@ Small cards keep side tasks running in the background. Come back when you want t
 
 ## What you can do
 
-- **Timers** — Set one and get back to work. Timers work without a model.
+- **Timers** — Set a timer and glance over to see how much time is left.
 - **Music** — Ask for music, then pause, skip, or check the current track.
 - **Shared bills** — Ask Orvlet to split a bill, then edit the numbers on the card.
 - **Pick up where you left off** — Orvlet remembers earlier decisions in a task and which parts of a website have asked you to sign in.
 
-## Try it
+## First-time setup
 
-1. On macOS 14 or later, unzip the download and drag **Orvlet** to **Applications**.
-2. Open Orvlet, press **⌥ Space**, and type “Set a timer for 25 minutes.”
-3. For bill splitting and other open-ended requests, connect a model in **Settings → Models**. [Model setup](docs/model-connections.md)
+Use an Apple silicon Mac running macOS 14 or later. Unzip the download and drag **Orvlet** to **Applications**.
+
+1. **Configure a model before you start.** Open Orvlet, go to **Settings → Models**, select **GPT**, and enter your OpenAI API key. We tested with `gpt-6.2-sol` as the main model.
+2. Select your model and click **Save changes**. [Setup for other models](docs/model-connections.md)
+3. Press **⌥ Space** and try “Set a timer for 25 minutes” or “Check Apple’s stock price.”
 
 ## Memory and privacy
 
