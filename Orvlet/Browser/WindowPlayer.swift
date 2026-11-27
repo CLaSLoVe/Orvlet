@@ -106,8 +106,10 @@ final class WindowPlayer: NSObject, WKScriptMessageHandler {
 
     func exit() {
         changed(false)
-        let script = "window.__orvletExitWindowPlayer?.()"
-        if let page { Task { _ = try? await page.evaluate(script) } }
-        else { web?.evaluateJavaScript(script, completionHandler: nil) }
+        let fallback = "window.__orvletExitWindowPlayer?.()"
+        if let page {
+            let script = page.host.native ? "document.fullscreenElement && document.exitFullscreen()" : fallback
+            Task { _ = try? await page.evaluate(script) }
+        } else { web?.evaluateJavaScript(fallback, completionHandler: nil) }
     }
 }

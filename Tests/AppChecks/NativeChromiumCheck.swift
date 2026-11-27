@@ -330,12 +330,50 @@ enum NativeChromiumCheck {
             try require(sourceFrame.width > cardFrame.width && model.shellLayout.content.size == NSSize(width: 620, height: 420),
                         "Resizing the source expands the Chromium viewport independently")
             try await snapshot(window, browser: browser, path: "/tmp/orvlet-native-shell.png")
+            try await checkPointer(window, page: page)
             model.selectTask(task.id, expanded: true, preferSource: false)
             try await settle()
             try require(window.frame == cardFrame, "Returning from the native browser restores the original card frame (\(cardFrame) → \(window.frame), detail \(firstCardSize) → \(model.windowSize))")
             model.openTaskFromDoubleClick(task.id)
             try await settle()
             try require(native.view.window === window && window.frame == sourceFrame, "Reopening the source reattaches its native renderer at the remembered size")
+            try await checkPointer(window, page: page)
+            model.settings.reduceMotion = false
+            _ = try await page.evaluate("""
+                const player = document.createElement('section');
+                player.id = 'testPlayer';
+                player.innerHTML = `<style>
+                  #testPlayer { position:relative; width:220px; height:120px }
+                  #testPlayer video { position:absolute; top:18px; left:32px; width:160px; height:90px }
+                  #testPlayer:fullscreen video { inset:0; width:100%; height:100%; object-fit:contain }
+                  #testPlayer button { position:absolute; right:20px; bottom:24px; width:50px; height:48px }
+                </style><video muted></video><button>CC</button>`;
+                document.body.append(player);
+                player.querySelector('button').onclick = e => { window.captionClicked = e.isTrusted };
+                player.requestFullscreen();
+                """, userGesture: true)
+            try await settle()
+            let fills = try await page.evaluate("""
+                (() => {
+                  const p = document.fullscreenElement, v = p?.querySelector('video')?.getBoundingClientRect();
+                  return p?.matches(':fullscreen') && v?.x === 0 && v.y === 0 &&
+                    v.width === innerWidth && v.height === innerHeight;
+                })()
+                """) as? Bool
+            let playerRect = native.view.convert(native.view.bounds, to: nil)
+            try require(fills == true && model.sourceIsFullscreen && window.frame == sourceFrame &&
+                        playerRect == NSRect(origin: .zero, size: sourceFrame.size) &&
+                        !window.styleMask.contains(.fullScreen),
+                        "The site's fullscreen layout centers the video in the existing window")
+            try await checkPointer(window, page: page)
+            try require(try await page.evaluate("window.captionClicked === true") as? Bool == true,
+                        "A native click on the visible bottom player control reaches that control")
+            browser.windowPlayer.exit()
+            try await settle()
+            try require(try await page.evaluate("!document.fullscreenElement && testPlayer.querySelector('video').offsetLeft === 32") as? Bool == true &&
+                        !model.sourceIsFullscreen && window.frame == sourceFrame, "Exiting restores the original player geometry")
+            _ = try await page.evaluate("testPlayer.remove(); true")
+            model.settings.reduceMotion = true
             let stale = NativeChromiumViewport(page: page, browser: native)
             stale.frame = NSRect(x: 0, y: 0, width: 640, height: 420)
             stale.presented = true
@@ -583,6 +621,38 @@ enum NativeChromiumCheck {
                           "A cue leaves paused music paused at its last volume")
         model.dismissReminder(paused)
         return checks
+    }
+
+    private static func checkPointer(_ window: NSWindow, page: SystemBrowserPage) async throws {
+        guard let root = window.contentView, let view = page.nativeBrowser?.view else {
+            throw AppError.message("Missing browser surface for pointer check")
+        }
+        let rect = view.convert(view.bounds, to: nil)
+        for point in [NSPoint(x: 37, y: 67), NSPoint(x: rect.width - 45, y: rect.height - 48)] {
+            _ = try await page.evaluate("""
+                window.orvletProbe = null;
+                document.addEventListener('pointerdown', e => {
+                  if (e.isTrusted) window.orvletProbe = [e.clientX, e.clientY];
+                }, {once:true, capture:true}); true
+                """)
+            let location = NSPoint(x: rect.minX + point.x, y: rect.maxY - point.y)
+            guard let hit = root.hitTest(root.superview?.convert(location, from: nil) ?? location),
+                hit.isDescendant(of: view) else { throw AppError.message("Shell intercepted webpage click at \(point)") }
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+                if type == .leftMouseDown { hit.mouseDown(with: event) } else { hit.mouseUp(with: event) }
+            }
+            var received: [Double] = []
+            for _ in 0..<50 {
+                if let result = try await page.evaluate("window.orvletProbe") as? [Double] { received = result; break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            guard received.count == 2, abs(received[0] - point.x) <= 1, abs(received[1] - point.y) <= 1 else {
+                throw AppError.message("Webpage click at \(point) reached \(received), viewport \(rect)")
+            }
+        }
     }
 
     /// AppKit's cache excludes accelerated Chromium layers. Compose the actual

@@ -194,7 +194,6 @@ struct ContentView: View {
             }
         }
         .frame(width: model.shellLayout.frame.width, height: model.shellLayout.frame.height, alignment: .topLeading)
-        .animation(CalmMotion.layout(reduced: model.motionReduced), value: model.sourceIsFullscreen)
         .background { WindowDragArea() }
         .background {
             ZStack {
@@ -449,7 +448,9 @@ struct DetailContentView: View {
                         .allowsHitTesting(model.visibleHandoff == nil && model.showingWeb && model.selectedSideTask?.id == browser.id)
                         .accessibilityHidden(model.visibleHandoff != nil || !model.showingWeb || model.selectedSideTask?.id != browser.id)
                 }
-            }.offset(x: side, y: top)
+            }
+            .padding(.leading, side)
+            .padding(.top, top)
         }
     }
 

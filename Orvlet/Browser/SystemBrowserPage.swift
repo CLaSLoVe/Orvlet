@@ -85,11 +85,18 @@ final class SystemBrowserPage: ObservableObject {
                 },true);
                 """])
             _ = try await connection.call("Runtime.addBinding", ["name": "__orvletWindowPlayerChanged", "executionContextName": "orvlet-input"])
-            _ = try await connection.call("Page.addScriptToEvaluateOnNewDocument", ["worldName": "orvlet-input", "source": WindowPlayer.observer])
-            _ = try await connection.call("Page.addScriptToEvaluateOnNewDocument", ["source": WindowPlayer.script])
             if host.native {
+                // The embedded Alloy view keeps DOM fullscreen inside its existing window.
+                _ = try await connection.call("Page.addScriptToEvaluateOnNewDocument", ["worldName": "orvlet-input", "source": """
+                    if (window === top) document.addEventListener('fullscreenchange', () => {
+                      window.__orvletWindowPlayerChanged(String(!!document.fullscreenElement));
+                    }, true);
+                    """])
                 _ = try await connection.call("Page.addScriptToEvaluateOnNewDocument",
                     ["source": AdBlocker.helper(enabled: false), "runImmediately": true])
+            } else {
+                _ = try await connection.call("Page.addScriptToEvaluateOnNewDocument", ["worldName": "orvlet-input", "source": WindowPlayer.observer])
+                _ = try await connection.call("Page.addScriptToEvaluateOnNewDocument", ["source": WindowPlayer.script])
             }
             try await updateGate()
             try await resizeNow()
